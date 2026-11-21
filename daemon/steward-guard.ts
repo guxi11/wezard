@@ -19,7 +19,7 @@ const shellReads = (cmd: string): boolean =>
 
 // Bash 也能亲手干活: Edit/Write 被拦之后模型会绕到 sed -i / 重定向 / tee。这类判 hands,
 // 不算 look —— 否则每轮 budget 次机会足够它把文件改完。`>&2` / `2>&1` / `2>/dev/null`
-// 不写工作区, 放行; 引号里的 "-i" 可能误伤, 管家场景下宁严勿宽 (deny 只叫他去 dispatch)。
+// 不写工作区, 放行; 引号里的 "-i" 可能误伤, 管家场景下宁严勿宽 (deny 只叫他去 delegate)。
 const REDIRECT = /(?:^|[\s;|&(])\d*>>?\s*([^\s&|]+)/g;
 const bashWrites = (command: string): boolean => {
   if (/\bsed\b[^|;&]*\s-\w*i/.test(command)) return true;
@@ -34,7 +34,7 @@ type Kind = "free" | "hands" | "look";
 
 // ── REPL (CodeBuddy PTC 模式) ──────────────────────────────────────────
 // CodeBuddy 把一切工具调用 (Read / Bash / MCP) 包进 REPL 这一个工具的 code 参数里,
-// 只按 toolName 判会把管家的读和 dispatch 全记成自查看吃配额; 配额一满连 dispatch
+// 只按 toolName 判会把管家的读和 delegate 全记成自查看吃配额; 配额一满连 delegate
 // 也被拒 —— 管家唯一合法的出路被自己人堵死 (死锁)。所以 REPL 下钻到内层调用名判:
 // 读 / 派活 (mcp_wezard.*) 放行, 写文件 / 开子代理 / 写文件的 Bash 仍按原规则拦。
 /** REPL 自带的元调用 (工具发现); ToolSearch 同级, 不碰工作区。 */

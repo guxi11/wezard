@@ -43,7 +43,7 @@ t("Bash 非读命令吃配额, 超额拒", () => {
 });
 t("Read / wezard MCP 顶层名永远放行", () => {
   assert.equal(probe("Read", { file_path: "/a" }), undefined);
-  assert.equal(probe("mcp_wezard_dispatch", { task: "x" }), undefined);
+  assert.equal(probe("mcp_wezard_delegate", { task: "x" }), undefined);
 });
 t("Write / Agent 顶层名直接拒", () => {
   assert.ok(probe("Write", { file_path: "/a", content: "x" }));
@@ -67,7 +67,7 @@ t("REPL 里的 wezard 编排调用永远放行 —— 配额耗尽后依然 (死
   for (let i = 0; i < 4; i++) assert.equal(guard(look), undefined);
   assert.ok(guard(look), "第 5 条 look 应被配额拒");
   for (const code of [
-    'return await mcp_wezard.dispatch({ task: "加 skill 到 prog 模式" });',
+    'return await mcp_wezard.delegate({ task: "加 skill 到 prog 模式" });',
     'await mcp_wezard.tell_peer({ name: ".a", text: "hi" }); return 1;',
     'const j = await mcp_wezard.open_job({ title: "x" }); return j;',
     'return await mcp_wezard.wizard_roster({ query: "x" });',
@@ -90,10 +90,10 @@ t("REPL 开子代理 → 拒", () => {
 t("REPL 又读又写 → 按写拒", () => {
   assert.ok(probe("REPL", repl('await Read({ file_path: "/a" }); await Write({ file_path: "/b", content: "x" }); return 1;')));
 });
-t("REPL 非读 Bash 吃配额, 超额拒且理由指向 dispatch", () => {
+t("REPL 非读 Bash 吃配额, 超额拒且理由指向 delegate", () => {
   const rs = runN(5, "REPL", repl('return await Bash({ command: "npm install" });'));
   assert.equal(rs[3], undefined);
-  assert.ok(rs[4]?.includes("dispatch"));
+  assert.ok(rs[4]?.includes("delegate"));
 });
 t("REPL 纯计算 (无可识别调用) 仍按 look 吃配额", () => {
   const rs = runN(5, "REPL", repl("return 1 + 1;"));

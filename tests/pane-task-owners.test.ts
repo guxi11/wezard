@@ -8,8 +8,8 @@ import { loadWizardStore } from "../daemon/wizard.js";
 // Use the actual sweep's owner selection with the real persisted wizard store.
 // Task files keep target keys, which must continue to work after a rename.
 const source = readFileSync("daemon/index.ts", "utf8");
-const start = source.indexOf("      const taskOwners = new Set(");
-const end = source.indexOf("      const pendingSids", start);
+const start = source.indexOf("    const taskOwners = new Set(");
+const end = source.indexOf("    const pendingSids", start);
 assert.ok(start > 0 && end > start);
 const select = new Function("tasks", "wizardStore", ts.transpileModule(
   source.slice(start, end) + "\nreturn taskOwners;",

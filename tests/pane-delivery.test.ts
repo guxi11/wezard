@@ -126,7 +126,7 @@ const env = {
   // injectText 的注入前判定已换成三态 `probePane` (unknown 不再当 pane 死了去重生)。
   probePane: async () => ({ state: "session" }),
   cfg: {}, log: { child: () => ({}) }, noticeSuffixFor: () => { notices++; return " notice"; },
-  rememberInject() {}, pushSeal: (_a: unknown, seal: unknown) => seals.push(seal), sealKeys: (s: string) => [s],
+  rememberInject() {}, touch: () => {}, pushSeal: (_a: unknown, seal: unknown) => seals.push(seal), sealKeys: (s: string) => [s],
   idleVerdict: () => idle, idleNow: async () => idle, isClearCommand: () => false, armSilentForkRebind() {}, inject,
 };
 const injectText = new Function(...Object.keys(env), peerCode)(...Object.values(env));
