@@ -8,7 +8,7 @@
 //   node scripts/shot.mjs --url http://127.0.0.1:8080/x.html --full --out /tmp/x.png
 //
 // 选项: --role <名字|target|chat:…>  --room <roomId|空串> (拼进 URL 的 room=; 缺省不带)  --url <完整 URL> (与 --role 二选一)  --mobile  --full (整页)
-//       --click <css> (截图前先点它, 可重复; 如切到关系图)  --selector <css> (只截该元素)  --wait-for <css>  --wait <ms, 默认 1500>  --scale <dsf, 默认 1>
+//       --scroll <css> (截图前把它滚到视口中间; 如 detail 里某条消息 '.rv-msg[data-id="…"]')  --click <css> (截图前先点它, 可重复; 如切到关系图)  --selector <css> (只截该元素)  --wait-for <css>  --wait <ms, 默认 1500>  --scale <dsf, 默认 1>
 //       --base <http://host:port> (默认本机守护进程回环; 想看 svr 就传它)  --out <png 路径>
 // 输出: 末行打印 png 的绝对路径 (默认 ~/.wezard/shots/)。送图给人: send_file 发进群。
 //
@@ -37,7 +37,7 @@ const { values: o } = parseArgs({
     role: { type: "string" }, room: { type: "string" }, url: { type: "string" }, base: { type: "string" },
     mobile: { type: "boolean", default: false }, full: { type: "boolean", default: false },
     selector: { type: "string" }, click: { type: "string", multiple: true }, "wait-for": { type: "string" }, wait: { type: "string", default: "1500" },
-    scale: { type: "string", default: "1" }, out: { type: "string" }, help: { type: "boolean", short: "h", default: false },
+    scale: { type: "string", default: "1" }, scroll: { type: "string" }, out: { type: "string" }, help: { type: "boolean", short: "h", default: false },
   },
 });
 if (o.help || (!o.role && !o.url)) die("需要 --role <名字|target> 或 --url <URL>; 详见脚本头部注释", o.help ? 0 : 2);
@@ -142,6 +142,7 @@ try {
   if (o["wait-for"]) await page.waitForSelector(o["wait-for"], { timeout: 20_000 });
   for (const c of o.click ?? []) { await page.locator(c).first().click({ timeout: 10_000 }); await page.waitForTimeout(500); }
   await page.waitForTimeout(Math.max(0, Number(o.wait) || 0));
+  if (o.scroll) { await page.locator(o.scroll).first().evaluate((e) => e.scrollIntoView({ block: "center" })); await page.waitForTimeout(400); }
   if (o.selector) await page.locator(o.selector).first().screenshot({ path: outPath });
   else await page.screenshot({ path: outPath, fullPage: o.full });
   if (errors.length) console.error(`shot: 页面有 ${errors.length} 个 JS 报错, 首条: ${errors[0].slice(0, 200)}`);
