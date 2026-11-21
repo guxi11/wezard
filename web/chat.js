@@ -1000,7 +1000,7 @@
   var ST_CLS = { done: 'ok', passed: 'ok', canceled: 'warn', need: 'ask', progress: 'go', error: 'bad' };
   var KIND_TAG = { ask: '问', task: '派', reply: '答', file: '文件', 'join-req': '申请入群', system: '系统', trigger: '定时' };
 
-  // 右栏头只管「这是哪个窗口」(选中 room = room 名, 否则「所有 room」); 属于这个 role 的入口 (宪章 / 会话) 都在左上名片。
+  // 右栏头只管「这是哪个窗口」(选中 room = room 名, 否则「<role 名> 的全部聊天记录」); 属于这个 role 的入口 (宪章 / 会话) 都在左上名片。
   // 取消选中没有按钮: 再点一次选中的 room (列表 / 图节点 / 图上的边)。
   var header = function (title, sub, acts) {
     chWho.innerHTML = '<div class="rv-ttl">' + title + '</div>' + (sub ? '<div class="rv-sub">' + sub + '</div>' : '');
@@ -1785,8 +1785,8 @@
     var plan = S.pane === 'plan';
     // 顶栏只有标题与视角切换: 模型 / 在线 / 职责都属于这个 role, 在左上名片 (模型在底部用量条上)。
     // 日程是同一个窗口的另一面 —— 标题改成「谁的日程」, 右上角回对话。
-    // 没选中 room 时标题是中性的「所有 room」(名片已经说了是谁): 这一页 = 这个 role 在所有 room 里的记录。
-    header(plan ? '<span class="rv-lb">📅</span> 日程与计划' : '所有 room',
+    // 没选中 room 时标题 =「<role 名> 的全部聊天记录」: 这一页 = 这个 role 在所有 room 里的记录 (不写「视角」)。
+    header(plan ? '<span class="rv-lb">📅</span> 日程与计划' : esc(roleNodeName()) + ' 的全部聊天记录',
       plan ? esc(roleNodeName()) + ' 名下的定时任务与计划' : '',
       plan ? '<button class="rv-act" id="rv-back">‹ 对话</button>' : '');
     rolebar();

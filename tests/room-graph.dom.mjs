@@ -262,12 +262,12 @@ try {
   await page.click(".rv-open");
   await page.waitForSelector(".rv-box .turn-group", { timeout: 5000 });
 
-  // 点 wizard 节点 (bob 是 G 的成员): 视角换成 bob, room 选中保留; 再点 ✕ 取消选中 → 看 bob 在所有 room 的记录 (只看与我相关)。
+  // 点 wizard 节点 (bob 是 G 的成员): 视角换成 bob, room 选中保留; 再点 ✕ 取消选中 → 看 bob 的全部聊天记录 (只看与我相关)。
   await page.click('.rv-person[data-node="chat:wrG#worker"]');
   await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "bob", null, { timeout: 5000 });
   assert.equal(await page.evaluate(() => (document.querySelector(".rv-ttl") || {}).textContent), "群G", "成员间换视角: 右栏仍是这个 room");
   await page.click('.rv-room[data-room="' + G + '"]');   // 再点选中的 room 节点 = 取消选中
-  await page.waitForFunction(() => (document.querySelector(".rv-ttl") || {}).textContent === "所有 room", null, { timeout: 5000 });
+  await page.waitForFunction(() => (document.querySelector(".rv-ttl") || {}).textContent === "bob 的全部聊天记录", null, { timeout: 5000 });
   // 左栏顶上必须是「这个人」: 名字 / 状态 / 职责 / 宪章入口 —— room 图不是名片的替代品。
   const card = await page.evaluate(() => ({
     name: ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim(),
@@ -287,7 +287,7 @@ try {
     btns: document.querySelectorAll("#ch-acts button").length,
     ttl: (document.querySelector(".rv-ttl") || {}).textContent,
   }));
-  assert.equal(side.ttl, "所有 room", "未选中 room: 标题中性, 不重复 role 名 (名片已表达)");
+  assert.equal(side.ttl, "bob 的全部聊天记录", "未选中 room: 标题 =「<role 名> 的全部聊天记录」(不写视角)");
   assert.equal(side.btns, 0, "右栏头没有「只看与我相关 / 全部消息」「取消选中」按钮");
   assert.equal(side.gside, false, "看 wizard 时成员列收起");
   assert.equal(side.sess, true, "全部会话 (session 切换) 在左上名片里");
@@ -322,7 +322,7 @@ try {
   const cardName = () => page.evaluate(() => ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim());
   const meAuthors = () => page.evaluate(() => [...document.querySelectorAll("#thread-in .rv-msg.me")].map((m) => m.getAttribute("data-id")));
   const ciOn = () => page.evaluate(() => [...document.querySelectorAll(".rv-list .ci.on")].map((e) => e.getAttribute("data-room")));
-  // 头 = 选中 room 时是 room 名, 未选中时是中性的「所有 room」; 再没有「✕ 取消选中」/「只看与我相关」按钮。
+  // 头 = 选中 room 时是 room 名, 未选中时是「<role 名> 的全部聊天记录」; 再没有「✕ 取消选中」/「只看与我相关」按钮。
   const ttlIs = (t) => page.waitForFunction((x) => (document.querySelector(".rv-ttl") || {}).textContent === x, t, { timeout: 5000 });
   const viewTab = (v) => page.evaluate((x) => !!document.querySelector('[data-side="' + x + '"]'), v);
   const goListView = async () => { if (await viewTab("list")) await page.click('[data-side="list"]'); await page.waitForSelector(".rv-list .ci", { timeout: 5000 }); };
@@ -364,13 +364,13 @@ try {
   assert.equal(g1.roomOn, true, "room 节点 .on");
   assert.equal(g1.legend, true, "图例有「视角」一项");
   await page.dispatchEvent('line.rv-hit[data-edge="m|' + G + '|p:' + TA + '"]', "click");
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   const g2a = await page.evaluate(() => ({ sel: document.querySelectorAll("line.rv-edge.sel").length, on: document.querySelectorAll(".rv-room.on, line.rv-edge.on").length, ttl: document.querySelector(".rv-ttl").textContent,
     pov: document.querySelectorAll(".rv-pov").length }));
   assert.equal(q().get("room"), "", "取消选中: URL 写 room= 空串 (刷新不会被落点重新选中)"); assert.equal(q().get("role"), TA);
   assert.equal(q().has("room"), true);
   assert.equal(g2a.sel + g2a.on, 0, "取消选中后图上没有 on / sel: " + JSON.stringify(g2a));
-  assert.equal(g2a.ttl, "所有 room", "detail 换成 A 的全部记录 (标题中性)");
+  assert.equal(g2a.ttl, "alice 的全部聊天记录", "detail 换成 A 的全部记录");
   assert.equal(g2a.pov, 1, "视角标记仍在 (role 没变)");
   assert.equal(await cardName(), "alice", "取消选中不换名片");
   await page.click('.rv-room[data-room="' + G + '"]');
@@ -379,7 +379,7 @@ try {
   assert.equal(q().get("room"), G, "点 room 节点重新选中");
   // 再点一次选中的 room 节点 = 取消选中 (toggle)
   await page.click('.rv-room[data-room="' + G + '"]');
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   await page.click('.rv-room[data-room="' + G + '"]');
   await ttlIs("群G");
 
@@ -397,7 +397,7 @@ try {
     document.querySelector("#thread-in").appendChild(el);
   }, ["chat:wrNobody#x", "路人"]);
   await page.click("#probe-nonmember");
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   assert.equal(q().get("room"), "", "点非成员: room 选中清空"); assert.equal((await ciOn()).length, 0, "列表无高亮");
   await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
   await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
@@ -445,12 +445,12 @@ try {
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
   await page.waitForFunction((id) => document.querySelector('.rv-list .ci.on[data-room="' + id + '"]'), G, { timeout: 5000 });
   await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=", { waitUntil: "load" });
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   assert.deepEqual(await ciOn(), [], "room= 空: 明确不选, 不被落点重新选中");
   assert.equal(q().get("room"), "");
   globalThis.__landing = "chat:wrGone";   // 不存在的 room: 不选
   await page.goto(base + "/role?id=t-ticket&role=" + enc(TA), { waitUntil: "load" });
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   assert.deepEqual(await ciOn(), [], "落点 room 不存在: 不选");
   globalThis.__landing = "";
 
@@ -613,7 +613,7 @@ try {
 
   // 手机: room detail 点返回 (popstate 的 list 格) 后, URL 要跟着当前选中走, 不是压栈时的旧 URL。
   await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=", { waitUntil: "load" });
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   await page.click("#tb-back");   // history.back → 回列表
   await page.waitForFunction(() => !document.querySelector("#app").classList.contains("reading"), null, { timeout: 5000 });
   await page.click('.rv-list .ci[data-room="' + G + '"]');
@@ -625,7 +625,7 @@ try {
   assert.equal(q().get("room"), G, "URL 与选中态一致 (复制 / 刷新不丢选中): " + page.url());
   // 手机上取消选中的唯一入口: 列表里再点选中的 room = 取消选中并进入 detail (role 的全部记录), 不再是「回 detail 但保持选中」。
   await page.click('.rv-list .ci[data-room="' + G + '"]');
-  await ttlIs("所有 room");
+  await ttlIs("alice 的全部聊天记录");
   assert.equal(await page.evaluate(() => document.querySelector("#app").classList.contains("reading")), true, "点选中项: 进入 detail");
   assert.equal(q().get("room"), "", "取消选中: URL room= 空");
   assert.deepEqual(await ciOn(), [], "列表无高亮");
