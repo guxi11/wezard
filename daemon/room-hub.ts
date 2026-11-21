@@ -20,7 +20,8 @@ import {
 import type { RoomStore } from "./rooms.js";
 import { sleep } from "../shared/std.js";
 
-export type PasteResult = "ok" | "uncertain" | "failed";
+/** gone = 目标没有任何会话绑定 (stop_wizard end / /kill 丢掉了它): 重试也贴不进去, 要有人重生或改派。 */
+export type PasteResult = "ok" | "uncertain" | "failed" | "gone";
 
 export interface HubPorts {
   store: RoomStore;
@@ -65,6 +66,7 @@ export const createRoomHub = (p: HubPorts) => {
   const uncertain = new Map<string, Set<string>>(); // uid → 上次不确定投递过的 room
   const reminded = new Set<string>();              // duty key: 已提醒过 (轮终贴提醒 / Stop hook 拦一次)
   const stopChecked = new Map<string, number>();   // uid → 它的 Stop hook 最近一次来问的时刻
+  const failedAs = new Map<string, PasteResult>(); // uid → 上次投递失败的结果 (只在状态变化时打 warn, 30s 重踢不刷屏)
   let running: Promise<void> | undefined;
   let again = false;
 
@@ -234,6 +236,32 @@ export const createRoomHub = (p: HubPorts) => {
     } else if (res === "uncertain") {
       // 不推游标: 下次重投 (同一批 msg id), 标「可能已读过」。
       uncertain.set(uid, new Set(seen.map((x) => x.room)));
+    }
+    if (res === "ok") failedAs.delete(uid);
+    else if (res !== "uncertain" && failedAs.get(uid) !== res) {
+      failedAs.set(uid, res);
+      p.log?.warn({ uid, target: w.target, result: res, msgs }, "room: 唤醒投递失败, 游标不动, 30s 后重试");
+    }
+    if (res === "gone") reportGone(uid, rooms);
+  };
+
+  /** 目标没有会话 (被 stop_wizard 结束): 它名下被这批行唤醒的 duty 各给提问者写一条系统行 ——
+   *  不然 chat_ask 只落在账本里, 提问方以为对方在做, 泵每 30s 静默重试到天荒地老。
+   *  游标不推: 之后同名 spawn_wizard 重生的它照样读得到这些行。账本里有即不重复 (同 escalate)。 */
+  const reportGone = (uid: string, rooms: Map<string, MsgRow[]>): void => {
+    const who: Who = { kind: "wizard", id: uid };
+    for (const [room, rows] of rooms) {
+      const s = state(room);
+      if (!s) continue;
+      for (const d of openDuties(s)) {
+        if (!sameWho(holderOf(s, d), who) || !rows.some((r) => r.id === d.msg || (r.re ?? []).includes(d.msg))) continue;
+        if (s.msgs.some((m) => m.sys === "undelivered" && (m.re ?? []).includes(d.msg) && m.text.includes(uid))) continue;
+        append(room, {
+          author: DAEMON, kind: "system", origin: "daemon", sys: "undelivered", re: [d.msg],
+          ...(d.asker.kind !== "daemon" ? { to: [d.asker] } : {}),
+          text: "[wezard] " + p.nameOf(who) + " 没有会话 (已被结束), " + d.msg + " 投不进去 (" + uid + "): 用 spawn_wizard 同名重生它, 或改派别人",
+        });
+      }
     }
   };
 

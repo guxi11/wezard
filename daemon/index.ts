@@ -1272,7 +1272,7 @@ const main = async (): Promise<void> => {
       paste: async (target, text) => {
         const r = await m.injectText(target, text, { requireIdle: true });
         if (r.ok) roomActivityTouch(target); // 注入成功 = 该 wizard 有新事件, 看门狗的 stale 窗口重置
-        return r.ok ? "ok" : r.uncertain ? "uncertain" : "failed";
+        return r.ok ? "ok" : r.uncertain ? "uncertain" : r.gone ? "gone" : "failed";
       },
     });
     // boot 对账: 停机期间 / 旧版本落下的 after 欠账 (前置已 done、被点名者没被叫过) 补一条 trigger 行。

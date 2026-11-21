@@ -19,7 +19,7 @@
 
 ## 测试基线 (2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
-**108 / 112 通过** (2026-11-22 删 peers 死代码后复跑; 早先 102 / 106)。失败 4 个: `codex-hooks` / `codex-session` (本机没装 `codex`, spawn ENOENT, 环境问题) · `codex-backend` (断言 `'/opt/codex'` 实得 `'codex'`, 待查) · `wizard-stream` (「W-2 多出 room 里的其他行」, 疑为 `762482b` 删掉「全部消息」all 链路后断言没跟上, 属 rolepage detail 线)。每次改动后对照, 通过数不能减少。
+**109 / 113 通过** (2026-11-22 加 room-gone 后复跑; 早先 108 / 112、102 / 106)。失败 4 个: `codex-hooks` / `codex-session` (本机没装 `codex`, spawn ENOENT, 环境问题) · `codex-backend` (断言 `'/opt/codex'` 实得 `'codex'`, 待查) · `wizard-stream` (「W-2 多出 room 里的其他行」, 疑为 `762482b` 删掉「全部消息」all 链路后断言没跟上, 属 rolepage detail 线)。每次改动后对照, 通过数不能减少。
 
 ## 优先级清单
 
@@ -29,6 +29,8 @@
 - [ ] 测试基线里的真失败: `codex-backend` 断言 (是否真回归) · `wizard-stream` W-2 断言 (rolepage detail 线, 先问 `IrisIrwin` 是否在它手上)。
 
 ### P1 — 死代码 / 包体 / 可靠性
+- [x] **chat_ask 给已结束 (stop_wizard end) 的 wizard 静默丢失**: hub 认 `gone` → 给提问者写 `undelivered` 系统行; 其他失败打 warn。(本轮)
+- [ ] **跟进: 被结束的 wizard 被唤醒时要不要自动白板重生** —— `stop_wizard` 描述写的是「之后再找它是一个空白会话」, 人那边 `/kill` 后下条消息也会自动重开, 但 room 唤醒没有这条路 (`injectText` 对无绑定目标直接 gone)。自动重生要定: 模型/档位与 cwd 从哪来 (绑定随 /kill 一起删了)、内存闸、要不要先问 parent。改的是语义 → 先写方案报 admin。
 - [x] **vendor.js 去掉无人使用的 d3** (~280KB 未压缩, 每次冷加载 rolepage 都要下): `shared/chat-render.ts` 不再拼 `d3.min.js`, 删 `web/d3.min.js`。关系图早已换成自写的 stress majorization。(本轮)
 - [x] **`daemon/peers.ts` 回执时代遗留删净** (~260 行): `parseClosing` 一族、`addressedResults`、`replyClosedBefore` / `openingTurn`、`renderTask/Peer/ReceiptEnvelope`、`tailTurns`; `tsc --noUnusedLocals` 逐轮确认, 测试里只测回执措辞的一条断言同删。(本轮)
 - [ ] `shared/turn-state.ts` `TurnState` / `WorldFacts.inflight` 恒空 —— 收成类型或删。
@@ -61,6 +63,7 @@
 | 2026-11-22 | 研究: 什么时候拉 room / room 里怎么说话 (admin 之问), 账本实测 adhoc 0 / dm 43 / 64% dm 消息提到第三方 | 见 git log |
 | 2026-11-22 | room_invite/room_approve `history` 参数 (none/N/from:id/all); dm 显示统一 (多人列全员); ensureDmRoom 补回 / 混入第三人改落 {A,B} adhoc。coder QuinnQuincy, 白板 reviewer RoseReed 通过。遗留: join-req 路径不校验 history; rejoin 不写 seen 未细查; 多个 {A,B} adhoc 取最近活动会合流 | `d986e7a` |
 | 2026-11-22 | `daemon/peers.ts` 删回执时代死代码 ~260 行 (我自己做: 活着的 wizard 已 4 个, 不起新人) | 见 git log |
+| 2026-11-22 | room hub: 投给已结束 wizard 的 duty 不再静默丢失 (`gone` → `undelivered` 系统行给提问者; 其他失败打 warn)。起因: IrisIrwin 被 /kill 后两次派活都没投进去 | 见 git log |
 
 ## 已知坑
 
