@@ -395,7 +395,7 @@
           d.hit = document.createElementNS(SVGNS, 'line');
           d.hit.setAttribute('class', 'rv-hit');
           d.hit.setAttribute('data-link', l.room);
-          d.hit.onclick = function () { if (S.gmoved) return; loadRoom(l.room); };
+          d.hit.onclick = function () { if (S.gmoved) return; goRoom(l.room); };
           layer('rv-ghits').appendChild(d.hit);
         }
         dom.edges[l.key] = d;
@@ -408,8 +408,8 @@
       var e = dom.nodes[n.id];
       if (!e) {
         e = document.createElementNS(SVGNS, 'g');
-        if (n.isRoom) { e.setAttribute('data-room', n.ref.id); e.onclick = function () { if (S.gmoved) return; loadRoom(n.ref.id); }; }
-        else { e.setAttribute('data-node', n.ref.target); e.onclick = function () { if (S.gmoved) return; loadWizard(n.ref.target); }; }
+        if (n.isRoom) { e.setAttribute('data-room', n.ref.id); e.onclick = function () { if (S.gmoved) return; goRoom(n.ref.id); }; }
+        else { e.setAttribute('data-node', n.ref.target); e.onclick = function () { if (S.gmoved) return; goWizard(n.ref.target); }; }
         layer('rv-gnodes').appendChild(e);
         dom.nodes[n.id] = e;
       }
@@ -504,7 +504,7 @@
     var z = S.gzoom || 1;
     var vw = Math.max(80, maxX - minX + pad * 2) / z, vh = Math.max(80, maxY - minY + pad * 2) / z;
     var width = Math.max(240, (convsEl.clientWidth || 332) - 12);
-    var height = Math.max(260, (convsEl.clientHeight || 620) - 34);
+    var height = Math.max(260, (convsEl.clientHeight || 620) - 62);
     var aspect = width / height;
     if (vw / vh < aspect) vw = vh * aspect; else vh = vw / aspect;
     return { box: [cxm - vw / 2, cym - vh / 2, vw, vh], width: width, height: height };
@@ -531,6 +531,22 @@
     svg.setAttribute('width', vb.width);
     svg.setAttribute('height', vb.height);
     svg.setAttribute('viewBox', vb.box.map(function (v) { return v.toFixed(1); }).join(' '));
+  };
+  // 面板尺寸变了 (窗口缩放 / 旋转屏 / 左栏宽度变): svg 跟着撑满, 视野保持「每像素多少世界单位」不变、
+  // 中心不动 —— 节点大小和位置原样, 只是看得见的范围随面板变大变小; 力模拟的墙 (hw/hh) 已按新尺寸重算,
+  // 补一点热量让整团向新的中心松弛, 不重排、不重建。
+  var fitToPanel = function (svg, g) {
+    var vb = viewBoxOf(g), cur = svg.viewBox.baseVal;
+    var ow = parseFloat(svg.getAttribute('width')) || 0, oh = parseFloat(svg.getAttribute('height')) || 0;
+    if (Math.abs(ow - vb.width) < 1 && Math.abs(oh - vb.height) < 1) return false;
+    var upp = ow && cur.width ? cur.width / ow : 0;
+    svg.setAttribute('width', vb.width);
+    svg.setAttribute('height', vb.height);
+    if (!upp) { setViewBox(svg, g); return true; }
+    var w = vb.width * upp, h = vb.height * upp, cx = cur.x + cur.width / 2, cy = cur.y + cur.height / 2;
+    svg.setAttribute('viewBox', [cx - w / 2, cy - h / 2, w, h].map(function (v) { return v.toFixed(1); }).join(' '));
+    gKick(0.2);
+    return true;
   };
   var GRAPH_LEGEND = '<div class="rv-legend">' +
     '<span><i class="lg wz working"></i>工作中</span><span><i class="lg wz idle"></i>空闲</span>' +
@@ -575,7 +591,7 @@
     }
     drawPos(g);
     if (first || S.gfit) { setViewBox(svg, g); S.gfit = false; }
-    else { svg.setAttribute('width', viewBoxOf(g).width); svg.setAttribute('height', viewBoxOf(g).height); }
+    else fitToPanel(svg, g);
     if (first) gKick(0.3);
     else if (rec.changed) gKick(0.35);
   };
@@ -666,7 +682,7 @@
     convsEl._html = html; convsEl.innerHTML = html;
     convsEl.scrollTop = top;
     bindHead();
-    convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { loadRoom(e.getAttribute('data-room')); }; });
+    convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { goRoom(e.getAttribute('data-room')); }; });
   };
   // 列表不需要图那么宽: 左栏收窄, 把宽度还给 chat detail (图仍占半屏, 力导向要地方)。
   var renderSide = function () {
@@ -715,7 +731,7 @@
       : '';
     gside.innerHTML = '<div class="gs-head">成员 <b>' + D.members.length + '</b></div>' + duties +
       '<div class="gs-list">' + rows + '</div>';
-    gside.querySelectorAll('[data-node]').forEach(function (el) { el.onclick = function () { loadWizard(el.getAttribute('data-node')); }; });
+    gside.querySelectorAll('[data-node]').forEach(function (el) { el.onclick = function () { goWizard(el.getAttribute('data-node')); }; });
   };
   // 一条消息 = 气泡外的一行头 (谁 → 谁 · 哪个 room · 状态 · 时刻) + 一颗气泡。
   // 头在外面是历史方案: 气泡只装正文, 身份与路由不跟着正文一起被染色。
@@ -911,7 +927,7 @@
   var fmtHM = function (ts) { var x = new Date(ts); return pad(x.getHours()) + ':' + pad(x.getMinutes()); };
   var roleNodeName = function () { return (D.wizard && D.wizard.name) || (nodeOf(ROLE) || {}).name || ROLE; };
   var canOpen = function (n) { return !!n; };
-  var openNode = function (target) { if (target) loadWizard(target); };
+  var openNode = function (target) { if (target) goWizard(target); };
   // 两处数据源都认: 名册快照 (world, 每 6s 一次) 与这一页刚取的名片 (api/wizard)。
   // 同一份 plan 取 revision 大的那版 —— 免得晚到的旧回包把新状态盖回去。
   var plansForRole = function () {
@@ -1469,6 +1485,15 @@
       return true;
     });
   };
+  // 窄屏 (≤760px) 是「列表 / 图」与「chat detail」二选一的两页: CSS 默认只显示 .side, 加了 .app.reading 才换成 .main。
+  // 这个 class 曾经没有任何代码会加 —— 窄屏点进聊天后 detail 一直被 display:none, 只看得到列表 / 图。
+  // 人主动点开 (列表 / 图 / 搜索 / 成员 / 深链) 才进 detail; 定时刷新直接调 loadRoom / loadWizard, 不翻页。
+  var appEl = $('#app');
+  var setReading = function (on) { if (appEl) appEl.classList.toggle('reading', !!on); };
+  var goRoom = function (id, limit) { setReading(true); return loadRoom(id, limit); };
+  var goWizard = function (role, keepScroll) { setReading(true); return loadWizard(role, keepScroll); };
+  var tbBack = $('#tb-back');
+  if (tbBack) tbBack.onclick = function () { setReading(false); };
   var olderPage = function () {
     if (!D.earlier) return;
     var before = D.earlier, prevH = thread.scrollHeight, prevTop = thread.scrollTop;
@@ -1721,9 +1746,9 @@
     // 行尾 chevron 只管展开原文; 提示行 (<summary>) 上的名字 / 整行点了换到那个 wizard, 不顺带展开。
     if (t.closest('.ho-chev')) return;
     var g = t.closest('[data-node]');
-    if (g) { var id = g.getAttribute('data-node'); if (id) { if (t.closest('summary')) e.preventDefault(); loadWizard(id); return; } }
+    if (g) { var id = g.getAttribute('data-node'); if (id) { if (t.closest('summary')) e.preventDefault(); goWizard(id); return; } }
     var j = t.closest('[data-jump-room]');
-    if (j) { loadRoom(j.getAttribute('data-jump-room')); return; }
+    if (j) { goRoom(j.getAttribute('data-jump-room')); return; }
     var rb = t.closest('[data-raw-toggle]');
     if (rb) { var ra = rb.closest('.rv-msg'); if (ra) { ra.classList.toggle('raw'); rb.classList.toggle('on'); } return; }
     var b = t.closest('.rv-open');
@@ -1748,8 +1773,16 @@
   var rzTimer = 0;
   window.addEventListener('resize', function () {
     clearTimeout(rzTimer);
-    rzTimer = setTimeout(function () { if (W.rooms.length && S.view === 'graph') renderGraph(); }, 200);
+    rzTimer = setTimeout(function () { if (W.rooms.length && S.view === 'graph') renderGraph(); }, 120);
   });
+  // 窗口之外的尺寸变化 (旋转屏 / 左栏宽度随视图切换 / 移动端地址栏收放) 也要跟: 盯着图所在的面板本身。
+  if (window.ResizeObserver) {
+    var roTimer = 0;
+    new ResizeObserver(function () {
+      clearTimeout(roTimer);
+      roTimer = setTimeout(function () { if (S.view === 'graph' && S.gdom && S.g) renderGraph(); }, 80);
+    }).observe(convsEl);
+  }
   setInterval(function () { if (!document.hidden) loadWorld(); }, WORLD_MS);
 
   // ══ 搜索 (⌘K / Ctrl+K) ═══════════════════════════════════════════════
@@ -1793,7 +1826,7 @@
       html: '<span class="av">' + esc(KIND_IC[r.kind] || '·') + '</span><span class="b"><span class="l1">' +
         '<span class="nm chat">' + hl(r.name, q) + '</span>' + groupTag(r.group) + skTs(r.lastAt) + '</span>' +
         (r.preview ? '<span class="pv">' + esc(r.preview) + '</span>' : '') + '</span>',
-      go: function () { loadRoom(r.id); },
+      go: function () { goRoom(r.id); },
     };
   };
   var memberItem = function (m, q) {
@@ -1803,7 +1836,7 @@
       html: '<span class="av">' + (human ? '👤' : esc(nodeOf(nodeIdOf(m.who)).label || '🧙‍♂️')) + '</span><span class="b"><span class="l1">' +
         '<span class="nm ' + (human ? 'human' : 'wizard') + '">' + hl(m.name, q) + '</span><span class="k">切到视角</span></span>' +
         '<span class="pv">在 ' + m.rooms + ' 个 room' + (m.lastAt ? ' · 最近 ' + esc(fmtAgo(m.lastAt)) : '') + '</span></span>',
-      go: function () { loadWizard(nodeIdOf(m.who)); },
+      go: function () { goWizard(nodeIdOf(m.who)); },
     };
   };
   // 三层: 谁 → 对谁 · 何时 / 命中的那一截 / 在哪个 room。
@@ -1836,7 +1869,7 @@
       }
       if (left > 0 && D.mode === 'room' && D.roomId === h.room && D.earlier) olderPage().then(function () { land(left - 1); });
     };
-    loadRoom(h.room).then(function () { land(20); });
+    goRoom(h.room).then(function () { land(20); });
   };
 
   var paintSearch = function (sections) {
@@ -1938,11 +1971,11 @@
   // ── 启动 ───────────────────────────────────────────────────────────
   var boot = function () {
     loadWorld().then(function () {
-      if (ROOM) return loadRoom(ROOM);
-      if (ROLE) return loadWizard(ROLE);
+      if (ROOM) return goRoom(ROOM);
+      if (ROLE) return goWizard(ROLE);
       // 只有票据 (消息尾部的 ✦ 链接): 服务端从这个 id 找回它属于哪个 wizard, 直接开那一页 ——
       // 深链打开时左栏必须是「这个人」, 不是一张随机 room。
-      if (TOKEN) return loadWizard('').then(function (ok) { if (!ok) return showFirstRoom(); });
+      if (TOKEN) return goWizard('').then(function (ok) { if (!ok) return showFirstRoom(); });
       return showFirstRoom();
     });
   };

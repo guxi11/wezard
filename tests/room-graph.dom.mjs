@@ -310,6 +310,37 @@ try {
   assert.equal(kept, true, "数据刷新是增量: 同一个节点元素, 没有整图重建");
   assert.ok(before, "节点带坐标");
 
+  // 视窗缩放: graph 区域跟着调尺寸, 节点元素 / 坐标原样保留 (不整图重排)。
+  await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  await page.click('[data-side="graph"]');
+  await page.waitForSelector(".rv-person", { timeout: 5000 });
+  const sz0 = await page.evaluate(() => {
+    const sv = document.querySelector(".rv-graph");
+    window.__nodeEl = document.querySelector(".rv-person");
+    return { w: +sv.getAttribute("width"), h: +sv.getAttribute("height"), tf: window.__nodeEl.getAttribute("transform") };
+  });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForFunction((w) => +document.querySelector(".rv-graph").getAttribute("width") > w + 20, sz0.w, { timeout: 5000 });
+  const sz1 = await page.evaluate(() => ({ same: window.__nodeEl === document.querySelector(".rv-person"), h: +document.querySelector(".rv-graph").getAttribute("height") }));
+  assert.equal(sz1.same, true, "缩放不重建节点");
+  assert.ok(sz1.h > sz0.h, "高度也跟着变大: " + JSON.stringify({ sz0, sz1 }));
+
+  // 移动端 (≤760px): 列表 / 图与 chat detail 二选一; 点进聊天看得到 detail, ‹ 返回列表。
+  await page.setViewportSize({ width: 400, height: 760 });
+  await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  await page.click('[data-side="list"]');   // 视图记在 localStorage: 上面停在图
+  await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
+  const vis = (sel) => page.evaluate((q) => { const e = document.querySelector(q); return !!e && getComputedStyle(e).display !== "none"; }, sel);
+  assert.equal(await vis(".side"), true, "窄屏默认看到列表");
+  assert.equal(await vis(".main"), false, "窄屏默认不显示 detail");
+  await page.click(".rv-list .ci");
+  await page.waitForSelector(".rv-msg", { timeout: 5000 });
+  assert.equal(await vis(".main"), true, "点进聊天后窄屏能看到 chat detail");
+  assert.equal(await vis(".side"), false, "进入 detail 后列表收起");
+  await page.click("#tb-back");
+  assert.equal(await vis(".side"), true, "‹ 返回列表");
+  assert.equal(await vis(".main"), false);
+
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {
   await browser.close();
