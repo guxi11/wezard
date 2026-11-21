@@ -323,6 +323,7 @@ try {
   const g1 = await page.evaluate((ta) => ({
     pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.querySelector(".rv-pov")).map((e) => e.getAttribute("data-node")),
     sel: document.querySelectorAll("line.rv-edge.sel").length,
+    onEdges: document.querySelectorAll("line.rv-edge.on").length,
     roomOn: !!document.querySelector('.rv-room.on[data-room="' + "chat:wrG" + '"]'),
     legend: /视角/.test((document.querySelector(".rv-legend") || {}).textContent || ""),
     selGeo: (() => { const l = document.querySelector("line.rv-edge.sel"), h = document.querySelector('line.rv-hit[data-edge="m|chat:wrG|p:' + ta + '"]');
@@ -330,6 +331,7 @@ try {
   }), TA);
   assert.deepEqual(g1.pov, [TA], "只有当前 role 的节点带 .rv-pov: " + JSON.stringify(g1));
   assert.equal(g1.sel, 1, "role → 选中 room 的成员边有 sel (只一条)");
+  assert.equal(g1.onEdges, 1, "其余成员边不再高亮: .on 也只有 role→room 那一条 (同一条 sel), 别的保持普通灰");
   assert.equal(g1.selGeo, true, "sel 的就是 m|G|p:A 那条 (与它的点击线同一线段)");
   assert.equal(g1.roomOn, true, "room 节点 .on");
   assert.equal(g1.legend, true, "图例有「视角」一项");

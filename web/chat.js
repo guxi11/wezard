@@ -476,12 +476,12 @@
       shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + '</g>' +
       '<text class="rv-nm" y="' + (rr + 11) + '" text-anchor="middle">' + esc(clipName(p.name, 11)) + '</text>' + pov;
   };
-  // 选中 room 时: 它的成员边都 .on, 其中「当前 role → 该 room」那条 (直连线则是它自己) 再加 .sel; role 不是成员就只有 room 节点亮。
+  // 选中 room 时只有「当前 role → 该 room」那条 (直连线则是它自己) 是 .on.sel; 该 room 的其余成员边保持普通灰, 不抢「哪条是选中的 edge」。
+  // role 不是成员 (旧链接) 时没有这条边, 只有 room 节点 .on。
   var edgeCls = function (l) {
-    var on = !!D.roomId && D.roomId === l.room;
-    var sel = on && (l.direct || isRoleId(String(l.b).slice(2)));
+    var sel = !!D.roomId && D.roomId === l.room && (l.direct || isRoleId(String(l.b).slice(2)));
     return 'rv-edge' + (l.host ? ' host' : '') + (l.direct ? ' direct' : '') + (l.direct && l.unread ? ' unread' : '') +
-      (on ? ' on' : '') + (sel ? ' sel' : '');
+      (sel ? ' on sel' : '');
   };
   // 增量同步 DOM: 没了的删, 新的建, 其余只在内容 / class 变了时才写。
   var syncGraphDom = function (svg, g) {
