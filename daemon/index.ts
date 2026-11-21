@@ -837,7 +837,9 @@ const main = async (): Promise<void> => {
       },
       sealOf: (t) => { const l = lastChannelOf(t); return l ? { channel: l.channel ?? "", ...(l.speaker ? { speaker: l.speaker } : {}), ...(l.from ? { from: l.from } : {}) } : { channel: m.currentChannel(t) }; },
       lastText: m.lastText,
-      summary: () => undefined,
+      // other: 简报就是目标会话在「请它写简报」那句之后的最后一条 assistant 正文 (全文, 不截断)。
+      summary: (_id, t, since) => m.lastReply(t, since) || undefined,
+      process: (t) => m.processIdentity(t),
       owed: () => [],
       resume: async () => ({ ok: true }),
       // 交接是生命周期事件, 不进群; 失败只捎给它自己 (它调完 handoff_self 拿到的是

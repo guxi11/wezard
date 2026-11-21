@@ -2684,6 +2684,8 @@ export interface MirrorBridge {
   injectText: (target: string, text: string, opts?: { from?: TurnFrom; speaker?: string; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
   /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
   verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
+  /** pane + 里面 CLI 进程的身份串 (`%0:<panePid>:<pid>`); 认不出 undefined。handoff 用它在 sid 抖动时确认仍是同一个进程。 */
+  processIdentity: (target: string) => Promise<string | undefined>;
   clearContext: (target: string, attempt: ClearAttempt | undefined, submitted: (attempt: ClearAttempt) => void, guard?: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
   /** 原地清空这件事在这个后端做不做得到、核验得了核验不了。做不到就在入口拒绝 (409,
    *  不落交接记录) —— 一次按下去却认不出结果的 /clear 只会留下一条假「restarting」墓碑。 */
@@ -7385,6 +7387,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return { ok: true };
   };
 
+  const processIdentity: MirrorBridge["processIdentity"] = async (target) => {
+    const a = byTarget.get(target);
+    if (!a?.tmuxPane) return undefined;
+    const panePid = await panePidOf(a.tmuxPane);
+    if (!panePid) return undefined;
+    const backend = backendForPath(a.jsonlPath);
+    const pid = backend.name === "claude" || backend.name === "claude-internal" ? sessionOnPane(backend.homeDir, a.tmuxPane)?.pid : undefined;
+    return `${a.tmuxPane}:${panePid}:${pid ?? ""}`;
+  };
   const clearContext: MirrorBridge["clearContext"] = async (target, attempt, submitted, guard = () => true) => {
     if (!guard()) return { ok: false, reason: "handoff continuation authority withdrawn; no input" };
     const a = byTarget.get(target);
@@ -7605,6 +7616,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   return {
     attach,
+    processIdentity,
     clearContext,
     nativeClearSupport,
     verifyClearContext,

@@ -126,6 +126,11 @@ export interface Pending {
    *  开工时与旧记录的 cut、当时的前沿事件合并成新一场的 cut。 */
   queued?: { brief: string; at: number; cut?: string[] }[];
   clear?: ClearAttempt;
+  /** 发起时刻 pane 里那个 CLI 进程的身份 (`HandoffDeps.process`): 原生 sid 可能抖动, /clear 前
+   *  靠它确认「还是同一个进程」, 而不是把 sid 当唯一凭证。 */
+  proc?: string;
+  /** other: 请它写简报的那句注入之前的时刻 —— 读简报正文只认这之后的 assistant 回复。 */
+  summaryAt?: number;
   failure?: { status: number; reason: string; compensated?: boolean };
 }
 
@@ -142,7 +147,10 @@ export interface HandoffDeps {
   /** 它此刻这一轮的频道 ("" = 私聊)。 */
   sealOf: (target: string) => Seal;
   lastText: (target: string) => string;
-  summary: (id: string) => string | undefined;
+  /** other: 读目标会话里 `since` 之后最新的一条 assistant 正文 (全文) 当简报; 没有就 undefined。 */
+  summary: (id: string, target: string, since: number) => string | undefined;
+  /** 此刻 pane 里 CLI 进程的身份 (pane + 进程 pid); 认不出返回 undefined。 */
+  process?: (target: string) => Promise<string | undefined>;
   /** 交接前它欠着、还没交代的那几笔 (路由表 `owedBy(W)` 里 status 仍 open 的, 见 §9.5)。 */
   owed: (target: string) => readonly EventId[];
   /** 让它接着干那一笔: 注入「继续 `<event>`」, 该轮的终句因此落到那一行上, 回执照常闭合。
@@ -423,12 +431,18 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
     if (p.failure) return fail(p, p.failure.status, p.failure.reason);
     switch (p.stage) {
       case "waiting": {
+        // 记下此刻的进程身份: 之后 sid 抖动时, /clear 前靠它判断 pane 里仍是同一个 CLI 进程。
+        if (!p.proc && deps.process) {
+          const proc = await deps.process(p.target).catch(() => undefined);
+          if (proc) p = saved({ ...p, proc });
+        }
         // 交接别人: 先等它停下 —— 简报的请求排在它手头那一轮后面的话, 它答别人的那段与
         // 简报会挤在一起分不开。这是同步等待 (调用方在场), 超时即失败。
         if (p.mode !== "self") {
           const w = await idle(p, p.timeoutMs);
           if (!w.idle) return fail(p, 504, `一直没能闲下来 (${w.reason}), 上下文没动`);
           // 守护进程请它写简报, 不是谁在群里问的: 私聊。
+          p = saved({ ...p, summaryAt: Date.now() });
           const r = await deps.inject(p.target, briefPrompt(p.focus), { channel: "" }, `handoff:${p.target}:${p.at}:summary`, p.timeoutMs);
           if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
           return step(saved({ ...p, stage: "briefing" }));
@@ -481,13 +495,23 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       }
       case "briefing": {
         const w = await idle(p, p.timeoutMs);
-        const brief = deps.summary(`handoff:${p.target}:${p.at}:summary`) ?? "";
+        const brief = deps.summary(`handoff:${p.target}:${p.at}:summary`, p.target, p.summaryAt ?? p.at) ?? "";
         // 没等到 idle 就不能重开 —— 那会丢掉这次还在生成的交接总结。
         if (!w.idle) return fail(p, 504, `target still working: ${w.reason}; not restarting to avoid losing the turn`);
         if (!brief.trim()) return fail(p, 502, "target produced no summary text");
         return step({ ...p, brief, stage: "restarting" });
       }
       case "restarting": {
+        // 原生 sid 会抖 (注册表瞬时值): 还没提交过 /clear、进程身份与发起时一致, 就以当前 sid 为准,
+        // 别因为 sid 变了永久放弃。进程变了 / 认不出就保持严格 (index.ts 的校验照旧拒绝)。
+        if (!p.clear && p.proc && deps.process) {
+          const now = await deps.process(p.target).catch(() => undefined);
+          const sid = deps.sessionId(p.target);
+          if (now === p.proc && sid && sid !== p.sid) {
+            deps.log.warn({ mod: "handoff", target: p.target, from: p.sid, to: sid, proc: now }, "handoff: 原生 sid 在等待期间变了但 pane 进程未变, 刷新 sid 后继续");
+            p = saved({ ...p, sid });
+          }
+        }
         // 每次物理提交前先保存, reload 只核对凭证, 不能再次发送 /clear。
         const r = await deps.restart(p.target, p, (clear) => { p = saved({ ...p, clear }); });
         if (!r.ok) return fail(p, 502, `/clear failed: ${r.reason ?? "unknown"}`);
