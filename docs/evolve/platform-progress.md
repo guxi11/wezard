@@ -47,6 +47,8 @@
 
 1. **charter 删 `wait_peer` 两处** (`daemon/wizard.ts:1087` 工具行整行删, `:1120` 「不 `wait_peer` 守着」改「不守着」)。纯修正 (工具已不存在), 但会让所有 chartered wizard 收到 handoff 提醒。推荐: 批准, 与下一次必要的 charter 改动合并发出, 减少一次全体提醒。
 
+2. **room vs dm 改进 A~G** (见 [research/room-vs-dm-collaboration.md](research/room-vs-dm-collaboration.md) §5)。推荐先批 A (lead 派活信封加一句「小队一个 room」, 零代码) 与 B (多个非成员 chat_ask 自动开 adhoc); G (charter 判据) 与 #1 合并发出。
+
 ## 进行中
 
 (无)
@@ -55,7 +57,8 @@
 
 | 日期 | 事 | commit |
 |---|---|---|
-| 2026-11-22 | 建本文; vendor.js 去 d3; mention 提醒去 `wait_peer` | 见 git log |
+| 2026-11-22 | 建本文; vendor.js 去 d3; mention 提醒去 `wait_peer` | `c182134` |
+| 2026-11-22 | 研究: 什么时候拉 room / room 里怎么说话 (admin 之问), 账本实测 adhoc 0 / dm 43 / 64% dm 消息提到第三方 | 见 git log |
 
 ## 已知坑
 
