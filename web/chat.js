@@ -272,7 +272,10 @@
     return lv >= 1 && lv <= 5 ? 5.5 + 1.4 * lv : 9;
   };
   var SMART_BASIS = { model: '实际模型', tier: '出生档位 (认不出实际模型)' };
-  var smartsWord = function (sm) { return sm ? '聪明 ' + sm.level + '/5 · ' + sm.label + ' (依据: ' + (SMART_BASIS[sm.basis] || sm.basis) + ')' : ''; };
+  // 聪明程度 1~5 用学历梯度表达 (小学生 … 专家教授), 不再露 `3/5`; 档位定义仍在 shared/smarts.ts, 这里只管展示。
+  var EDU = { 1: ['🧒', '小学生'], 2: ['🎒', '初中生'], 3: ['🎓', '大学生'], 4: ['🔬', '研究生'], 5: ['👨‍🏫', '专家教授'] };
+  var eduOf = function (sm) { return sm && EDU[sm.level] ? EDU[sm.level] : null; };
+  var smartsWord = function (sm) { var e = eduOf(sm); return e ? e[0] + ' ' + e[1] + ' · ' + sm.label + ' (依据: ' + (SMART_BASIS[sm.basis] || sm.basis) + ')' : ''; };
   // 这一轮想画的图 (纯数据, 不碰坐标): 节点 + 边, 边按身份去重。
   var graphModel = function (rooms, people, directs) {
     var nodes = [], links = [], seen = {}, have = {};
@@ -591,15 +594,15 @@
   // 名字过长用省略号收尾 (全名在节点 <title> 悬停里), 不再硬截成 `DavidDavi` 这种半截词。
   var clipName = function (t, n) { t = String(t); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
   // 视角标记 `<O>` (照人的原话字面): 当前 role 的节点左边一个 `<`、右边一个 `>`, accent 蓝, 画在选中环 (.sel, r+3.5) 之外 ——
-  // 不占圆内 (★ 在那儿)、不改状态色、不压名字。类名 rv-pov 是「哪个是视角」的标记, 测试按它找。
+  // 不占圆内 (👑 在那儿)、不改状态色、不压名字。类名 rv-pov 是「哪个是视角」的标记, 测试按它找。
   var povMark = function (rr) {
     var a = (rr + 5).toFixed(1), b = (rr + 10).toFixed(1);
     return '<g class="rv-pov"><title>当前视角</title><path d="M-' + a + ' -5L-' + b + ' 0L-' + a + ' 5M' + a + ' -5L' + b + ' 0L' + a + ' 5"/></g>';
   };
-  // lead: 金色五角星画在节点圆的正中间, 大小随圆 (占直径约 80%); 深色描边, 在绿 / 红 / 灰 / 白各种状态底色上都看得清。
-  var leadStar = function (rr) {
+  // lead: 金色皇冠 (不再用 ★, 免得和 host 的 ⭐ 混) 画在节点圆的正中间, 大小随圆 (占直径约 80%); 深色描边, 在绿 / 红 / 灰 / 白各种状态底色上都看得清。
+  var leadCrown = function (rr) {
     var k = (rr * 0.8 / 4.8).toFixed(2);
-    return '<path class="rv-lead" transform="scale(' + k + ')" d="M0 -4.8L1.2 -1.7L4.6 -1.5L2 .6L2.8 3.9L0 2.1L-2.8 3.9L-2 .6L-4.6 -1.5L-1.2 -1.7Z"/>';
+    return '<path class="rv-lead" transform="scale(' + k + ')" d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/>';
   };
   var nodeHtml = function (n) {
     if (n.isRoom) {
@@ -618,9 +621,9 @@
     if (human) return '<title>' + esc(p.name + ' · 用户') + '</title>' + shape('sel', 3.5) +
       '<g class="rv-body"><text class="rv-emo" y="5.5" text-anchor="middle">👤</text></g>' +
       '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
-    var tip = [p.name, ST_WORD[st], p.lead ? '★ lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
+    var tip = [p.name, ST_WORD[st], p.lead ? '👑 lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
     return '<title>' + esc(tip) + '</title>' +
-      shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + (p.lead ? leadStar(rr) : '') + '</g>' +
+      shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + (p.lead ? leadCrown(rr) : '') + '</g>' +
       '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
   };
   // 选中 room 时只有「当前 role → 该 room」那条 (直连线则是它自己) 是 .on.sel; 该 room 的其余成员边保持普通灰, 不抢「哪条是选中的 edge」。
@@ -802,8 +805,8 @@
     '<span><i class="lg wz idle"></i>空闲</span><span title="pane 在, 提示缓存已超 TTL"><i class="lg wz stale"></i>缓存冷</span>' +
     '<span title="pane 不在, 下一句话会重新拉起 (不同于缓存冷)"><i class="lg wz asleep"></i>休眠</span>' +
     '<span><span class="lgemo">👤</span>用户</span><span title="host → room"><i class="lg hostln"></i>host</span>' +
-    '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M0 -4.8L1.2 -1.7L4.6 -1.5L2 .6L2.8 3.9L0 2.1L-2.8 3.9L-2 .6L-4.6 -1.5L-1.2 -1.7Z"/></svg>lead</span>' +
-    '<span title="聪明程度 1~5 = 实际在跑的模型 + effort (haiku 1 · sonnet 2, high 起 3 · opus 4, xhigh/max 5); 认不出模型时按出生档位 mini..ultra; 都没有 = 中号"><i class="lg wz sz1"></i><i class="lg wz sz5"></i>大小 = 聪明 1~5</span>' +
+    '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/></svg>lead</span>' +
+    '<span title="聪明程度 (🧒小学生 🎒初中生 🎓大学生 🔬研究生 👨‍🏫专家教授) = 实际在跑的模型 + effort (haiku 1 · sonnet 2, high 起 3 · opus 4, xhigh/max 5); 认不出模型时按出生档位 mini..ultra; 都没有 = 中号"><i class="lg wz sz1"></i><i class="lg wz sz5"></i>大小 = 聪明程度 (小学生→专家教授)</span>' +
     '<span title="当前视角: 左上名片是它, room 里靠右的气泡是它说的"><svg class="lgpov" viewBox="-13 -7 26 14" width="24" height="13" aria-hidden="true"><circle r="4.5"/><path d="M-8 -4L-12 0L-8 4M8 -4L12 0L8 4"/></svg>视角</span></div>';
   var renderGraph = function () {
     if (S.gdrag) return;    // 正在拖: 定时刷新别来动节点
@@ -1010,7 +1013,7 @@
   };
   // 点开一个 room: 整页最右 (chat detail 右边) 多一列成员。
   // 只有 room 视图有成员表; 看某个 wizard 时整列收起, 把宽度还给 chat detail。
-  // 每成员: 名字 · 角色 (⭐ host / ★ lead / 人 / 成员) · 状态 (忙 / 闲 / 冷 / 等审批, 色同关系图) ; 下一行 聪明度 · 最近发言;
+  // 每成员: 名字 · 角色 (⭐ host / 👑 lead / 人 / 成员) · 状态 (忙 / 闲 / 冷 / 等审批, 色同关系图) ; 下一行 聪明度 · 最近发言;
   // 名下有「待交代」(= 本 room 账本里 chat_ask / 派活 / 人话开出、他还没 chat_reply done|passed|canceled 的 duty) 的挂一枚可展开的红标。
   // 窄屏 (≤760px) 没有第三列的位置: detail 头右侧一个「成员 N」入口, 把同一份 HTML 当底部抽屉铺出来。
   var GS_ST = { working: '忙', blocked: '等审批', idle: '闲', stale: '冷', asleep: '冷' };
@@ -1042,10 +1045,10 @@
       held += mine.length;
       var cls = 'gs-mem ' + m.kind + (m.busy ? ' busy' : m.alive ? ' alive' : '') + (m.host ? ' host' : '') + (me ? ' me' : '');
       var role = (m.host ? '<span class="gs-host" title="host: 本 room 里加入序最小的 wizard; 没点名的人话先唤醒它">⭐ host</span>' : '') +
-        (nd.lead ? '<span class="gs-lead" title="被派来领一件复杂活的 lead">★ lead</span>' : '') +
+        (nd.lead ? '<span class="gs-lead" title="被派来领一件复杂活的 lead">👑 lead</span>' : '') +
         (!m.host && !nd.lead ? '<span class="gs-role">' + (m.kind === 'human' ? '人' : '成员') + '</span>' : '');
       var stEl = st ? '<span class="gs-st st-' + st + (st === 'working' ? ' go' : '') + '" title="' + esc(ST_WORD[st] || '') + '"><i class="gs-dot"></i>' + GS_ST[st] + '</span>' : '';
-      var sm = nd.smarts ? '<span title="' + esc(smartsWord(nd.smarts)) + '">🧠 ' + nd.smarts.level + '/5</span>' : '';
+      var sm = eduOf(nd.smarts) ? '<span title="' + esc(smartsWord(nd.smarts)) + '">' + eduOf(nd.smarts).join(' ') + '</span>' : '';
       var ago = m.lastAt ? '<span title="本 room 最近一条发言: ' + esc(fmtDay(m.lastAt)) + '">' + fmtAgo(m.lastAt) + '发言</span>' : '<span>还没发言</span>';
       var sub = [sm, m.className ? '<span class="gs-cls">' + esc(m.className) + '</span>' : '', ago].filter(Boolean).join('<span class="gs-sep">·</span>');
       var due = mine.length
@@ -1772,8 +1775,8 @@
       cb ? fact('📜', '≈' + fmtTok(cb.tokens), '宪章 ≈' + fmtTok(cb.tokens) + ' token · ' + fmtClock(cb.at) + ' 压进系统提示 · 点开看全文', 'charter') : '',
       w.cwd ? fact('🗂️', shortCwd(w.cwd), w.cwd) : '',
       pf ? fact(pf[0], pf[1], pf[2], pf[3], pf[4]) : '',
-      nd.lead ? '<span class="lead" title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)">★ lead</span>' : '',
-      nd.smarts ? fact('🧠', nd.smarts.level + '/5', smartsWord(nd.smarts)) : '',
+      nd.lead ? '<span class="lead" title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)">👑 lead</span>' : '',
+      eduOf(nd.smarts) ? fact(eduOf(nd.smarts)[0], eduOf(nd.smarts)[1], smartsWord(nd.smarts)) : '',
     ].filter(Boolean).join('');
     var st = w.busy ? '<span class="rv-chip go">执行中</span>'
       : w.waiting && w.waiting.length ? '<span class="rv-chip warn">等审批 ' + esc(w.waiting.join(',')) + '</span>'
