@@ -372,11 +372,15 @@
       var a = ix[l.s.id], b = ix[l.t.id], L = gLen(g, l);
       if (a !== b && L < D[a * n + b]) { D[a * n + b] = L; D[b * n + a] = L; }
     });
+    var E = D.slice();   // 直接相连的两点
     for (k = 0; k < n; k++) for (i = 0; i < n; i++) {
       var dik = D[i * n + k];
       if (dik === Infinity) continue;
       for (j = 0; j < n; j++) { var v = dik + D[k * n + j]; if (v < D[i * n + j]) D[i * n + j] = v; }
     }
+    // 相连的两点按自己那条边的长度, 不让最短路改短: 否则 A–B 的边比 A–C–B 绕路还长时, 目标距离会被压成
+    // 「C 正好在 A、B 连线上」, 三角形塌成一条线, 两条边叠在第三条上。
+    for (i = 0; i < n * n; i++) if (E[i] !== Infinity && E[i] > D[i]) D[i] = E[i];
     var mx = 0;
     for (i = 0; i < n * n; i++) if (D[i] !== Infinity && D[i] > mx) mx = D[i];
     for (i = 0; i < n * n; i++) if (D[i] === Infinity) D[i] = mx * 0.6 + GK * 2;
@@ -409,10 +413,36 @@
       else { var my = oy * s * (dy < 0 ? -1 : 1); p.y -= my * wp; q.y += my * (1 - wp); }
     }
   };
+  // 边让点: 一个点离一条不以它为端点的边太近 (投影在线段内部) 就沿法线推到够远 —— stress 只管点对点的距离,
+  // 不管点压在边上; 三角形挤扁时第三个点会躺在对边上, 边和点完全重叠看不出连着谁。只推点, 不动边的两端:
+  // 枢纽是几十条边的端点, 每条都让它退一点会把整张图推着走。正好共线 (距离 0) 时按点的序号奇偶定往哪边推, 保持确定性。
+  // 推离一条边可能又推到另一条边上 (点夹在两条边之间): 最多来回三遍, 直到一遍里没人再动。
+  var gEdgeClear = function (g) {
+    var ns = g.nodes, ls = g.links, moved = true;
+    for (var pass = 0; pass < 3 && moved; pass++) {
+      moved = false;
+      for (var li = 0; li < ls.length; li++) {
+        var l = ls[li], A = l.s, B = l.t, vx = B.x - A.x, vy = B.y - A.y, L2 = vx * vx + vy * vy;
+        if (L2 < 1) continue;
+        var Ln = Math.sqrt(L2), nx = -vy / Ln, ny = vx / Ln;
+        for (var i = 0; i < ns.length; i++) {
+          var p = ns[i];
+          if (p === A || p === B || p.fx != null) continue;
+          var t = ((p.x - A.x) * vx + (p.y - A.y) * vy) / L2;
+          if (t <= 0.03 || t >= 0.97) continue;
+          var d = (p.x - A.x - t * vx) * nx + (p.y - A.y - t * vy) * ny;
+          var gap = (p.isRoom ? 13 : p.r) + 6 - Math.abs(d);
+          if (gap <= 0) continue;
+          var m = gap * (d > 0.01 ? 1 : d < -0.01 ? -1 : (i % 2 ? 1 : -1));
+          p.x += nx * m; p.y += ny * m; moved = true;
+        }
+      }
+    }
+  };
   // 一步: 每个点一次局部 SMACOF 更新 (Gauss–Seidel, 就地), alpha 决定这一步走多远; 被钉住 (拖动中) 的 fx/fy 不动。
   // g.anchor (拖动时): 每个点额外拴在拖动开始时的位置上, 权重 = 它全部 stress 权重 —— 离被拖点越远越不动;
-  // 不拴的话 stress 只认相对距离, 拖一个点整张图会跟着平移。cs = 碰撞力度 (缺省随 alpha)。返回这一步最大的位移, 供收敛判断。
-  var gStep = function (g, alpha, cs) {
+  // 不拴的话 stress 只认相对距离, 拖一个点整张图会跟着平移。cs = 碰撞力度 (缺省随 alpha); rough = 不做边让点 (首排的粗排阶段, 先让 stress 把大形状排开, 早推会把点推过别的边)。返回这一步最大的位移, 供收敛判断。
+  var gStep = function (g, alpha, cs, rough) {
     var ns = g.nodes, n = ns.length, mv = 0;
     if (n < 2) return 0;
     var D = gPrep(g), t = Math.min(1, alpha * 2.5), an = g.anchor;
@@ -433,6 +463,8 @@
       mv = Math.max(mv, Math.abs(mx), Math.abs(my));
     }
     gCollide(g, cs == null ? Math.min(0.5, alpha * 2) : cs);
+    // 边让点是硬约束 (每步把压边的点整段推出去), 不随热量衰减: 软的话热量小时 stress 每帧往回拉一点, 又慢慢压回边上。
+    if (!rough) gEdgeClear(g);
     return mv;
   };
   // 径向树起点: 每个连通块从度数最大的点 BFS, 子树按叶子数分扇区、按目标边长外推 —— 树上零交叉, stress 只需微调。
@@ -499,7 +531,7 @@
   var gLayout = function (g) {
     if (g.nodes.length < 2) { g.nodes.forEach(function (p) { p.x = 0; p.y = 0; }); return; }
     gRadialInit(g);
-    for (var i = 0; i < 300; i++) if (gStep(g, 0.4) < 0.05 && i > 20) break;
+    for (var i = 0; i < 300; i++) if (gStep(g, 0.4, undefined, true) < 0.05 && i > 20) break;
     gAlign(g);
     S.glbs = gLbs(g);
     // 收尾: stress 步子逐渐收小, 碰撞保持全力 —— 最后由碰撞说了算, 名字标签不压在一起。

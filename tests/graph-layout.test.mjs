@@ -80,6 +80,20 @@ const overlaps = (g, panel) => {
   return n;
 };
 
+/** 节点压边: 节点圆 (room 取胶囊半高) 碰到一条不以它为端点的边 (投影落在线段内部)。三角形三点共线时就是这种「一条边穿过第三个点、两条边叠在它上面」。 */
+const onEdge = (g) => {
+  let n = 0;
+  g.links.forEach((l) => g.nodes.forEach((p) => {
+    if (p === l.s || p === l.t) return;
+    const vx = l.t.x - l.s.x, vy = l.t.y - l.s.y, L2 = vx * vx + vy * vy || 1;
+    const t = ((p.x - l.s.x) * vx + (p.y - l.s.y) * vy) / L2;
+    if (t <= 0 || t >= 1) return;
+    const d = Math.hypot(p.x - (l.s.x + t * vx), p.y - (l.s.y + t * vy));
+    if (d < (p.isRoom ? 10 : p.r) + 2) n++;
+  }));
+  return n;
+};
+
 const finite = (g) => g.nodes.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
 
 for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 390, h: 640 }]]) {
@@ -88,8 +102,9 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
   assert.equal(g.nodes.length, 36, "fixture 应画出 36 个节点");
   assert.equal(g.links.length, 42, "fixture 应画出 42 条边");
   assert.ok(finite(g), `${label}: 坐标出现 NaN / Infinity`);
-  const c = crossings(g.links), o = overlaps(g, panel);
-  console.log(`graph-layout ${label}: 交叉 ${c} · 重叠 ${o}`);
+  const c = crossings(g.links), o = overlaps(g, panel), oe = onEdge(g);
+  console.log(`graph-layout ${label}: 交叉 ${c} · 重叠 ${o} · 压边 ${oe}`);
+  assert.equal(oe, 0, `${label}: ${oe} 处节点压在别的边上`);
   assert.ok(c <= 4, `${label}: 边交叉 ${c} > 4`);
   assert.ok(o <= 3, `${label}: 节点 / 标签重叠 ${o} 对 > 3`);
 
@@ -115,6 +130,7 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
   console.log(`graph-layout ${label} 增量: 旧节点平均位移 ${mean.toFixed(1)} · 最大 ${Math.max(...moves).toFixed(1)} · 交叉 ${ca}`);
   assert.ok(mean <= 20, `${label}: 增量后旧节点平均位移 ${mean.toFixed(1)} > 20 (整图被打乱)`);
   assert.ok(ca <= 8, `${label}: 增量后交叉 ${ca} > 8`);
+  assert.equal(onEdge(rec.g), 0, `${label}: 增量后有节点压在边上`);
 }
 
 // 退化输入: 空图 / 单个节点 / 两个不连通的块, 不抛错、坐标有限
@@ -132,6 +148,28 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
     const g = firstLayout(L, world);
     assert.ok(finite(g), "退化输入排出了 NaN");
   }
+}
+
+// 三角形 / 共线专用例: 每个 3 人 adhoc room 收成 room 节点, 再叠两两 dm (直连线), 加一个大枢纽把边长拉得悬殊 ——
+// 曾出现的退化是第三个点被挤到另两点的连线上, 两条边与之完全重叠。量到 0 才算过。
+{
+  const panel = { w: 390, h: 640 };
+  const L = load(WORLD, panel);
+  const ids = Object.keys(WORLD.uidTargets);
+  const wiz = (i) => ({ who: { kind: "wizard", id: ids[i] }, name: "n" + i });
+  const room = (id, ms) => ({ id, kind: "dm", openDuties: 1, last: { seq: 1, at: WORLD.at }, members: ms.map(wiz) });
+  const rooms = [];
+  for (let i = 1; i < ids.length; i++) rooms.push(room("dm:h" + i, [0, i]));          // 0 号是枢纽, 连所有人
+  rooms.push(room("dm:t1", [1, 2]), room("dm:t2", [2, 3]), room("dm:t3", [1, 3]));     // 1-2-3 两两相连 (+ 都连枢纽)
+  rooms.push(room("dm:t4", [4, 5]), room("dm:t5", [5, 6]), room("dm:t6", [6, 7]), room("dm:t7", [4, 7]));
+  rooms.push({ id: "adhoc:tri", kind: "adhoc", title: "三人", openDuties: 1, last: { seq: 1, at: WORLD.at }, members: [8, 9, 10].map(wiz) }, room("dm:t8", [8, 9]));
+  const world = { ...WORLD, rooms };
+  L.W.rooms = rooms;
+  const g = firstLayout(L, world);
+  const oe = onEdge(g), c = crossings(g.links);
+  console.log(`graph-layout 三角形用例: ${g.nodes.length} 节点 ${g.links.length} 边 · 压边 ${oe} · 交叉 ${c}`);
+  assert.ok(finite(g));
+  assert.equal(oe, 0, `三角形用例: ${oe} 处节点压在别的边上`);
 }
 
 console.log("graph-layout: ok");
