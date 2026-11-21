@@ -1473,7 +1473,7 @@
     if (r.title || W.chatNames[r.id]) return r.title || W.chatNames[r.id];
     if (r.kind === 'dm') {
       var two = (r.members || []).slice(0, 2).map(function (m) { return m.name; }).filter(Boolean);
-      return two.length ? two.join(' ↔ ') : '私聊';
+      return two.length ? two.join('、') : '私聊';
     }
     // 没起名的 adhoc: 列表里一排「临时 room」认不出谁是谁 —— 带上前几位成员。
     if (r.kind === 'adhoc') {

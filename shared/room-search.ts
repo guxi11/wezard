@@ -90,7 +90,7 @@ export const searchRooms = (
     const f = factBy.get(id);
     const names = (f?.members ?? []).map((m) => m.name).filter(Boolean);
     if (!f || f.title || !names.length) return roomName(id);
-    if (f.kind === "dm") return names.slice(0, 2).join(" ↔ ");
+    if (f.kind === "dm") return names.slice(0, 2).join("、");
     if (f.kind === "adhoc") return "临时 · " + names.slice(0, 3).join("、") + (names.length > 3 ? " 等" : "");
     return roomName(id);
   };
