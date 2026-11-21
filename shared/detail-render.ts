@@ -204,9 +204,6 @@ export const SHARED_CSS = `
   .diff .row.add .sign{color:#1a7f37}
   .diff .row.del .sign{color:#cf222e}
   .diff .txt{padding:0 8px;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
-  .diff-meta{padding:4px 12px;font-size:12px;color:#656d76;
-    background:#f1f3f6;border-bottom:1px solid #d0d7de;
-    font-family:ui-monospace,monospace}
   details summary{cursor:pointer;color:#656d76;padding:6px 12px;font-size:11px;
     text-transform:uppercase;letter-spacing:.5px;font-weight:600;
     background:#f1f3f6;border-bottom:1px solid #d0d7de;
@@ -539,9 +536,9 @@ const TURN_CSS = `
   /* 一行到底不换行: 箭头 · 移交 · 对方 · 活号 · 标签 · 原文首行 (占剩下的宽, 省略号) · 展开钮。 */
   .handoff .ho-line{display:flex;align-items:center;gap:6px;padding:2px 6px 3px 24px;list-style:none;white-space:nowrap}
   .handoff .ho-line>*{flex:none}
-  .handoff .ho-line:is([data-hto],[data-hrole],.plan-go){cursor:pointer}
-  .handoff .ho-line[data-hplan]:not(.plan-go){cursor:default}
-  .handoff .ho-line[data-hplan]:not(.plan-go) .ho-chev{cursor:pointer}
+  .handoff .ho-line:is([data-hto],[data-hrole]){cursor:pointer}
+  .handoff .ho-line[data-hplan]{cursor:default}
+  .handoff .ho-line[data-hplan] .ho-chev{cursor:pointer}
   details.handoff>.ho-line{background:none;border:0;font:inherit;color:inherit;
     text-transform:none;letter-spacing:0;user-select:auto}
   details.handoff>.ho-line::before{content:none}
