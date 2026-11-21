@@ -19,7 +19,7 @@
 
 ## 测试基线 (2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
-**102 / 106 通过**。失败 4 个: `codex-hooks` / `codex-session` (本机没装 `codex`, spawn ENOENT, 环境问题) · `codex-backend` (断言 `'/opt/codex'` 实得 `'codex'`, 待查) · `wizard-stream` (「W-2 多出 room 里的其他行」, 疑为 `762482b` 删掉「全部消息」all 链路后断言没跟上, 属 rolepage detail 线)。每次改动后对照, 通过数不能减少。
+**108 / 112 通过** (2026-11-22 删 peers 死代码后复跑; 早先 102 / 106)。失败 4 个: `codex-hooks` / `codex-session` (本机没装 `codex`, spawn ENOENT, 环境问题) · `codex-backend` (断言 `'/opt/codex'` 实得 `'codex'`, 待查) · `wizard-stream` (「W-2 多出 room 里的其他行」, 疑为 `762482b` 删掉「全部消息」all 链路后断言没跟上, 属 rolepage detail 线)。每次改动后对照, 通过数不能减少。
 
 ## 优先级清单
 
@@ -30,7 +30,7 @@
 
 ### P1 — 死代码 / 包体 / 可靠性
 - [x] **vendor.js 去掉无人使用的 d3** (~280KB 未压缩, 每次冷加载 rolepage 都要下): `shared/chat-render.ts` 不再拼 `d3.min.js`, 删 `web/d3.min.js`。关系图早已换成自写的 stress majorization。(本轮)
-- [ ] `daemon/peers.ts` 回执时代遗留: `renderTaskEnvelope` / `renderPeerEnvelope` 无调用者; `parseClosing` / `completionKeyword` / `receiptKeyword` / `stripClosingMark` / `replyClosedBefore` / `topLevelText` / `addressedResults` / `clipMiddle` / `openingTurn` / `turnsSince` 只在本文件内互相引用, 要用 tsc `noUnusedLocals` 确认可达性后整片删。`renderReceiptEnvelope` 只剩一个测试在用。
+- [x] **`daemon/peers.ts` 回执时代遗留删净** (~260 行): `parseClosing` 一族、`addressedResults`、`replyClosedBefore` / `openingTurn`、`renderTask/Peer/ReceiptEnvelope`、`tailTurns`; `tsc --noUnusedLocals` 逐轮确认, 测试里只测回执措辞的一条断言同删。(本轮)
 - [ ] `shared/turn-state.ts` `TurnState` / `WorldFacts.inflight` 恒空 —— 收成类型或删。
 - [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
 - [ ] svr 重启后名册缺席 30~70s: daemon 应在 svr 上线时立即补推 `WorldFacts`。
@@ -60,6 +60,7 @@
 | 2026-11-22 | 建本文; vendor.js 去 d3; mention 提醒去 `wait_peer` | `c182134` |
 | 2026-11-22 | 研究: 什么时候拉 room / room 里怎么说话 (admin 之问), 账本实测 adhoc 0 / dm 43 / 64% dm 消息提到第三方 | 见 git log |
 | 2026-11-22 | room_invite/room_approve `history` 参数 (none/N/from:id/all); dm 显示统一 (多人列全员); ensureDmRoom 补回 / 混入第三人改落 {A,B} adhoc。coder QuinnQuincy, 白板 reviewer RoseReed 通过。遗留: join-req 路径不校验 history; rejoin 不写 seen 未细查; 多个 {A,B} adhoc 取最近活动会合流 | `d986e7a` |
+| 2026-11-22 | `daemon/peers.ts` 删回执时代死代码 ~260 行 (我自己做: 活着的 wizard 已 4 个, 不起新人) | 见 git log |
 
 ## 已知坑
 

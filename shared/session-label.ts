@@ -47,7 +47,7 @@ const NAME_CHARS = "[\\p{L}\\p{N}_-]";
  *  常丢 ZWJ 段或 VS16, 丢一半也是它。 */
 export const WIZARD_MARK = "\u{1F9D9}\u200D\u2642\uFE0F";
 /** WIZARD_MARK 的正则源 (匹配用, 序列尾部可缺)。用**代理对**转义而非 `\u{1F9D9}`:
- *  花括号转义要求正则带 `u` 旗标, 而仓里不少正则不带 (如 addressedResults 的 /gm) ——
+ *  花括号转义要求正则带 `u` 旗标, 而仓里不少正则只带 /gm 不带 u ——
  *  代理对写法在 u / 非 u 两种模式下都认, 谁拼进谁都行。 */
 export const MAGE_SRC = "\\uD83E\\uDDD9(?:\\u200D\\u2642\\uFE0F?)?";
 const NAME_TOKEN = `(^|\\s)(?:\\.|${MAGE_SRC}[ \\t]?)(${NAME_CHARS}{1,32})(?=[\\s\\u200B-\\u200D\\u2060\\uFEFF:\uff1a]|$)`;

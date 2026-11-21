@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import { applyOp, renderMsgLine, UNREAD_BUDGET, unreadFor, type Who } from "../shared/room.js";
 import { REMINDER_KINDS, TAIL_ORDER, parseEnvelope, parseReminders, renderReminder, renderTail, reminderLabel, stripReminders } from "../shared/reminder.js";
-import { renderReceiptEnvelope } from "../daemon/peers.js";
 import { isTerminal } from "../shared/turn-state.js";
 import { H, room, say, uid, W } from "./room-fixture.js";
 
@@ -69,12 +68,8 @@ say(s, { author: me, text: "我自己说的" }); // 自己的发言不进批
   assert.deepEqual(reminderLabel(parsed), { label: "聊天记录", machine: true });
 }
 
-// ── 3. ReceiptStatus passed: 措辞 + 终态 ──
+// ── 3. ReceiptStatus passed: 终态 ──
 assert.equal(isTerminal("passed"), true, "passed 是终态");
-{
-  const rcpt = renderReceiptEnvelope(".lead", undefined, "passed", "e1");
-  assert.ok(rcpt.includes("已了结回执"), "passed 回执有自己的措辞, 不落进失败回执");
-}
 
 // ── 4. room 工具面: 沟通口子是 chat_* + room_*, 旧的 chat_members / read_chat / tell_peer 退场 ──
 const toolNames = async (): Promise<string[]> => {

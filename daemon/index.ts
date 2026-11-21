@@ -737,7 +737,6 @@ const main = async (): Promise<void> => {
         linkTags(dest, headed(ownHead(self), text, "\n\n")), msgid)
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
     };
-    /** 同伴注入的信封: 公开轮写上那个群的 key 与名字 (key 归档, 名字显示), 私聊都不写 (见 peers.renderPeerEnvelope)。 */
     const retiringWizardTargets = new Set<string>();
     const plans: PlanStore = (() => {
       try { return loadPlans(cfg.wrc.mirror.plansFile); }

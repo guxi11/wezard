@@ -17,9 +17,7 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, TURN_METRICS, type CliBackendName, type NormalizedTranscriptLine } from "../shared/cli-backends.js";
 import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
 import { tildePath, type Part } from "./notices.js";
-import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
-import { MAGE_SRC } from "../shared/session-label.js";
-import type { Terminal } from "../shared/turn-state.js";
+import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope } from "../shared/reminder.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -114,7 +112,6 @@ export const codexTurnBusy = (jsonlPath: string, since = 0): boolean | undefined
     } catch { return undefined; }
   }, undefined), (busy) => busy !== undefined, Infinity);
 
-
 export interface Turn {
   role: "user" | "assistant";
   text: string;
@@ -168,11 +165,6 @@ const blockText = (content: unknown): string => {
     .join(" ");
 };
 
-/** Last `n` user/assistant turns of a transcript, oldest first. Backend-agnostic:
- *  the line shape is normalized through the owning CLI's dialect adapter. */
-export const tailTurns = (jsonlPath: string, n = 3, keepLines = false): Turn[] =>
-  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => ts.length >= n).slice(-n);
-
 /** 最后一句进到模型的话 (带信封), 往回读到有为止 —— 中间隔着多少轮工具都不怕。 */
 export const lastUserTurn = (jsonlPath: string, endOffset?: number): Turn | undefined =>
   readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), (ts) => ts.some((t) => t.role === "user"), TAIL_BYTES_MAX, endOffset)
@@ -186,7 +178,7 @@ export const talkTurns = (jsonlPath: string, n: number, keepLines = false, marks
  *  限制**。按条数读尾巴的 talkTurns 管不了一轮很长的情形: 一轮里的大段工具输出 (读文件、
  *  跑命令) 能把开这一轮的那句推到 2MB 之外 —— 回执就再也定位不到问话, 对方答完了也只能
  *  报 silent。问话一定晚于发话时刻, 所以读到发话时刻之前就够了, 再大的文件也只读这一段。 */
-export const turnsSince = (jsonlPath: string, sinceMs: number): Turn[] =>
+const turnsSince = (jsonlPath: string, sinceMs: number): Turn[] =>
   readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true, true), (ts) => ts.some((t) => !!t.ms && t.ms < sinceMs), Infinity);
 
 /** 一个会话的来回, 每个来回 = 一句问话 + 它之后的全部回答 (途中的话在前, 终句在
@@ -331,7 +323,7 @@ const blockTextWithTools = (content: unknown): string => {
     .join(" ");
 };
 
-/** Like `tailTurns` but the flattened text includes tool_use/tool_result
+/** Like `talkTurns` but the flattened text includes tool_use/tool_result
  *  content — the dedup-only reader so quoted tool bubbles match context.
  *  `n` counts logical conversation turns (user→assistant transitions), not
  *  individual transcript records — essential for backends like CodeBuddy
@@ -461,137 +453,6 @@ const parseOpenTools = (jsonlPath: string, raw: string): { names: string[]; rows
   return { names: [...open.values()], rows };
 };
 
-
-/** 一轮的收口: `RESULT:` 交差 / `NEED:` 反问发话方 / `PROGRESS:` 中间进展 / 都没有 —— 外加交付物清单。
- *  分 result 与 need 是回执结算的事: 反问不是定论; progress 是中间回执, 行不落定。 */
-export interface Closing { kind: "result" | "need" | "progress" | "none"; text: string; artifacts: { path: string; note: string }[] }
-
-// NEED / PROGRESS 只认全大写: "what I need: …" / 「需要: …」在普通答话里太常见, 误认一次就是
-// 一份不计数的回执。
-const CLOSING_RE = /^[ \t]*(RESULT|Result|result|结论|NEED|PROGRESS)[ \t]*[:：][ \t]*/gm;
-const ARTIFACT_RE = /^[ \t>*|-]*ARTIFACT[ \t]*[:：][ \t]*(\S+)(?:[ \t]+(?:—|--|-|:)[ \t]*(.*))?$/gm;
-
-/** Keep offsets stable while hiding fenced code, block quotes and inline code. */
-export const topLevelText = (text: string): string => {
-  let fence = "";
-  return text.split(/(?<=\n)/).map((line) => {
-    const opener = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
-    if (fence) {
-      if (opener && opener[1]![0] === fence[0] && opener[1]!.length >= fence.length
-          && !line.slice(opener[0].length).trim()) fence = "";
-      return line.replace(/[^\n]/g, " ");
-    }
-    if (opener) {
-      fence = opener[1]!;
-      return line.replace(/[^\n]/g, " ");
-    }
-    if (/^[ \t]{0,3}>/.test(line) || /^(?: {0,3}\t| {4})/.test(line)) return line.replace(/[^\n]/g, " ");
-    return line.replace(/(`+)[^`]*?\1/g, (s) => s.replace(/./g, " "));
-  }).join("");
-};
-
-/** 行首装饰: 模型把约定抄成 markdown —— inline code 的反引号 (成对或只剩开头)、引号、加粗/斜体、
- *  列表符、引用符, 都会让锚行首的收口判定整句落空 (那一行永远不落定, 只剩 idle-nudge 反复追问);
- *  成对的收尾还会让 topLevelText 把整行当代码抹掉。开头的装饰串与同行配对的收尾都换成空格:
- *  长度不变, 判定与切片用同一份文本 (切片取 norm, 收尾就随 trim 一起消失)。
- *  围栏 (``` / ~~~) 原样交给 topLevelText —— 代码块里的同名标记不算收口, 也不许在这里被翻成围栏。
- *  只剥行首, 正文中段出现的关键字照旧不算收口。 */
-const LEAD_DECOR_RE = /^[ \t>*+\-_`'"「『]+/;
-const TRAIL_DECOR_RE = /[ \t*_`'"」』]+$/;
-const FENCE_RE = /^[ \t]{0,3}(?:`{3,}|~{3,})/;
-const unquoteMarkLine = (text: string): string => text.split("\n").map((line) => {
-  const lead = LEAD_DECOR_RE.exec(line);
-  if (!lead || !/[^\s]/.test(lead[0]) || FENCE_RE.test(line)) return line;   // 纯缩进 / 围栏不动
-  const rest = line.slice(lead[0].length);
-  if (FENCE_RE.test(rest)) return line;                                       // 别把 > ``` 翻成围栏
-  const trail = TRAIL_DECOR_RE.exec(rest);
-  // 装饰串**整段去掉**而不是换成空格: 补回空格会把标记顶到第 4 列, topLevelText 又把它当缩进代码块抹掉。
-  // 归一化后的文本只给判定/切片自己用 (visible 与 norm 同源), 不必与原串等长。
-  return trail ? rest.slice(0, trail.index) : rest;
-}).join("\n");
-
-// 回执署名四态 (2026-11-13 人口径 B): 新写法 = 行首 `.name RESULT:` (与人的点名写法同形,
-// wizard 之间不带记号); 存量三态 `@name` / `@.name` / `@🧙‍♂️ name` 长期照认。
-// @ 形态名字后必须紧跟 RESULT (不误伤普通提及); 点形态锚行首 (列表标记之后), 免得
-// 正文里的小数/版本号 ("2.9.0 RESULT:") 被当成收件人。
-const AT_RESULT_RE = new RegExp(`@(?:\\.|${MAGE_SRC}[ \\t]?)?([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm");
-const DOT_RESULT_RE = new RegExp(`^[ \\t>*-]*\\.([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm");
-
-export const addressedResults = (text: string): Array<{ name: string; body: string }> => {
-  const norm = unquoteMarkLine(text);
-  const visible = topLevelText(norm);
-  const marks = [
-    ...visible.matchAll(AT_RESULT_RE),
-    ...visible.matchAll(DOT_RESULT_RE),
-  ].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-  return marks.map((m, i) => {
-    const next = marks[i + 1]?.index;
-    const start = m.index ?? 0;
-    const line = next === undefined ? -1 : text.lastIndexOf("\\n", next - 1) + 1;
-    const currentLine = text.lastIndexOf("\\n", start) + 1;
-    const end = line > currentLine ? line : next;
-    return { name: m[1]!, body: norm.slice(start + m[0].length, end).trim() };
-  });
-};
-
-/** 这句话是不是回执 —— **关键字优先** (口径 B): 带收口关键字 (`RESULT:` / `NEED:` /
- *  `PROGRESS:` / `ARTIFACT:`) 就是回执, 不以有没有 @ 为前提。判定 (未归属轮的收口放行)
- *  读它; 收件人解析才看 addressedResults 的四态。
- *  两层: 行首锚定的收口 (parseClosing) 与 ARTIFACT 行是强信号; 句中的关键字 (如
- *  `@bob 那件如何? RESULT: …` —— @ 后的名字没紧跟 RESULT, 四态不认) 是弱信号, 只用于
- *  判定放行, 不用于抽取 —— 最终结算仍走 parseClosing 的严格形态, 误放不会误结。 */
-const RECEIPT_KEYWORD_RE = /(?:RESULT|NEED|PROGRESS|ARTIFACT)[ \t]*[:：]/;
-/** 完成类关键字 (RESULT / ARTIFACT): 弱信号里唯一能证明「它认为这件事完了」的那一类。
- *  NEED / PROGRESS 即使只有关键字也是中途态 —— 不许拿它给路由行收终态。 */
-const COMPLETION_KEYWORD_RE = /(?:RESULT|ARTIFACT)[ \t]*[:：]/;
-export const completionKeyword = (text: string): boolean => {
-  const c = parseClosing(text);
-  return c.kind === "result" || c.artifacts.length > 0
-    || COMPLETION_KEYWORD_RE.test(topLevelText(unquoteMarkLine(text)));
-};
-export const receiptKeyword = (text: string): boolean => {
-  const c = parseClosing(text);
-  // 弱信号与强信号看同一份文本: 行首 inline-code 包装已被 unquoteMarkLine 剥掉, 被整行当
-  // 代码抹掉的关键字 (配对反引号) 才不会漏过「这是不是回执」的判定。
-  return c.kind !== "none" || c.artifacts.length > 0 || RECEIPT_KEYWORD_RE.test(topLevelText(unquoteMarkLine(text)));
-};
-
-
-export const parseClosing = (text: string, max = 800): Closing => {
-  // 与 addressedResults 同一份归一化: 行首那个 inline-code 开引号不算收口形态的一部分。
-  const norm = unquoteMarkLine(text);
-  const visible = topLevelText(norm);
-  const visibleLines = visible.split(/\r?\n/);
-  const artifacts = text.split(/\r?\n/).flatMap((line, i) => {
-    if (!/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(visibleLines[i] ?? "")) return [];
-    return [...line.matchAll(ARTIFACT_RE)];
-  }).map((m) => ({ path: m[1]!.replace(/^`|`$/g, ""), note: (m[2] ?? "").trim() }))
-    .filter((a) => !/^<.*>$/.test(a.path)); // 复述格式时的 `<路径>` 占位
-  // 标记之后的**全部**内容, 而不是"那一行" —— 结论常常不止一行 (路径一行、说明
-  // 一行)。约定是收口在最后, 所以标记之后剩下的就是结论。取最后一个匹配: 模型常
-  // 先复述一遍格式要求再给答案。ARTIFACT 行不算结论正文。
-  const marks = [...visible.matchAll(CLOSING_RE)];
-  // 最后一个有效标记决定收口；忽略 NEED: 无，但不能让较早的 RESULT 吞掉后续求助。
-  const closing = marks.map((m, i) => {
-    const start = (m.index ?? 0) + m[0].length, end = marks[i + 1]?.index;
-    const shown = visible.slice(start, end).split(/\r?\n/);
-    const body = norm.slice(start, end).split(/\r?\n/)
-      .filter((_line, n) => !/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(shown[n] ?? "")).join("\n").trim();
-    return { kind: m[1] === "NEED" ? "need" as const : m[1] === "PROGRESS" ? "progress" as const : "result" as const, text: body };
-  }).filter((c) => c.kind === "result" || (c.text && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(c.text))).at(-1);
-  return closing ? { ...closing, text: clipMiddle(closing.text, max), artifacts } : { kind: "none", text: "", artifacts };
-};
-
-// 行首收口标记只起定位/判定作用: 剥只发生在投递出口 (群气泡 / wizard 收件箱),
-// 判定 (parseClosing / finalKind / finalReleased) 一律读原文。NEED 的语义由路由行
-// 状态与信封 status 携带, 正文里再带一个 `NEED:` 前缀只会让人疑惑。
-const LEADING_MARK_RE = /^[ \t]*(?:RESULT|Result|result|结论|NEED|PROGRESS)[ \t]*[:：][ \t]*/;
-/** 剥掉正文行首的 `RESULT:` / `NEED:` / `PROGRESS:` 收口标记 (含全角冒号)。 */
-export const stripClosingMark = (text: string): string => text.replace(LEADING_MARK_RE, "");
-/** 群气泡版: 再剥掉 ARTIFACT 交付行 —— 本机路径对群里的读者没有用途 (要文件走 send_file)。 */
-export const stripForChat = (text: string): string =>
-  stripClosingMark(text).replace(new RegExp(ARTIFACT_RE.source, "gm"), "").replace(/\n{3,}/g, "\n\n").trim();
-
 /** The peer's most recent assistant message — the handoff payload when one
  *  agent drives another ("take #fix's conclusion and review it"). */
 export const lastAssistantText = (jsonlPath: string, max = 4000): string =>
@@ -599,7 +460,7 @@ export const lastAssistantText = (jsonlPath: string, max = 4000): string =>
 
 /** 掐中间: 来龙去脉在头、结论在尾, 超长时丢的该是中段。(从尾巴截会把收口那一行
  *  截掉 —— 而那恰恰是对方最想读的。) */
-export const clipMiddle = (s: string, max = 4000, head = Math.floor(max / 4)): string => {
+const clipMiddle = (s: string, max = 4000, head = Math.floor(max / 4)): string => {
   if (s.length <= max) return s;
   const cut = s.length - (max - head);
   // 切口落在代码块里: 头一段补上收尾 fence, 尾一段补上开头 fence —— 不然略号之后的
@@ -655,22 +516,6 @@ export const replyToPeer = (
  *  它没答完, 不能当结论投回去。 */
 export interface PeerReply { text: string; error?: true }
 
-/** 交接那一刻, `from` 那一句在旧会话里**收口**了没有 —— 比 replyToPeer 再严一档。
- *
- *  自我交接是在某一轮**中途**调的: 那一轮最后一条 assistant 是"已交接"之类的收尾,
- *  不是答案。所以只认在 `untilMs` 之前就被下一句 user 行关上的那一轮: 问话那一轮
- *  还开着 (就是交接这一轮) → "", 这份回执的义务跟着简报转进新会话。三态同 replyToPeer。 */
-export const replyClosedBefore = (
-  jsonlPath: string,
-  _fromName: string,
-  sinceMs: number,
-  untilMs: number,
-  turn?: string,
-): string | undefined => {
-  const r = answerOf(askWindow(jsonlPath, sinceMs), sinceMs, turn);
-  return r && (r.closedAt !== undefined && r.closedAt < untilMs && !r.error ? r.text : "");
-};
-
 /** `from` 那一句 (发话时刻之后最新的那次) 所在那一轮的终句。答案止于**下一句 user 行**:
  *  这一轮还开着、最后一句又是中途句 (`mid`, 后面跟着工具调用) → 还没答完, 回 "" 让调用方
  *  接着等 —— 忙闲判定会在长工具调用 / 生成的间隙误报一次「闲了」, 那时取到的是
@@ -697,10 +542,6 @@ const resumesAt = (ts: readonly MarkedTurn[], i: number): boolean =>
 export const openingOf = <T extends MarkedTurn>(ts: readonly T[]): T | undefined =>
   ts.filter((t, i) => t.role === "user" && !t.queued && !t.notice && !resumesAt(ts, i)).at(-1);
 
-/** 开最近这一轮的那句 user 行, 往回读到有为止 (不受 TAIL_BYTES_MAX 限制) —— 一轮再长,
- *  「这一轮是谁发起的」也要认得出 (父 k、链头、打断会不会误伤别人的活都靠它)。 */
-export const openingTurn = (jsonlPath: string): Turn | undefined =>
-  openingOf(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, false, true), (ts) => !!openingOf(ts), Infinity));
 const answerOf = (
   ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: AskEnv }[],
   sinceMs: number,
@@ -724,7 +565,7 @@ const answerOf = (
 // wait_peer 上, 这一回会给它多排一轮, 两边就此乒乓)。信封把这三件事写在每一轮
 // 自己身上: 宪章是出生时的快照, 正在跑的老 wizard 读不到新规矩, 这一段读得到。
 // 与 mention hint / 名册增量同一个 `<system-reminder>` 壳 —— mirror 的 meta 剥离器
-// 和 tailTurns 都会丢掉它, 不进气泡、不进 rolepage、不进 peek。
+// 和 talkTurns 都会丢掉它, 不进气泡、不进 rolepage、不进 peek。
 //
 // 信封同时是 transcript 里**唯一**记着「这句话是谁、在哪个频道说的」的地方: 会话的
 // jsonl 只知道输入框里进过什么。read_chat 就靠把它读回来 (parseEnvelope) 在各个
@@ -745,97 +586,7 @@ export const renderStewardHint = (): string =>
     "管家自查: 进度 / 闲聊 / 你已知道的 → 自己答; 要看代码才答得了的 (机制、原理、「现在还会不会…」、方案、排查、改动), 哪怕看一眼就像能答 → 先 `delegate` 派出去; 多处改动或要 coder + reviewer 的带 `lead:true` 开需求单。",
   ]);
 
-/** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */
-export const renderTaskEnvelope = (taskId: string, channel: string, quiet?: { event: string }): string =>
-  renderReminder(envelopeAttrs.task(taskId, channel, quiet?.event), quiet
-    ? ["定时任务到点放进来的, 不是人此刻说的, 而且**有事才说**: 这一轮私下跑, 没人在看。",
-        "照常执行。看完**没有值得人知道的**, 最后一条消息就只写一行 `QUIET`, 什么也不会发出去; 有, 就把最后一条消息写给人看 —— 守护进程原样转进群。",
-        "要派活给别的 wizard, 就在这一轮里用 `wait_peer` 把结果拿回来再收口 —— 回执要等这一轮结束才到, 那时已经没人替你转发。"]
-    : ["定时任务到点放进来的, 不是人此刻说的 —— 照常执行, 回复照常发进群。"]);
 
-/** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
- *  不给 = 私聊; `chatKey` = 那个群的稳定 key (read_chat 按 key 归档, 名字只做显示)。 */
-export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string, t?: TurnTag & { legs?: number }): string =>
-  renderReminder(envelopeAttrs.peer(from, chat, t?.asker, chatKey), [
-    ...(chat === undefined
-      ? [
-          "这是 dm room 里的一条消息 (非绑定, 只有你们两边看得见), 不是人此刻说的。",
-          ...(t?.quiet || t?.act === "fyi"
-            ? ["发话方不等回话; 不用为确认收到而另发一条。"]
-            : [
-                "终句不送给任何人 —— 要交代就用 chat_reply({re: 信封上的 msg, text: 结论, status: \"done\"}), 不要为确认收到另发一条消息。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论 / commit / 文件路径一句话讲清, 取舍与遗留单列一段; 需要对方补信息就往回 chat_reply({status: \"need\"}), 要另派一件新活就开一条 chat_ask。交付了文件就在同一轮 send_file。",
-              ]),
-        ]
-      : [
-          `这条消息在绑定 room 里, 你的话也必须写回这个 room (chat_reply / chat_say) —— 终句只进 rolepage, 谁也不会收到${t?.quiet || t?.act === "fyi" ? "。发话方也不等回话" : ""}; 不要重复同一段结论。`,
-        ]),
-    ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
-    // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话, 放进 chat_reply({re, text}) 就把它关账。需要反问就 status: \"need\", 要派生新任务另开一条 chat_ask。`] : []),
-    ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
-    // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
-    ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
-  ]);
-
-/** 回执的信封 —— 这一轮是对方干完活、守护进程自动送回来的结论, 不是新派的活。
- *
- *  为什么必须有它: 回执是原样 paste 进输入框的, 而落进输入框的东西在模型眼里都是
- *  「有人在对我说话」。没有这一段, 它会把一份结论当成一件新活去做, 或者客气地回它
- *  一句 —— 而回那一句又会被对方当成新的一轮。所以这里写明这是回执、正文承载回执内容、
- *  读完接着干你自己的, 别只为确认收到而回话；只写 QUIET 会吞掉已有人等着的结论。 */
-export const renderReceiptEnvelope = (
-  from: string,
-  chat?: string,
-  status: ReceiptStatus = "done",
-  turn?: string,
-  route?: ReceiptRoute & { pending?: number },
-  chatKey?: string,
-): string => {
-  // 这份结论有没有人等着听: 回给上游 wizard (up) / 落回那个群 (chat) / 迟到但有追述去处。
-  const speaks = chat !== undefined || route?.up === true || (route?.late === true && !!route.retellTo);
-  const bodyRule = status === "done"
-    ? `这是回执，不是人说的话或新派的活；正文是对方这一轮的回复。${route?.late ? "" : "普通完成回执的正文默认就是结论；终句用自己的话交代做成了什么、没做成什么，无需 RESULT:。"}据此继续手头工作，不要仅为确认收到而回话。`
-    : status === "need" ? "这是反问回执，正文写明所需信息；答复后会再送回执。"
-      : status === "progress" ? "这是进展回执，正文是对方报的一行进展；任务还没落定，终句回执会在之后送到。"
-        : status === "error" ? "这是 CLI 错误回执，正文是报错信息，不是结论；若续跑后答出结论，会再送回执。"
-        : status === "canceled" ? "这是已取消的失败回执，正文是守护进程说明和它最后说的一句；原任务已取消。"
-          : status === "passed" ? "这是已了结回执 (无需答复): 这笔义务不再等, 正文是守护进程的说明。"
-          : `这是失败回执 (${FAILED[status]})，本次按失败落定；后续仍可续问或补交。正文是守护进程说明和它最后说的一句。`;
-  return renderReminder(envelopeAttrs.receipt(from, chat, status, turn, route, chatKey), [
-    bodyRule,
-    speaks
-      ? "有人等这份结论，不要只写 QUIET。"
-      : "无人等这份结论；只有没有新结果、风险或待答 NEED 时，终句才精确写 QUIET。",
-    "需要对方补信息或协作时用 chat_reply({status: \"need\"}) 或另开一条 chat_ask；还在等依赖用 WAIT: <在等什么>。这一轮的结论用 chat_reply({re, text, status: \"done\"}) 交出去。",
-    ...(route?.via ? [`这是**沿链升级**的回执: ${route.via} 已不在，原由它收口的任务交由你处理。`] : []),
-    ...(route?.retold ? ["这是它对这件活的**追述**: 之前已经交过一份 (定论或失败回执), 这一份是之后补的, 以这一份为准。"] : []),
-    // 去向由路由行的 receiver 边算好 (§9.5): up = 终句落到上游那一笔上; chat 给了 = 落回那个群;
-    // late = 它服务的那一笔已收口 (孤儿) —— 压过前两种: 只有带 `RESULT:` 的终句作为追述沿原路再投。
-    ...(route?.late
-      ? [route.retellTo
-        ? chat !== undefined
-          ? `这一笔的上一环已经收口, 结论**迟到了**: 终句带 RESULT: 才作为追述进群 ${route.retellTo} (用你自己的话交代); 不带就只进 rolepage。`
-          : `这一笔的上一环已经收口, 结论**迟到了**: 终句带 RESULT: 才作为追述沿原路投给 ${route.retellTo}; 不带就只进 rolepage。`
-        : "这一笔的上一环已经收口 (被收掉或已回收), 结论**迟到了**: 你这一轮的终句只进 rolepage, 要人知道就明说。"]
-      : route?.up
-      ? ["交给上游 wizard。"]
-      : chat !== undefined
-        ? [`投给群里的${route?.audience ? " `audience`" : "人"}。`]
-        : route?.pending
-          ? [`还有 ${route.pending} 份没回: 先记下这一份, 等最后一份到了再汇总。`]
-          : ["人看不见这段私聊。"]),
-    ...(turn && status !== "canceled" ? [`若需追问或补充，用 chat_ask({to: '${from}', for: <原消息 id>}) 续同一笔。`] : []),
-  ]);
-};
-
-const FAILED: Record<Exclude<Terminal, "done">, string> = {
-  timeout: "等到期限它还没答完",
-  silent: "它停下了几次, 都没有答这一句",
-  dead: "它的 pane 没了 (被收掉或崩了)",
-  canceled: "它这件活被人收掉 / 打断了",
-  passed: "这笔义务已按『无需答复』了结",
-};
 
 /** Prompt-token size of the session's most recent turn: input + both cache
  *  tiers = how full the context window is, i.e. exactly what a cold cache would
@@ -1196,7 +947,7 @@ export interface PeerMention {
 }
 
 /** Machinery, not conversation: the `<system-reminder>` wrapper is the same
- *  marker the mirror's meta-stripper and `tailTurns` already drop, so the hint
+ *  marker the mirror's meta-stripper and `talkTurns` already drop, so the hint
  *  reaches the agent's context without leaking into WeCom bubbles or peer
  *  summaries. A wizard already introduced within the recent injections (`seen`)
  *  only gets its name re-listed — the full row is still in context; the usage
