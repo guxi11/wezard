@@ -29,6 +29,23 @@ npm run build && ./cli/wezard.sh reload    # rebuild, then bounce the resident d
 
 When the user says **"reload"** in this repo, it means exactly: `npm run build && ./cli/wezard.sh reload`. The global `wezard` binary may not be on `$PATH` in dev shells — always invoke `./cli/wezard.sh` from the repo root. After a development unit, build once, reload the daemon, then restart the existing svr service with `launchctl kickstart -k "gui/$(id -u)/com.wezard.svr"` on macOS or `systemctl --user restart wezard-svr.service` on Linux. Operational-only requests keep their requested scope; daemon reload does not restart svr.
 
+### 前端验证: 怎么截图
+
+改了 `web/chat.js` / `web/chat.css` / rolepage 渲染后, 别只看代码: 截一张图亲眼看。
+
+```bash
+node scripts/shot.mjs --role <名字|chat:wr…>                 # 桌面 1440×900 → ~/.wezard/shots/*.png, 末行打印路径
+node scripts/shot.mjs --role <…> --mobile                    # 窄屏 390×844 (窄屏左栏要先 --click 'button.back')
+node scripts/shot.mjs --role <…> --click 'button.vt[data-side="graph"]' --wait 4000   # 关系图
+node scripts/shot.mjs --role <…> --click 'text=A ↔ B'         # 点进某个 room (--selector 只截元素, --full 整页)
+```
+
+- 要先 `npm run build && ./cli/wezard.sh reload`: 它截的是**正在跑的**守护进程。票据现从 `<stateDir>/details.jsonl` 取, 不用自己找, 也别把带 `?id=` 的 URL 贴进日志或仓库。
+- 截完用 `Read` 看图, 要给人看就 `send_file` 发进群。
+- 首次 (或换机器) 先 `sh scripts/shot-setup.sh`: 不用 sudo, 装 chromium-headless-shell + 缺的系统库 + 中文/emoji 字体到用户目录 (~310MB 盘)。`NODE_ENV=production` 的机器要 `npm install --include=dev` (playwright 是 devDependency)。
+- **内存**: 本机 3.7GB, 一次截图峰值 ~300MB; 脚本带单实例锁, 并发只许 1 个, 别在多个分身里同时截。用完即关, 无常驻进程。
+- `tests/room-graph.dom.mjs` 现在能起浏览器跑了 (目前还有一处 fixture 缩放断言过期, 见 CHANGELOG): `LD_LIBRARY_PATH=$HOME/.cache/wezard-shot-libs/root/usr/lib/x86_64-linux-gnu node tests/room-graph.dom.mjs`。
+
 ## Release / changelog
 
 Every version bump **must** update `CHANGELOG.md` — no release without a changelog entry. Follow [Keep a Changelog](https://keepachangelog.com/) + [SemVer](https://semver.org/):

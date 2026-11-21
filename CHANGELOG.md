@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- **wizard 能截网页了: `scripts/shot.mjs` + `scripts/shot-setup.sh` (人 2026-11-21「为什么你没有web截图能力，补全」)**: 本机没有任何浏览器, 前端改动只能 vm 桩 / 看代码验证。`node scripts/shot.mjs --role <名字|target>` 用 headless chromium 给本机 rolepage 截 png (`--mobile` 窄屏、`--full` 整页、`--selector` 元素、`--click` 先点再截、`--wait-for` / `--wait`、`--url` 任意地址、`--out`), 默认落 `~/.wezard/shots/`, 末行打印绝对路径, 截完用 `send_file` 发进群。票据 (`?id=`) 现从守护进程的 `details.jsonl` 取最新一条 turn, 不硬编码、不进仓库, 输出里一律抹成 `<ticket>`。省内存: 单实例锁 (并发只许 1 个)、单进程 + `--disable-dev-shm-usage` / `--no-sandbox`、截完立刻关浏览器 (实测峰值 ~300MB)。`shot-setup.sh` 一次性、不用 sudo 装好: playwright 的 `chromium-headless-shell` (~290MB, `~/.cache/ms-playwright`)、浏览器缺的系统库 (`apt-get download` + `dpkg -x` 到 `~/.cache/wezard-shot-libs`, 脚本自动挂 `LD_LIBRARY_PATH`)、中文 + emoji 字体 (`~/.local/share/fonts/wezard-shot`, 否则全是方块)。`playwright` 只进 devDependencies, 不在 `files` 白名单里, 不进发布包。顺带修 `tests/room-graph.dom.mjs` 的两处断言漂移 (节点 textContent 带悬浮提示; 左栏视图记在 localStorage 后第二次进页面不能再点「图」), 它现在能真起浏览器跑, 仍在「视窗缩放」一段 (约第 332 行) 超时 —— 真页面缩放正常 (svg 537→687), 是 fixture 与现布局不符, 待查。
+
 ### Removed
 - **企微侧 `/model` 改为 daemon 自答 (人 2026-11-21「会卡住」→「/model 的实现, 换成 daemon 去查接待 wizard 的 model」)**: 它从来不是 daemon 的命令, 只是未知 slash 被原样注入 pane, TUI 弹出交互式模型选择器, 等不到结果就卡住 pane。现在 `daemon/inbound.ts` 在授权后拦下 `/model [..]`, 绝不注入 pane, 由 daemon 查接待 wizard (这条消息路由到的会话, 含 slot / `.name`) 的 `bridge.sessionInfo`: 模型取 transcript 最近一轮 assistant 的真实 model (`lastModel`, 绑定里只是启动参数, 兜底), 回 `[wezard] .name 当前模型: <model> · effort <e> · cli <backend>`; 无会话回「当前无活会话, 新会话用 <默认 cli> 默认模型」; 带参数仍不切换, 附「换模型请让 wizard 用 set_model 或改 config」。`/help` 补 `/model`。MCP `set_model`、`POST /wizard/model`、config 的 model / tiers 不动。
 

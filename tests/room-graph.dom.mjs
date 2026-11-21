@@ -275,7 +275,8 @@ try {
   const g2 = await page.evaluate(() => ({
     roomNodes: [...document.querySelectorAll(".rv-room")].map((e) => e.getAttribute("data-room")),
     links: [...document.querySelectorAll("line.rv-hit")].map((l) => l.getAttribute("data-link")),
-    people: [...document.querySelectorAll(".rv-person")].map((e) => e.textContent.trim()),
+    // 取名字那行文本: 节点的 textContent 还带着悬浮提示 (<title>), 整串比对会对不上名字。
+    people: [...document.querySelectorAll(".rv-person")].map((e) => ([...e.querySelectorAll("text")].pop() || e).textContent.trim()),
   }));
   assert.ok(g2.roomNodes.includes(HM), "有 human 成员的两人 room 仍画 room 节点: " + JSON.stringify(g2));
   assert.ok(!g2.links.includes(HM), "有 human 成员的 room 不画直连线");
@@ -319,7 +320,8 @@ try {
 
   // 视窗缩放: graph 区域跟着调尺寸, 节点元素 / 坐标原样保留 (不整图重排)。
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
-  await page.click('[data-side="graph"]');
+  // 左栏视图记在 localStorage: 上一段已经停在图上时按钮是「换成列表」, 不能再点。
+  if (!(await page.$(".rv-graph"))) await page.click('[data-side="graph"]');
   await page.waitForSelector(".rv-person", { timeout: 5000 });
   const sz0 = await page.evaluate(() => {
     const sv = document.querySelector(".rv-graph");
