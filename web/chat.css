@@ -54,10 +54,17 @@ button { font: inherit; color: inherit }
 
 /* ── 侧栏: 我 + 会话 ─────────────────────────────────────────────── */
 .side {
-  /* 宽屏按页宽 25% 放大, 窄时不低于 332px; 关系图要半屏。 */
-  width: max(332px, 50vw); flex: none; background: var(--card); border-right: 1px solid var(--line);
+  /* 宽屏按页宽放大, 窄时不低于 332px; 关系图默认 40%, 列表 25% (chat.js 的拖拽条按视角各记一个宽度, 盖过这里)。 */
+  position: relative; width: max(332px, 40vw); flex: none; background: var(--card); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; min-height: 0;
 }
+
+/* 侧栏右缘的拖拽条: 宽屏才有, 双击恢复默认宽度。 */
+.sb-rs { position: absolute; top: 0; right: -4px; bottom: 0; width: 8px; z-index: 6; cursor: col-resize; touch-action: none }
+.sb-rs::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: var(--accent); opacity: 0; transition: opacity .12s }
+.sb-rs:hover::after, .sb-rs.drag::after { opacity: .55 }
+body.sb-dragging { cursor: col-resize; user-select: none }
+@media (max-width: 760px) { .sb-rs { display: none } }
 
 /* ── 左栏顶: 当前 role 的名片 (身份); 关系/日程入口是名片下、会话列表上的一排 ──── */
 .rolebar {

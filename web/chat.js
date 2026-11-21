@@ -766,9 +766,42 @@
     convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { goRoom(e.getAttribute('data-room')); }; });
   };
   // 列表不需要图那么宽: 左栏收窄, 把宽度还给 chat detail (图仍占半屏, 力导向要地方)。
+  // ── 侧栏宽度: 拖右缘调, 「列表」与「图」两种视角各记各的 (localStorage wz.sbw.list / wz.sbw.graph); 双击恢复默认; 窄屏不启用。
+  var narrow = function () { return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches); };
+  var SBW_MIN = 220, SBW_MAX = 0.7;
+  var sbwKey = function () { return 'wz.sbw.' + (S.view === 'graph' ? 'graph' : 'list'); };
+  var sbwClamp = function (w) { return Math.round(Math.max(SBW_MIN, Math.min(w, window.innerWidth * SBW_MAX))); };
+  var sbwStored = function () { try { return Number(localStorage.getItem(sbwKey())) || 0; } catch (e) { return 0; } };
+  var sideEl = document.querySelector('.side');
+  var applySbw = function () {
+    if (!sideEl) return;
+    var w = sbwStored();
+    sideEl.style.width = w && !narrow() ? sbwClamp(w) + 'px' : '';
+  };
+  if (sideEl && !sideEl.querySelector('.sb-rs')) {
+    var rs = document.createElement('div');
+    rs.className = 'sb-rs'; rs.title = '拖动调整宽度 · 双击恢复默认'; rs.setAttribute('role', 'separator'); rs.setAttribute('aria-orientation', 'vertical');
+    sideEl.appendChild(rs);
+    rs.onpointerdown = function (e) {
+      if (narrow()) return;
+      e.preventDefault();
+      var x0 = e.clientX, w0 = sideEl.getBoundingClientRect().width;
+      rs.setPointerCapture(e.pointerId); rs.classList.add('drag'); document.body.classList.add('sb-dragging');
+      rs.onpointermove = function (ev) { sideEl.style.width = sbwClamp(w0 + ev.clientX - x0) + 'px'; };
+      var done = function () {
+        rs.onpointermove = rs.onpointerup = rs.onpointercancel = null;
+        rs.classList.remove('drag'); document.body.classList.remove('sb-dragging');
+        try { localStorage.setItem(sbwKey(), String(Math.round(sideEl.getBoundingClientRect().width))); } catch (er) { /* 无痕 */ }
+      };
+      rs.onpointerup = rs.onpointercancel = done;
+    };
+    rs.ondblclick = function () { try { localStorage.removeItem(sbwKey()); } catch (e) { /* 无痕 */ } applySbw(); };
+    window.addEventListener('resize', applySbw);
+  }
   var renderSide = function () {
     var app = $('#app');
     if (app) app.classList.toggle('side-list', S.view !== 'graph');
+    applySbw();
     if (S.view === 'graph') renderGraph(); else renderList();
   };
 
@@ -1591,7 +1624,6 @@
   // 只有「从 detail 区里发起」的跳转才压 view 格 —— 侧栏 / 图里点来点去是平级切换, 不堆栈。
   S.stack = []; S.fromMain = false;
   document.addEventListener('click', function (e) { S.fromMain = !!(e.target && e.target.closest && e.target.closest('.main')); }, true);
-  var narrow = function () { return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches); };
   var chatheadEl = $('#chathead');
   var syncJb = function () {
     if (!chatheadEl) return;

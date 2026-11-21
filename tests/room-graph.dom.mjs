@@ -339,6 +339,21 @@ try {
   assert.equal(sz1.same, true, "缩放不重建节点");
   assert.ok(sz1.h > sz0.h, "高度也跟着变大: " + JSON.stringify({ sz0, sz1 }));
 
+  // 侧栏拖拽调宽: 图视角记 wz.sbw.graph (与列表的 wz.sbw.list 互不相干), 图随之重算; 双击恢复默认。
+  const sw0 = await page.evaluate(() => ({ side: document.querySelector(".side").getBoundingClientRect().width, svg: +document.querySelector(".rv-graph").getAttribute("width") }));
+  assert.ok(Math.abs(sw0.side - 560) < 3, "图视角默认 40% 宽 (1400 * 0.4): " + sw0.side);
+  const hb = await (await page.$(".sb-rs")).boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2 + 120, hb.y + 200, { steps: 4 });
+  await page.mouse.up();
+  const sw1 = await page.evaluate(() => ({ side: document.querySelector(".side").getBoundingClientRect().width, key: localStorage.getItem("wz.sbw.graph"), list: localStorage.getItem("wz.sbw.list") }));
+  assert.ok(Math.abs(sw1.side - (sw0.side + 120)) < 3 && Number(sw1.key) === Math.round(sw1.side) && sw1.list === null, "拖动后图视角宽度被记住, 列表那份不动: " + JSON.stringify(sw1));
+  await page.waitForFunction((w) => +document.querySelector(".rv-graph").getAttribute("width") > w + 60, sw0.svg, { timeout: 5000 });
+  await page.dblclick(".sb-rs");
+  const sw2 = await page.evaluate(() => ({ side: document.querySelector(".side").getBoundingClientRect().width, key: localStorage.getItem("wz.sbw.graph") }));
+  assert.ok(Math.abs(sw2.side - sw0.side) < 3 && sw2.key === null, "双击恢复默认并清掉记录: " + JSON.stringify(sw2));
+
   // 移动端 (≤760px): 列表 / 图与 chat detail 二选一; 点进聊天看得到 detail, ‹ 返回列表。
   await page.setViewportSize({ width: 400, height: 760 });
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
