@@ -437,7 +437,7 @@ const renderTaskNotification = (block: string): string => {
 const cleanUserText = (wrapped: string): string => {
   // 多行注入落盘时被 CLI 包了一层 `<pasted_content>` (见 peers.unwrapPasted) —— 先剥,
   // 否则回显去重对不上, 我们自己注入的那一行会被认成「人在 CLI 里敲的」, 整轮回复
-  // 因此被 chatOriginOnly 挡在群外 (公开的 tell_peer / 定时任务的多行提示全中)。
+  // 因此被 出处门 挡在群外 (公开的 tell_peer / 定时任务的多行提示全中)。
   const raw = unwrapPasted(wrapped);
   const nameMatch = raw.match(SLASH_TAG_RE);
   const slashCmd = nameMatch?.[1]?.trim() ?? "";
@@ -3128,7 +3128,7 @@ interface AttachState {
    *  user 行必然来自键盘 (或平台回灌)。 */
   pendingFromCli?: boolean;
   /** 本轮 (或最近一轮) 的出处: true = WeCom 发起, false = CLI 手敲。CLI 轮只写
-   *  chat 详情页, 不占聊天消息 (chatOriginOnly)。收口不清零 —— 收口后补写进来的
+   *  chat 详情页, 不占聊天消息 (出处门)。收口不清零 —— 收口后补写进来的
    *  零星 item 属于同一场对话, 沿用上一轮的出处。 */
   turnFromChat?: boolean;
   /** Subagent (Task/Agent 工具) 转录观察器 — tail `<sid>/subagents/agent-*.jsonl`,
@@ -4675,7 +4675,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // user 行只作边界信号 (上面已清账/推进轮次), 不渲染。brief 下无条件丢:
     // 有活跃 turn 时 handleBriefItem 本就丢它, 没有 turn 时 (user_text 不是
     // BRIEF_TURN_OPENERS) 它会一路穿到底部的 standalone fallback —— includeUser=true
-    // 的配置下, 人在 CLI 敲的那一行就这么原样回显进了群, 正好破了 chatOriginOnly。
+    // 的配置下, 人在 CLI 敲的那一行就这么原样回显进了群, 正好破了 出处门。
     if (item.kind === "user_text" && (item.quiet || briefMode(a))) return;
     // thinking 唯一的出口是 brief 气泡的 CoT 进度行。必须在这里就吃掉 —— 漏到下面任何
     // 一条通道 (deferred buf → renderBuf / standalone / stream append) 都会把它写进正文,
@@ -8285,7 +8285,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // syncTmuxToSystemClipboard 冲掉, 见 injectViaTmux 分流注释) —— 图片只能以
       // @<path> 文本进会话。既然如此, 问话 / 印章 / 回显去重 / 静默分叉跟随都按这个
       // 最终落盘形态记 (与 inject 拿到的同一个字符串); 否则落盘的 `@<path>` 行认不出
-      // 是自己注入的: 被当成 CLI 手敲另开幽灵轮、触发 chatOriginOnly 吞回复, 而 IM 侧
+      // 是自己注入的: 被当成 CLI 手敲另开幽灵轮、触发 出处门 吞回复, 而 IM 侧
       // 预建的 turn 永远等不到问话改写, rolepage 的入消息丢了图 (rolepage 一律按 CLI
       // 最终展示的那条消息渲染)。slash / /clear 判定仍用原始 text —— 命令不带图。
       const refsFirst = backendForPath(a.jsonlPath).name === "codebuddy" && (images?.length ?? 0) > 0;

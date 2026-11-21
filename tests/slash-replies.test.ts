@@ -8,7 +8,7 @@ import { renderSyncReport } from "../daemon/cfg-sync.js";
 import { renderAccounts } from "../daemon/weixin-cmd.js";
 
 // Run the production reply closures with controlled transports, avoiding tmux
-// or live sessions while checking both legacy slashAckFirstLine settings.
+// or live sessions.
 const mirror = readFileSync("daemon/mirror-bridge.ts", "utf8");
 const inbound = readFileSync("daemon/inbound.ts", "utf8");
 const transpile = (source: string): string => ts.transpileModule(source, {
@@ -24,10 +24,10 @@ const newReply = closure(mirror, "  const pushProjectInfo =", "  // Cwd is CHAT-
 const clearReply = closure(mirror,
   "        if (armMigration) {",
   "        // Don't await the stream's lifetime");
-for (const slashAckFirstLine of [false, true]) {
+{
   const sent: string[] = [];
   const attached = {};
-  const cfg = { wrc: { mirror: { slashAckFirstLine } } };
+  const cfg = { wrc: { mirror: {} } };
   // P7-S2: pushProjectInfo 里多了严格群出站门 (strictBase(baseOfKey(target))) —— 抽出来的
   // 闭包不再自含, 这两个 helper 由测试注入 (与 stripPrincipalPrefix 同一待遇)。
   const push = new Function("cfg", "byTarget", "sendStandalone", "stripPrincipalPrefix", "client", "withTagHeader", "log", "baseOfKey", "strictBase",

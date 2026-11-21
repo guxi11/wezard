@@ -126,11 +126,6 @@ const Mirror = z.object({
   // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页, 不发气泡。
   // 授权卡照常发群 (交互无法替代)。
   brief: hot(z.boolean().default(true).describe("Brief 模式: 一轮在群里只发「本轮详情」链接 + 最终回复")),
-  // 人在 CLI 手敲的那一轮 (以及它触发的斜杠命令回执) 不再下发气泡 —— 镜像改为发生在
-  // 他眼前的终端 + chat 详情页。每个 attachment 首次静默时发一条带链接的提示。
-  // 只在 brief=true 下生效: 抑制的前提是详情页兜住内容, 而 turn store 只有 brief 在写。
-  chatOriginOnly: hot(z.boolean().default(true).describe("出处门: 只把群里发起的轮次下发到群, CLI 手敲的只进详情页")),
-  slashAckFirstLine: hot(z.boolean().default(false).describe("/clear、/new 等斜杠命令回执只发第一行 ack, 不附 tip")),
   // 值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也越大。不设则按
   // 后端自动: codebuddy 1s (派发子 agent 期间由 openAgents guard 拦截), claude 4s。
   softTurnEndMs: hot(z.number().int().positive().optional().describe("软收口静默期 (ms): 多久没有新输出算一轮结束; 不设 = 按后端自动")),
