@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **rolepage 关系图返修 (人 2026-11-21 七条)**: ① 「工作中」不准: `peerInfoOf.busy = isBusy`, 而 isBusy 把「registry idle 却悬着 tool_use」(停在本地审批框等人点) 也算忙, 图上就亮成工作中; 前端又用转录推算的 `runningUntil` 兜底, 静默久了误熄、悬着的轮误亮。现在服务端补 `parked` (同 `parkedNow`), 前端有注册表事实的节点只认服务端 busy, 停在审批框的单独画「等审批」。样式: 工作中 = 绿色 + 整个节点呼吸动画, 去掉外圈 pulse。② room 右上角由「常亮的未决 duty 红点」改成按当前查看 role 的未读数量 (`/api/world` 每个 room 带 `unread` = room 账本里该 wizard 游标之后别人说的行数, `unreadCount`), 点开该 room 后本机清零 (记下当时的 seq), 之后只数新来的。③ 空闲 = 不透明浅灰填充 + 深一点的灰边。④ 缓存冷 = 白色填充 + 灰边。⑤ 「无会话」改名「休眠」并说清定位: pane 不在、下一句话 daemon 会重新拉起 —— 与缓存冷 (pane 在、只是提示缓存过 TTL) 不是一回事, 保留不合并; 图例与 tooltip 写明。⑥ host → room 边带箭头 (方向 人 → room, 停在 room 胶囊边上), 用 ⭐ 的黄色 `#f5b301`。⑦ 减少边交叉: 斥力 0.10 → 0.13, 并加「边交叉力」—— 不共端点的两条边相交时把它们的中点沿连线推开 (O(m²) 逐帧, m 为边数)。
+
 ### Fixed
 - **Linux 安装开启 linger, 登出不再停掉 daemon / svr**: 没有 linger 时 systemd --user 的 user manager 跟着最后一个登录会话走 —— 2026-11-21 02:18 ssh 断开, logind 停掉 user manager, wezard.service 与 wezard-svr 一起被停 (Restart=always 不管 systemd 自己发起的 stop), 直到 08:41 再次 ssh 登录才回来: 期间机器人离线, 定时任务 hourly-push 02:51~07:51 的 6 枪全部漏掉, 08:41 那一枪是开机后 `every` 时钟的补放 (`t - since >= 间隔` 只补一枪)。`scripts/install.sh` 在 Linux 分支检查 `Linger`, 未开则 `loginctl enable-linger` (失败再试 `sudo -n`), 都不行就 warn 并给出命令。
 - **rolepage chat detail 点「过程」展开多一层虚线框 (人 2026-11-21)**: room 视图里挂载点 `.rv-box` 自带虚线边, 里面的 `.steps` 过程框又是虚线 —— 框套框。`.rv-msg > .rv-box` 去掉边/内边距/底色, 只留过程框本身的那一层 (`web/chat.css`)。

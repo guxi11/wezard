@@ -259,10 +259,10 @@ try {
   const C = "w" + "3".padStart(12, "0");
   const HM = "user:U1", DM2 = "dm:" + [A, C].sort().join("|");
   ROOMS.push(
-    roomFact(HM, "wecom-dm", [
+    { ...roomFact(HM, "wecom-dm", [
       { who: who("wizard", A), name: "alice", via: "founder", since: 7, ord: 1, host: true },
       { who: who("human", "U1"), name: "张三", via: "inbound", since: 8, ord: 2, host: false },
-    ], who("wizard", A), T0 + 6000),
+    ], who("wizard", A), T0 + 6000), unread: 1 },
     roomFact(DM2, "dm", [
       { who: who("wizard", A), name: "alice", via: "founder", since: 9, ord: 1, host: true },
       { who: who("wizard", C), name: "carol", via: "invite", since: 10, ord: 3, host: false },
@@ -279,11 +279,14 @@ try {
   }));
   assert.ok(g2.roomNodes.includes(HM), "有 human 成员的两人 room 仍画 room 节点: " + JSON.stringify(g2));
   assert.ok(!g2.links.includes(HM), "有 human 成员的 room 不画直连线");
+  assert.equal(await page.evaluate((id) => (document.querySelector('.rv-room[data-room="' + id + '"] .rv-un text') || {}).textContent, HM), "1", "room 右上角是未读数量");
+  await page.click('.rv-room[data-room="' + HM + '"]');
+  await page.waitForFunction((id) => !document.querySelector('.rv-room[data-room="' + id + '"] .rv-un'), HM, { timeout: 5000 });
   assert.ok(g2.people.includes("carol"), "成员不在 world.nodes / 活跃过滤里也补进图: " + JSON.stringify(g2));
   assert.ok(g2.links.includes(DM2), "两 wizard 的 dm 画成直连线: " + JSON.stringify(g2));
   assert.ok(!g2.roomNodes.includes(DM2), "两 wizard 的 dm 没有 room 节点");
 
-  // 节点样式: 人 = 方块 / wizard = 圆点; 状态 idle (alice, 缓存热) / warm (bob, cacheCold) / cold (carol, 注册表里没有); host → room 是特殊边。
+  // 节点样式: 人 = 方块 / wizard = 圆点; 状态 idle (alice, 缓存热) / stale = 缓存冷 (bob, cacheCold) / asleep = 休眠 (carol, 注册表里没有); host → room 是特殊边。
   const look = await page.evaluate(() => ({
     human: !!document.querySelector('.rv-person.human rect.sh'),
     alice: document.querySelector('.rv-person[data-node="chat:wrG#guide"]').getAttribute("class"),
@@ -294,8 +297,8 @@ try {
   }));
   assert.equal(look.human, true, "人画成方块");
   assert.match(look.alice, /st-idle/, "alice: pane 在、缓存热 = idle");
-  assert.match(look.bob, /st-warm/, "bob: pane 在、缓存已冷 = warm");
-  assert.match(look.carol, /st-cold/, "carol: 没有会话 = cold");
+  assert.match(look.bob, /st-stale/, "bob: pane 在、缓存已冷 = stale");
+  assert.match(look.carol, /st-asleep/, "carol: pane 不在 = asleep (休眠, 不同于缓存冷)");
   assert.ok(look.hostEdges >= 1, "host → room 是特殊边 (.rv-edge.host)");
   assert.ok(look.plainEdges >= 1, "普通成员边仍在");
   // 增量更新: 数据变了 (bob 开始干活) 只改样式, 节点元素与坐标原样保留, 不整图重画。

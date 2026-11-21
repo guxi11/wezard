@@ -24,8 +24,8 @@ import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, wokeRows, type RoomMsg } from "./room-view.js";
-import type { MsgRow, RenderNames, RoomState } from "./room.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
+import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
@@ -412,8 +412,15 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const records = listRecent(ticket);
       const self = pickRole(makeDirectory(records, f), ticket, url);
       const { at, ...w } = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
+      // 未读 = 当前查看的 role 在每个 room 里游标之后别人说的行数 (room 账本的 member.seen); 只有 wizard 有游标。
+      const uid = f.wizards.find((x) => x.target === self)?.uid ?? (self.startsWith("uid:") ? self.slice(4) : "");
+      const byRoom = new Map(statesNow().map((s) => [s.id, s] as const));
+      const withUnread = (r: RoomFact): RoomFact & { unread: number } => {
+        const s = uid ? byRoom.get(r.id) : undefined;
+        return { ...r, unread: s ? unreadCount(s, { kind: "wizard", id: uid }) : 0 };
+      };
       json(res, 200, {
-        ok: true, at, ...w, plans: w.plans.map(publicPlan),
+        ok: true, at, ...w, rooms: w.rooms.map(withUnread), plans: w.plans.map(publicPlan),
         // 名字表: room 成员只有 id (uid / userid), 图上与消息里的显示名都从这里取。
         chatNames: f.chatNames, names: f.names ?? {}, humanNames: f.humanNames ?? {},
       });

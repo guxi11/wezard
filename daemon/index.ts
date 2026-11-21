@@ -2228,6 +2228,8 @@ const main = async (): Promise<void> => {
           alive: p.paneAlive,
           // 冷热 = 与 roster 的冷门控同一口径: transcript 最近一次动静超过缓存 TTL。
           ...((jp) => (p.paneAlive && jp ? { cacheCold: wakeCostOf(0, touchOf(jp), Date.now(), ttlOf(jp)).cold } : {}))(m.sessionInfo(p.target)?.jsonlPath),
+          // 悬在本地审批框上: isBusy 把它算忙, 但它在等人, 不在干活 (图上单独画, 不亮「工作中」)。
+          ...(p.paneAlive && m.parkedNow(p.target) ? { parked: true } : {}),
           ...(waiting ? { waiting } : {}),
           // 群成员列表 (rolepage): 类实例的序号 + 是不是本群管家, 判定都在 daemon 侧做
           // (cfg + 注册表只有这里有), svr 拿快照照画。

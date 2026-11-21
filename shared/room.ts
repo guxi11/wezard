@@ -570,6 +570,12 @@ export const renderMsgLine = (m: MsgRow, n: RenderNames, max = 500): string => {
   return "[" + m.id + "] " + n.nameOf(m.author) + to + re + statusTag(m) + ": " + (body.length > max ? body.slice(0, max) + "…(+" + (body.length - max) + ")" : body) + files;
 };
 
+/** who 的游标之后、别人说的行数 (不含自己) —— rolepage 的未读角标; 与 unreadFor 同一口径, 不装预算。 */
+export const unreadCount = (s: RoomState, who: Who): number => {
+  const seen = s.members.get(whoKey(who))?.seen ?? 0;
+  return s.msgs.reduce((n, m) => (m.seq > seen && !sameWho(m.author, who) ? n + 1 : n), 0);
+};
+
 export const UNREAD_BUDGET = 6000;
 /** 游标之后、who 没看过的行 (不含自己说的), 触发行全文, 其余从新到旧装到预算为止。 */
 export const unreadFor = (s: RoomState, who: Who, triggers: readonly string[] = [], budget = UNREAD_BUDGET): { rows: MsgRow[]; more: number; to: number } => {

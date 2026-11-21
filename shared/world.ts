@@ -43,6 +43,8 @@ export interface WorldFactWizard {
   /** 提示缓存已冷 (transcript 超过缓存 TTL 没动) —— 与 wizard_roster / tell_peer 冷门控同一口径
    *  (daemon/route.ts wakeCostOf)。只对 pane 还在的有意义; 老 daemon 快照没有。 */
   cacheCold?: boolean;
+  /** 轮没结束却停在本地审批框 / 弹窗上等人点 (registry idle 且悬着 tool_use) —— 不是在干活, isBusy 把它算忙。 */
+  parked?: boolean;
   /** 停在哪些工具调用上等人点 (审批卡 / 提问卡) 的工具名; 缺省 = 没在等。 */
   waiting?: string[];
   /** 谁生的它 —— 分身与子 wizard 都有; 两者靠 clonedFrom 区分。 */
@@ -161,6 +163,8 @@ export interface WorldNode {
   alive: boolean;
   /** 同 WorldFactWizard.cacheCold。节点状态: busy → working; 无 pane → cold; pane 在而缓存冷 → warm; 其余 idle。 */
   cacheCold?: boolean;
+  /** 同 WorldFactWizard.parked。 */
+  parked?: boolean;
   /** 同 WorldFactWizard.waiting。 */
   waiting?: string[];
   /** 注册表里有登记 —— false = 只在 room / 轮次里出现过的会话。 */
@@ -361,6 +365,7 @@ export const buildWorld = (
       busy: f?.busy ?? false,
       alive: f?.alive ?? false,
       ...(f?.cacheCold !== undefined ? { cacheCold: f.cacheCold } : {}),
+      ...(f?.parked ? { parked: true } : {}),
       ...(f?.waiting?.length ? { waiting: f.waiting } : {}),
       known: !!f,
       ...(f?.ghost ? { ghost: true } : {}),
