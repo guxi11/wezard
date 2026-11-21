@@ -80,6 +80,12 @@ const run = async (): Promise<void> => {
   assert.deepEqual(one.msgs[0].wakeTo, [{ kind: "wizard", id: A.id }], "人的直接发言 (无 to / re): 收件人 = 行上 wake 记的 host");
   assert.equal(one.msgs[1].wakeTo, undefined, "wizard 的行不带 wakeTo");
   assert.deepEqual(one.members.map((m: { name: string }) => m.name), ["alice", "bob", "张三"]);
+  // 成员栏的只读字段: 每成员最近发言 / room 创建时刻 / duties 带处理人名与摘要
+  const lastOf = (name: string) => one.members.find((m: { name: string }) => m.name === name)?.lastAt;
+  assert.equal(lastOf("张三"), one.msgs[0].at, "人的最近发言 = 他唯一那条");
+  assert.equal(lastOf("bob"), one.msgs[3].at, "bob 最近一条 = 「查完了」");
+  assert.ok(one.createdAt > 0 && one.createdAt <= one.msgs[0].at, "createdAt 不晚于首行");
+  assert.deepEqual(one.duties, [], "该 room 没有未决 duty");
   assert.equal(one.earlier, undefined);
   const page = await get(routes.room, "id=t-ticket&room=chat:wrG&limit=2");
   assert.equal(page.msgs.length, 2);

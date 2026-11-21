@@ -58,7 +58,10 @@ const ROOMS = [
     { who: who("human", "U2"), name: "李四", via: "inbound", since: 6, ord: 1, host: false },
   ], undefined, T0 - 3 * 86400000),
 ];
-const memberViews = ROOMS[0].members.map((m) => ({ id: m.who.id, kind: m.who.kind, name: m.name, label: m.name, via: m.via, ord: m.ord, since: m.since, host: m.host }));
+const LAST_AT = { [A]: T0 + 3000, [B]: T0 + 4000, U1: T0 + 1000 };   // 每成员最近发言 (服务端 lastSaidAt)
+const memberViews = ROOMS[0].members.map((m) => ({ id: m.who.id, kind: m.who.kind, name: m.name, label: m.name, via: m.via, ord: m.ord, since: m.since, host: m.host, lastAt: LAST_AT[m.who.id] }));
+// 待交代: alice 问 bob 的一条 (服务端 dutyFacts: holderName / summary 为只读展示字段)
+const DUTIES = [{ key: "aa000001.3@wizard:" + B, msg: "aa000001.3", seq: 3, kind: "ask", at: T0 + 3000, asker: who("wizard", A), askerName: "alice", holder: who("wizard", B), holderName: "bob", slot: "wizard:" + B, summary: "查一下配置", last: { status: "progress", seq: 4 } }];
 const WORLD = {
   ok: true, at: Date.now(), base: G, self: "chat:wrG#guide",
   rooms: ROOMS,
@@ -78,7 +81,7 @@ const reQuoteOf = (m) => m.id === "aa000001.4" ? [
   { id: "aa000001.1", author: who("human", "U1"), authorName: "张三", snippet: "谁来搭把手", at: T0 + 1000, room: G },
   { id: "zz000000.404", missing: true },
 ] : undefined;
-const ROOM = { ok: true, at: Date.now(), room: ROOMS[0], label: "群G", members: memberViews, duties: [], msgs: msgs.filter((m) => m.room === G).map((m) => (reQuoteOf(m) ? { ...m, reQuote: reQuoteOf(m) } : m)), total: 4 };
+const ROOM = { ok: true, at: Date.now(), room: ROOMS[0], label: "群G", members: memberViews, duties: DUTIES, createdAt: T0, msgs: msgs.filter((m) => m.room === G).map((m) => (reQuoteOf(m) ? { ...m, reQuote: reQuoteOf(m) } : m)), total: 4 };
 // 搜索的服务端口径在 room-view-api.test.ts 验; 这里只验前端: 面板画得出三组、点一条消息能落到那一行。
 const SEARCH = (q) => ({
   ok: true, q,
@@ -237,6 +240,32 @@ try {
   assert.equal(counts.membar, false, "chat detail 上不再挂成员条");
   assert.ok(counts.headActs.indexOf("刷新") < 0, "右上角不再有刷新: " + counts.headActs);
 
+  // 成员栏: 角色 / 状态 / 聪明度·最近发言 / 待交代 (可展开) / 栏头 (成员数 · host · 建于 · 待交代总数)。
+  const gs = await page.evaluate(() => {
+    const items = [...document.querySelectorAll("#gside .gs-item")].map((it) => ({
+      nm: it.querySelector(".nm").textContent, role: (it.querySelector(".gs-host, .gs-lead, .gs-role") || {}).textContent || "",
+      st: (it.querySelector(".gs-st") || {}).textContent || "", sub: it.querySelector(".gs-sub").textContent, due: (it.querySelector(".gs-due") || {}).textContent || "",
+    }));
+    return { items, head: document.querySelector("#gside .gs-head").textContent, meta: document.querySelector("#gside .gs-meta").textContent,
+      stCls: [...document.querySelectorAll("#gside .gs-st")].map((e) => e.className.replace(/\s+/g, " ")), openBtn: getComputedStyle(document.querySelector("#gs-open")).display };
+  });
+  const by = (n) => gs.items.find((x) => x.nm === n);
+  assert.match(by("alice").role, /host/, "alice 是 host: " + JSON.stringify(gs.items));
+  assert.equal(by("bob").role, "成员"); assert.equal(by("张三").role, "人");
+  assert.equal(by("alice").st, "闲", "alice 活着没在跑 = 闲"); assert.equal(by("bob").st, "冷", "bob 缓存冷 = 冷"); assert.equal(by("张三").st, "", "人没有状态");
+  assert.match(gs.stCls.join("|"), /st-idle/); assert.match(gs.stCls.join("|"), /st-stale/);
+  assert.match(by("bob").sub, /分钟前发言|刚刚发言/, "最近发言: " + by("bob").sub);
+  assert.equal(by("bob").due, "待交代 1", "待交代数挂在处理人 bob 名下"); assert.equal(by("alice").due, "");
+  assert.match(gs.head, /成员\s*3/); assert.match(gs.head, /alice/, "栏头写 host");
+  assert.match(gs.meta, /建于/); assert.match(gs.meta, /待交代 1/, "栏头有待交代总数");
+  assert.equal(gs.openBtn, "none", "宽屏不显示「成员」抽屉入口");
+  assert.equal(await page.evaluate(() => !!document.querySelector("#gside .gs-duties")), false, "默认不展开");
+  await page.click('#gside .gs-due');
+  const dt = await page.evaluate(() => (document.querySelector("#gside .gs-duties .gs-dt") || {}).textContent || "");
+  assert.match(dt, /#3/); assert.match(dt, /alice/); assert.match(dt, /问/); assert.match(dt, /查一下配置/, "展开 = #seq · 提问者 · kind · 摘要: " + dt);
+  await page.click('#gside .gs-due');
+  assert.equal(await page.evaluate(() => !!document.querySelector("#gside .gs-duties")), false, "再点收起");
+
   // quote: 答的那条画成引用块 (发话人 + 摘要), 头部不再有「答」和裸 id; 多个 re 只画第一条, 其余收成 +N; 点击落到原消息并高亮。
   const qt = await page.evaluate(() => {
     const art = document.querySelector('.rv-msg[data-id="aa000001.4"]');
@@ -284,7 +313,7 @@ try {
     // session 下拉在 aa5843a 从 #rv-session 挪进名片的 #rb-sp (旧断言一直红着, 这次一并改过来)。
     sess: !!document.querySelector("#rb-who #rb-sp"),
     charterBtn: !!document.querySelector("#ch-acts #rv-charter"),
-    btns: document.querySelectorAll("#ch-acts button").length,
+    btns: document.querySelectorAll("#ch-acts button:not(.gs-open)").length,
     ttl: (document.querySelector(".rv-ttl") || {}).textContent,
   }));
   assert.equal(side.ttl, "bob 的全部聊天记录", "未选中 room: 标题 =「<role 名> 的全部聊天记录」(不写视角)");
@@ -335,7 +364,7 @@ try {
   assert.equal(await cardName(), "alice", "选中 room 时名片仍是 role (wizard 名), 不是 room");
   assert.deepEqual(await ciOn(), [G], "列表高亮选中的 room");
   assert.deepEqual(await meAuthors(), ["aa000001.2", "aa000001.3"], "A 说的两行靠右 (.me)");
-  const a1 = await page.evaluate(() => ({ ttl: document.querySelector(".rv-ttl").textContent, sub: !!document.querySelector(".rv-sub"), btns: document.querySelectorAll("#ch-acts button").length,
+  const a1 = await page.evaluate(() => ({ ttl: document.querySelector(".rv-ttl").textContent, sub: !!document.querySelector(".rv-sub"), btns: document.querySelectorAll("#ch-acts button:not(.gs-open)").length,
     sess: !!document.querySelector("#rb-who #rb-sp .sp"), me: (document.querySelector("#gside .gs-mem.me .nm") || {}).textContent }));
   assert.equal(a1.ttl, "群G", "标题 = room 名");
   // 人在群里直接说的话 (无 to / re): 头上的收件人用账本行的 wakeTo (alice), 不再只剩 `张三 —群G→`。
@@ -629,6 +658,22 @@ try {
   assert.equal(await page.evaluate(() => document.querySelector("#app").classList.contains("reading")), true, "点选中项: 进入 detail");
   assert.equal(q().get("room"), "", "取消选中: URL room= 空");
   assert.deepEqual(await ciOn(), [], "列表无高亮");
+
+  // 手机: 成员栏默认收着; detail 头右侧「成员 N」入口 (有待交代带红点) 点开 = 同一份成员栏铺成底部抽屉, ✕ 收回, 点待交代条目 = 关抽屉并落到那条消息。
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
+  await ttlIs("群G");
+  const gsVis = () => page.evaluate(() => { const g = document.querySelector("#gside"); return !g.hidden && getComputedStyle(g).display !== "none"; });
+  assert.equal(await gsVis(), false, "手机: 成员栏默认不占位");
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector("#gs-open")).display !== "none" && !!document.querySelector("#gs-open .gs-pip")), true, "手机: 有「成员」入口, 有待交代带红点");
+  await page.click("#gs-open");
+  assert.equal(await gsVis(), true, "点入口: 抽屉出来");
+  const sheet = await page.evaluate(() => { const r = document.querySelector("#gside").getBoundingClientRect(); return { bottom: Math.round(r.bottom), vh: innerHeight, w: Math.round(r.width), vw: innerWidth, items: document.querySelectorAll("#gside .gs-item").length }; });
+  assert.ok(sheet.bottom === sheet.vh && sheet.w === sheet.vw && sheet.items === 3, "抽屉贴底铺满宽, 成员都在: " + JSON.stringify(sheet));
+  await page.click("#gside .gs-due");
+  await page.click("#gside .gs-dt");
+  await page.waitForFunction(() => !document.querySelector("#gside").classList.contains("sheet") && document.querySelector('.rv-msg[data-id="aa000001.3"].hit'), null, { timeout: 5000 });
+  await page.click("#gs-open"); await page.click("#gs-x");
+  assert.equal(await gsVis(), false, "✕ 收回抽屉");
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");

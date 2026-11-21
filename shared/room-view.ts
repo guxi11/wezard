@@ -16,6 +16,7 @@ import {
   isBoundRoom,
 } from "./room.js";
 import { stripSigil } from "./session-label.js";
+import { clipLine } from "./std.js";
 
 // ── 快照 ───────────────────────────────────────────────────────────────
 
@@ -291,9 +292,23 @@ export const renderRoomRead = (
 };
 
 
-/** duty 的归一化形状 (rolepage 的「未决」胶囊 / room 头部的待办数)。 */
-export const dutyFacts = (s: RoomState, n: RenderNames) => openDuties(s).map((d) => ({
-  key: d.key, msg: d.msg, seq: d.seq, kind: d.kind, at: d.at,
-  asker: d.asker, askerName: n.nameOf(d.asker), holder: holderOf(s, d), slot: d.slot,
-  ...(d.last ? { last: d.last } : {}),
-}));
+/** duty 的归一化形状 (rolepage 的成员栏「待交代」/ room 头部的待办数)。
+ *  holderName / summary 只读展示用: 谁手上、开它的那一行的一行摘要 —— 不进账本, 不改任何语义。 */
+export const dutyFacts = (s: RoomState, n: RenderNames) => openDuties(s).map((d) => {
+  const holder = holderOf(s, d);
+  const row = s.byId.get(d.msg);
+  const text = row ? stripMd(row.text) : "";
+  return {
+    key: d.key, msg: d.msg, seq: d.seq, kind: d.kind, at: d.at,
+    asker: d.asker, askerName: n.nameOf(d.asker), holder, holderName: holder ? n.nameOf(holder) : "", slot: d.slot,
+    summary: clipLine(text || (d.kind === "join-req" ? "申请入群" : row?.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : ""), 60),
+    ...(d.last ? { last: d.last } : {}),
+  };
+});
+
+/** 每个人 / wizard 在这个 room 里最近一条 msg 的时刻 (key = whoKey); daemon 系统行 (author=system) 也算它自己的。 */
+export const lastSaidAt = (s: RoomState): Map<string, number> =>
+  s.msgs.reduce((m, r) => m.set(whoKey(r.author), Math.max(m.get(whoKey(r.author)) ?? 0, r.at)), new Map<string, number>());
+
+/** room 的创建时刻: open 行的时刻, 老账本没有就取第一行 msg。 */
+export const roomCreatedAt = (s: RoomState): number => s.openedAt ?? s.msgs[0]?.at ?? 0;

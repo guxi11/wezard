@@ -25,7 +25,7 @@ import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
 import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
@@ -345,11 +345,16 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const hist = roomHistory(s, { ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}), limit, ...(from ? { from } : {}) }, n);
       const link = turnLinker(listRecent(ticket), f);
       const fact = buildRoomFact(s, n);
+      const said = lastSaidAt(s);
       json(res, 200, {
         ok: true, at: now,
         room: fact,
         label: n.roomLabel(s.id),
-        members: roomMembers(fact, f.wizards, f.classes ?? []),
+        createdAt: roomCreatedAt(s),
+        members: roomMembers(fact, f.wizards, f.classes ?? []).map((m) => {
+          const at = said.get((m.kind === "wizard" ? "wizard:" : "human:") + m.id);
+          return at ? { ...m, lastAt: at } : m;
+        }),
         duties: dutyFacts(s, n),
         msgs: hist.msgs.map(wireMsg(ledgerIndex([s]).lookup, n.nameOf)).map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
         total: hist.total,

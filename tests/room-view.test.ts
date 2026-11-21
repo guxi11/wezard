@@ -2,9 +2,9 @@
 // 断言的是「账本行上的显式字段直译成视图」—— 不再有从 turn 记录推断谁说了什么。
 import assert from "node:assert/strict";
 import {
-  buildRoomFact, buildRoomFacts, dutyFacts, parseWhen, renderRoomRead, roomHistory, roomKindOf, whoRef, wizardMessages,
+  buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, roomCreatedAt, parseWhen, renderRoomRead, roomHistory, roomKindOf, whoRef, wizardMessages,
 } from "../shared/room-view.js";
-import { emptyRoom, type RenderNames } from "../shared/room.js";
+import { emptyRoom, whoKey, type RenderNames } from "../shared/room.js";
 import { H, W, room, say, uid } from "./room-fixture.js";
 
 const A = W(uid(1));
@@ -45,6 +45,11 @@ const NAMES: RenderNames = {
   assert.equal(ds[0]!.kind, "ask");
   assert.equal(ds[0]!.askerName, "alice");
   assert.deepEqual(ds[0]!.holder, B);
+  assert.equal(ds[0]!.holderName, "bob", "待交代归谁: 处理人的名字");
+  assert.equal(ds[0]!.summary, "查一下配置", "开它的那一行的一行摘要");
+  assert.equal(lastSaidAt(G).get(whoKey(A)), G.msgs[G.msgs.length - 1]!.at, "最近发言: 每人最近一条 msg 的时刻");
+  assert.equal(lastSaidAt(G).has(whoKey(B)), false, "没说过话的没有记录");
+  assert.ok(roomCreatedAt(G) > 0 && roomCreatedAt(G) <= G.msgs[0]!.at, "创建时刻 ≤ 首行");
 
   // dm / adhoc 的 kind 与 bound
   const D = room("dm:" + A.id + "|" + B.id, [A, B]);
