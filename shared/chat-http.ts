@@ -351,7 +351,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         label: n.roomLabel(s.id),
         members: roomMembers(fact, f.wizards, f.classes ?? []),
         duties: dutyFacts(s, n),
-        msgs: hist.msgs.map(wireMsg(ledgerIndex([s]).lookup)).map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+        msgs: hist.msgs.map(wireMsg(ledgerIndex([s]).lookup, n.nameOf)).map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
       });
@@ -398,7 +398,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // card=1: 只要名片 (room 视角下左上角仍是 role, 不必为它再算一遍消息与时间轴)。
       if (url.searchParams.get("card") === "1") { json(res, 200, card); return; }
       const lx = ledgerIndex(states);
-      const wire = wireMsg(lx.lookup);
+      const wire = wireMsg(lx.lookup, n.nameOf);
       const hist = uid && states.length
         ? wizardMessages(states, uid, { all, limit, ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}) }, n)
         : { msgs: [] as (RoomMsg & { roomLabel: string })[], total: 0 };
