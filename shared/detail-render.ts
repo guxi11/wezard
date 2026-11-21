@@ -961,10 +961,13 @@ const renderPost = (h: Extract<Hint, { k: "post" }>, deco?: HandoffDeco): string
     (h.held?.length ? hoTag("pri", "待送达", h.held.join("、") + " 那头久未开口, 消息压着等对方下次说话时送达") : "");
   const tip = [h.delivered ? DELIVERED_TIP[h.delivered] : "", h.re ? "答的是消息 " + h.re : ""].filter(Boolean).join(" · ");
   const attrs = tip ? ` title="${escHtml(tip)}"` : "";
-  return hoTrouble(h, glyph, verb0 + (names.length ? " → " + names.join("、") : ""), "", h.text) ??
-    hoBox(" post", attrs, `${hoArrow(stOf(h.state), glyph)}${verb}${to}${file}${tags}`,
-      // 回复 / 发言的正文就是下面那颗气泡, 过程里只留一行摘要, 不再重复一遍。
-      h.via === "reply" || h.via === "say" ? "" : h.text);
+  const trouble = hoTrouble(h, glyph, verb0 + (names.length ? " → " + names.join("、") : ""), "", h.text);
+  if (trouble !== undefined) return trouble;
+  // 调成了的回复 / 发言: 「谁 → 群 → 谁」与正文都在下面那颗气泡的头上, 过程里不再重复一行 —— 只有
+  // 状态不明 (调用中) / 不答 / 带额外交付说明 (待送达 · 频道评论) 的仍留摘要, 免得这些信息无处可看。
+  if ((h.via === "reply" || h.via === "say") && h.state === "ok" && !passed && !tags) return "";
+  return hoBox(" post", attrs, `${hoArrow(stOf(h.state), glyph)}${verb}${to}${file}${tags}`,
+    h.via === "reply" || h.via === "say" ? "" : h.text);
 };
 
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };
