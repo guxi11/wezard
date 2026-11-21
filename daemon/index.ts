@@ -3817,38 +3817,60 @@ const main = async (): Promise<void> => {
     ? startSteward({ root: memoryRoot(cfg.daemon.stateDir), log: log.child({ mod: "steward" }), run: stewardRun, ...stewardWiring })
     : undefined;
 
+  // pane 回收的共同豁免: 名下有定时任务的 wizard (调度本身会唤醒/需要它), 挂着审批长
+  // 轮询的会话 (hook 还停在等点击)。忙着的 / 人正盯着的 / 正在出生或有注入在途的由 bridge
+  // 内部判。管家 (聊天默认会话) 与分身一视同仁, 不额外豁免 —— 只收进程不收身份, 下一条
+  // 消息 5~7s 冷启动复活, 与 maxPanes 现有口径一致。
+  const reapVeto = (): ((target: string, sid: string) => string | undefined) => {
+    const taskOwners = new Set(
+      tasks.list()
+        .filter((t) => t.enabled)
+        .map((t) => wizardStore()?.get(t.owner)?.target ?? wizardStore()?.byName(t.owner)?.target)
+        .filter((t): t is string => !!t),
+    );
+    const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
+    return (target, sid) =>
+      taskOwners.has(target) ? "owns scheduled task"
+        : pendingSids.has(sid) ? "pending approval"
+        : undefined;
+  };
+  // 两种清扫串行: 并发时同一个 pane 会被两边各收一次 (第二次 kill-pane 失败、日志重复)。
+  let reapChain: Promise<void> = Promise.resolve();
+  const serialReap = (what: string, job: () => Promise<void>): void => {
+    reapChain = reapChain.then(job).catch((e) => log.warn({ err: (e as Error).message }, `${what} failed`));
+  };
+
   // pane 上限 — 每新建一个 wizard 数一次: 活着的会话 pane 超过 wrc.mirror.maxPanes
   // (默认 20, 0=关) 就从最久没动的收起。数量只在出生时增长, 所以不设定时器。只收
-  // pane 不收绑定: 下一条消息 `--resume` 复活。豁免: 名下有定时任务的 wizard (调度
-  // 本身会唤醒/需要它), 挂着审批长轮询的会话 (hook 还停在等点击), 忙着的 / 人正
-  // 盯着的 (bridge 内部判)。
+  // pane 不收绑定: 下一条消息 `--resume` 复活。
   if (cfg.wrc.mirror.maxPanes > 0) {
     const max = cfg.wrc.mirror.maxPanes;
-    const sweep = async (): Promise<void> => {
-      const taskOwners = new Set(
-        tasks.list()
-          .filter((t) => t.enabled)
-          .map((t) => wizardStore()?.get(t.owner)?.target ?? wizardStore()?.byName(t.owner)?.target)
-          .filter((t): t is string => !!t),
-      );
-      const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
-      const r = await bridge.reapOverflow(max, (target, sid) =>
-        taskOwners.has(target) ? "owns scheduled task"
-          : pendingSids.has(sid) ? "pending approval"
-          : undefined);
+    const sweep = (): void => serialReap("pane cap sweep", async () => {
+      const r = await bridge.reapOverflow(max, reapVeto());
       if (r.reaped.length || r.orphans.length) log.info({ reaped: r.reaped.length, targets: r.reaped, orphans: r.orphans.length, max }, "pane cap sweep");
-    };
-    bridge.onSpawn(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")));
+    });
+    bridge.onSpawn(sweep);
     // 定时清扫: 无绑定孤儿 (restore 丢绑定留下的老 window) 不靠 spawn 也会攒, 只在
     // onSpawn 数等于没人收。绑定在 store 里启动即读, 新生 pane 有 ORPHAN_GRACE 宽限,
     // 所以启动后扫一次是安全的。
     const periodSec = cfg.wrc.mirror.paneSweepSec;
-    if (periodSec > 0) {
-      const timer = setInterval(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")), periodSec * 1000);
-      timer.unref();
-    }
-    setTimeout(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")), 15_000).unref();
+    if (periodSec > 0) setInterval(sweep, periodSec * 1000).unref();
+    setTimeout(sweep, 15_000).unref();
   }
+
+  // 空闲回收 — wrc.mirror.idleReapMin (默认 60, 0=关): 最后一次活动早于 N 分钟的会话 pane
+  // 收起, 豁免同上。定时器常驻、每轮现读配置, 所以 config_set 改阈值 / 开关即时生效;
+  // 粒度是 IDLE_SWEEP_MS, 实际收起落在 N ~ N+5 分钟之间。只打日志, 不往群里发。
+  const IDLE_SWEEP_MS = 5 * 60_000;
+  const idleSweep = (): void => {
+    const min = cfg.wrc.mirror.idleReapMin;
+    if (min <= 0) return;
+    serialReap("idle reap sweep", async () => {
+      const r = await bridge.reapIdle(min * 60_000, reapVeto());
+      if (r.reaped.length) log.info({ reaped: r.reaped.length, targets: r.reaped, skipped: r.skipped, idleMin: min }, "idle reap sweep");
+    });
+  };
+  setInterval(idleSweep, IDLE_SWEEP_MS).unref();
 
   // 暖 shell: 默认 workspace 先养一条空壳, 开机后第一次 spawn 就能直接领 (省掉整段 rc)。
   // 延后到启动那一波过去: 活着几十个会话时 boot 正在恢复一大片 pane, 一条空壳不必去抢

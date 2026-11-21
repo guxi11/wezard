@@ -151,6 +151,10 @@ const Mirror = z.object({
   // 名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的不收, 所以实际数量可能暂时高于上限。
   maxPanes: z.number().int().nonnegative().default(20).describe("活着的会话 pane 上限, 超出从最久没动的收起; 0 = 关闭"),
   paneSweepSec: z.number().int().nonnegative().default(600).describe("pane 上限定时清扫间隔 (秒), 含孤儿 pane; 0 = 只在新建 wizard 时扫"),
+  // 按空闲时间收 (与 maxPanes 互补: 数量没超, 但几个 pane 一直闲着照样每个吃 250~340MB)。
+  // 同样只收 pane 不收绑定/身份, 豁免与 maxPanes 一致。daemon 每 5 分钟现读一次, 所以热生效;
+  // 「空闲」= 本进程见到的最后一次注入 / 转录条目 / 轮结束与 transcript mtime 取晚者。
+  idleReapMin: hot(z.number().int().nonnegative().default(60).describe("会话 pane 空闲超过多少分钟就收起 (保留绑定, 下一条消息自动 resume); 0 = 关闭")),
 });
 
 const Channel = z.object({
