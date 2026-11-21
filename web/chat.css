@@ -44,7 +44,7 @@ button { font: inherit; color: inherit }
 
 /* 名字 = 地址。rolepage 是系统面 (设计稿 §1.5): 名字一律裸名, 不画点也不画记号。 */
 .nm { font-weight: 600 }
-.nm.chat, .ch-who .sub .up { color: var(--chat) }
+.nm.chat { color: var(--chat) }
 .nm.human { color: var(--human) }
 .nm.system {
   color: var(--wezard);
@@ -107,12 +107,6 @@ button { font: inherit; color: inherit }
 /* 复制提示用 ⧉ 小图标, 不用 cursor:copy —— 那颗绿色的加号读起来像「添加」。 */
 .rolebar .nl .cp::after { content: "⧉"; flex: none; font-size: 12px; color: var(--faint); display: none }
 .rolebar .nl .cp:hover::after { display: inline }
-.toast {
-  position: fixed; left: 50%; bottom: 28px; z-index: 1000; transform: translate(-50%, 8px);
-  padding: 6px 12px; border-radius: 8px; font-size: 12.5px; color: #fff; background: rgba(28, 36, 48, .88);
-  opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
-}
-.toast.on { opacity: 1; transform: translate(-50%, 0) }
 #rb-sp { flex: none; display: inline-flex }
 .sp { position: relative; display: inline-flex }
 .sp-btn {
@@ -219,70 +213,42 @@ button { font: inherit; color: inherit }
 .convs h2 > * { flex: none }
 .convs h2 > span:first-of-type { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis }
 
-/* 群下的子项 (.si) 与私聊项 (.ci) 同一套尺寸 —— 只有一份。 */
-.ci, .si {
+/* 会话项 (.ci) 的尺寸。 */
+.ci {
   display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; overflow: hidden;
   padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer;
 }
-.ci.on, .si.on { background: #eaf0fc }
+.ci.on { background: #eaf0fc }
 /* 下分割线: 每一项自己的下边线 (侧栏项、群下子项、关系图卡片一律), 两端收到内容边距。 */
-.ci, .si { position: relative }
-.ci::after, .si::after {
+.ci { position: relative }
+.ci::after {
   content: ""; position: absolute; left: 10px; right: 10px; bottom: 0; height: 1px;
   background: var(--line); opacity: .6; pointer-events: none;
 }
-.ci > .av, .si > .av {
+.ci > .av {
   flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
   background: var(--av-bg); box-shadow: inset 0 0 0 1px var(--av-line); font-size: 20px; line-height: 1;
 }
-.ci .b, .si .b { min-width: 0; flex: 1; overflow: hidden }
-.ci .l1, .si .l1 { display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap }
-.ci .t, .si .t { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ci .ts, .si .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
-.ci .pv, .si .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ci .pv:empty, .si .pv:empty { display: none }
+.ci .b { min-width: 0; flex: 1; overflow: hidden }
+.ci .l1 { display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap }
+.ci .t { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
+.ci .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
-.ci-chevron {
-  flex: none; align-self: center; position: relative; z-index: 1; width: 20px; height: 20px; padding: 0; border: 0;
-  background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
-  color: var(--faint); transition: color .12s, transform .12s;
-}
-.ci-chevron::before { content: "›"; font-size: 16px; font-weight: 300; display: flex; align-items: center; justify-content: center; line-height: 1 }
-.ci-chevron:hover { color: var(--accent) }
-.ci-chevron.on::before { transform: rotate(90deg) }
 /* 头像与名字是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
    它们嵌在整行那颗按钮里; 行本身悬停不变底色, 只有入口自己亮起。z-index 保证没有兄弟盖住命中区。 */
 .nm.go, .av.go { position: relative; z-index: 1; cursor: pointer }
 .nm.go:hover { text-decoration: underline; text-underline-offset: 2px }
 /* 名字旁的 ⇄: 只在能切的名字悬停时露出 —— inline-block 同样不吃下划线 */
-.nm .sw { display: none; margin-left: 4px; font-style: normal; font-weight: 400; font-size: 12px; color: var(--faint) }
-.nm.go:hover .sw { display: inline-block }
 /* 名字旁「+N」: 视角外它还在和几个 role 说话 —— inline-block 不吃名字 hover 的下划线 */
-.nm .oc { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; line-height: 15px; font-size: 10.5px; font-weight: 600;
-  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); vertical-align: 1px }
-.nm.go:hover .oc { background: color-mix(in srgb, var(--accent) 20%, transparent) }
 span.av.go { border-radius: 8px; transition: background .12s, box-shadow .12s }
 span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot) }
 .ci .tag.priv { color: var(--priv); background: #9a5b1014 }
 
-/* 群里的其他 role —— 挂在群下, 与会话项同一种读法、同一套尺寸 (名字 · 时刻 / 最近一句), 只靠缩进分层级。
-   点开是「我与它在这个群里」的往来。 */
-/* 竖线的 x 与关系图里的竖向连线对齐: 都在项左缘 +10px (关系树 ul 缩进 20 - 线距 li 10)。 */
-.subs { margin: 0 0 6px 10px; border-left: 1px solid var(--line); padding-left: 2px }
-.si { color: var(--ink) }
-/* 「chat 内全部」下与我无往来的子项: 整行淡下去、名字不加粗, 一眼分得出不是我的往来; 选中 / 悬停时恢复。 */
-.si.far { opacity: .58 }
-.si.far .t { font-weight: 400 }
-.si.far:hover, .si.far.on { opacity: 1 }
-.si-more {
-  display: block; width: 100%; text-align: center; padding: 4px 8px; border: 0;
-  background: transparent; cursor: pointer; font-size: 11.5px; color: var(--mute);
-}
-.si-more:hover { color: var(--accent); font-weight: 600 }
-
 /* 未读: 预览行右端的红点计数 —— 页面打开后别人新说完的 final reply。 */
-.ci .l2, .si .l2 { display: flex; align-items: center; gap: 6px; min-width: 0 }
-.ci .l2 .pv, .si .l2 .pv { flex: 1; min-width: 0 }
+.ci .l2 { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.ci .l2 .pv { flex: 1; min-width: 0 }
 .ub {
   flex: none; margin-left: auto; min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px;
   background: #e5484d; color: #fff; font-size: 10.5px; font-weight: 600; line-height: 16px; text-align: center;
@@ -323,8 +289,6 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .ch-who > .t:not(:only-child) { flex: 0 1 auto }
 .ch-who .sub { min-width: 0; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 /* 副标题里的群名: 回到整个群的入口, 平时只是一行灰字, 悬停才像链接。 */
-.ch-who .sub .up { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer }
-.ch-who .sub .up:hover { text-decoration: underline }
 .ch-acts { display: flex; gap: 8px; align-items: center; flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--mute) }
 .ch-acts .vb { flex: none }
 .vb {
@@ -342,65 +306,16 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 }
 .thread-in { display: flex; flex-direction: column; gap: 14px }
 /* 换窗口时旧内容留着等新内容: 不接点击, 稍候才变暗 (快的切换看不出闪), 页头底边一道细进度条。 */
-.main.switching .thread-in, .main.switching .chathead > :not(.back) { pointer-events: none }
-.main.switching .thread-in { opacity: .6; transition: opacity .2s .15s }
-.main.switching .chathead {
-  background-image: linear-gradient(var(--accent), var(--accent)); background-repeat: no-repeat;
-  background-size: 40% 2px; animation: swbar 1s ease-in-out infinite;
-}
-@keyframes swbar { from { background-position: -67% 100% } to { background-position: 167% 100% } }
 .empty { color: var(--faint); text-align: center; padding: 60px 0; font-size: 13px }
-.more-btn {
-  align-self: center; background: var(--card); border: 1px solid var(--line); border-radius: 16px;
-  padding: 5px 16px; font-size: 12px; color: var(--mute); cursor: pointer;
-}
-.more-btn:hover { color: var(--accent); border-color: var(--accent) }
 
-/* 头像已并进名字那一行, 不再占气泡旁的一列 —— 省下的那一格宽度 (--av) 还给气泡。 */
-.mrow { --av: 24px; display: flex; align-items: flex-start; gap: 10px }
-.mwho .av {
-  flex: none; align-self: center; width: var(--av); height: var(--av); border-radius: 50%; border: 1px solid var(--line);
-  background: var(--card); font-size: 14px; line-height: 22px; text-align: center; cursor: default; padding: 0;
-}
-.mcol { min-width: 0; max-width: min(78% + var(--av), 760px + var(--av)); display: flex; flex-direction: column; gap: 4px }
-/* 带过程框的那条占满这一列: 列宽本来跟着内容走, 框一收起内容变窄, 整条就跟着缩。 */
-.mcol:has(.steps) { width: 100% }
-.mcol:has(.steps) > .mb { align-self: stretch }
-.mrow.mine { flex-direction: row-reverse }
-.mrow.mine .mcol { align-items: flex-end }
-.mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
-.mwho .nm { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-/* 发言头 `🦊.a:` (WZ.said): 头像贴着名字、冒号贴着名字, 不吃 .mwho 的 gap。 */
-.mwho .said { display: inline-flex; align-items: center; min-width: 0; max-width: 100% }
-.mwho .said .av { margin-right: 2px }
-.mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
-.mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
 /* 时刻只此一处 —— 气泡外, 跟着名字走。等宽数字让一列时间对得齐。 */
-.mwho .mt, .say-cap .mt { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums }
+.say-cap .mt { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums }
 .mb { min-width: 0; max-width: 100% }
 
 /* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是虚线的过程框 + 终句的气泡 —— 没有外层
    卡片, 直接排在对话底上。气泡不描实线边: 谁说的只靠底色分 (--bub), 线只留给虚线的过程框。 */
-.mrow { --bub: var(--them); --bub-soft: var(--them-soft); --bub-line: var(--them-line) }
-.mrow.mine { --bub: var(--mine); --bub-soft: var(--mine-soft); --bub-line: var(--mine-line) }
-.mb > .bubble.mq { border-radius: 14px }
 .mb .bubble { border: 0 }
 .say-cap { font-size: 11.5px; color: var(--mute) }
-.mb .mq .mmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; font-size: 11px; color: var(--faint) }
-.mb .mq .mmeta + .md-body { padding-top: 4px }
-/* 随这句话来的图: 详情页那份是裁成缩略的 (cover), 这里要整张看得见 —— 按原比例缩进气泡, 不裁。 */
-.mb .mq .q-imgs { padding: 10px 14px 4px }
-.mb .mq .q-imgs a { display: block; max-width: 100% }
-.mb .mq .q-imgs img { max-width: min(100%, 420px); max-height: 360px; width: auto; height: auto; object-fit: contain }
-.mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
-.mchip.priv { color: var(--priv); background: #9a5b1014 }
-.mchip.sys { color: #0a7d6b; background: #0a7d6b12 }
-/* 回执: 定论着色 —— 已交是常态不抢眼, 反问 / 报错要人看一眼, 没答案的几种灰红。 */
-.mchip.rcpt { border: 0; font: inherit; font-size: 11px; line-height: 16px; color: #1a7f37; background: #1a7f3712 }
-button.mchip.rcpt { cursor: pointer }
-button.mchip.rcpt:hover { text-decoration: underline }
-.mchip.rcpt:is(.st-need, .st-error) { color: #9a6700; background: #9a670014 }
-.mchip.rcpt:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
 /* 说给谁 (inline): 塞进正文第一段开头的头像 + 名字, 像行内 mention; 小圆角底色, 点它走移交行同一套跳转。 */
 .to-in {
   display: inline-flex; align-items: center; gap: 0; vertical-align: baseline; padding: 1px 6px; border-radius: 5px;
@@ -425,75 +340,10 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .steps.folded .handoff .ho-line { padding-left: 6px }
 .steps.folded .handoff .ho-text { margin-left: 6px }
 .steps.folded .handoff.pub > .say { margin-left: 6px }
-/* 公开移交那句是这一行的发话人在群里说的话: 气泡取这一行自己的底色 (过程框里 --bub 被重置成白卡,
-   所以在 .mb 上先把行色存一份), 与普通消息同一颗。 */
-.mrow .mb { --row-bub: var(--bub); --row-bub-line: var(--bub-line) }
-.mrow .mb .steps .handoff.pub > .say > .bubble { background: var(--row-bub); border-color: var(--row-bub-line) }
 
-/* 气泡与过程框同一种底色: 都是这个人发出来的 —— 自己的是视角色, 别人的是浅灰。
-   TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、代码块、折叠头) 在有色底上会显成一张张
-   贴纸 —— 这里把它们收回到底色上, 需要再沉一档的才用 --bub-soft。 */
-.mrow .mb :is(.bubble.mq, .say > .bubble, .steps) { background: var(--bub); border-color: var(--bub-line) }
-.mrow .mb .steps :is(.bubble, .typing) { background: transparent }
-.mrow .mb .bubble.user,
-.mrow .mb .md-body code, .mrow .mb .md-body pre,
-.mrow .mb details:not(.tool-call, .handoff) > summary,
-.mrow .mb .tool-body section > h2, .mrow .mb .diff-meta,
-.mrow .mb .tool-call > summary:hover { background: var(--bub-soft); border-color: var(--bub-line) }
-.mrow .mb .md-body pre code { background: transparent }
-/* 不是说给人听的 (工具过程框、reminder) 一律白底 —— 底色只留给真正的对话。 */
-.mrow .mb .steps { --bub: #fff; --bub-soft: #f6f8fa; --bub-line: #d0d7de }
-/* 展开的工具正文 (command / diff / 文件内容) 是裸 section, 吃的是 TURN_CSS 的白底。 */
-.mrow .mb .tool-body section { background: transparent; border-color: var(--bub-line) }
-.mrow .mb .bubble details { border-color: var(--bub-line) }
-.mrow .mb .tool-body { border-left-color: var(--bub-line) }
-/* 气泡跟着行靠右; 嵌在过程框里的子 agent 不翻 —— 那不是我说的。 */
-.mrow.mine .mb > .turn-group > .bubbles > .say { align-self: flex-end; align-items: flex-end }
 /* 工具正文是展开时才取的 (chat.js loadTool) —— 空壳期间说一句在干什么。 */
 .tool-body[data-lazy-turn]:empty::before { content: "加载中…"; color: #8c959f; font-size: 12px }
 .tool-body[data-lazy-turn][data-err]:empty::before { content: "加载失败 · 收起再展开重试"; color: #cf222e }
-
-/* 气泡对面那片空白 = 换视角的门。平时不可见, 悬停才露出要去谁那里。 */
-.flip {
-  flex: 1; align-self: stretch; min-width: 40px; border: 0; background: transparent; cursor: pointer;
-  display: flex; align-items: center; padding: 0 12px; border-radius: 10px; color: transparent;
-  font-size: 12px; transition: background .15s, color .15s;
-}
-.mrow.them .flip { justify-content: flex-start }
-.mrow.mine .flip { justify-content: flex-end }
-/* 气泡可以比视窗还高, 居中的箭头就跑出屏幕了 —— 让它在按钮内 sticky, 上下各留半屏,
-   于是只要这一行还在视窗里, 箭头就钉在视窗中线附近。 */
-.flip .fi {
-  position: sticky; top: calc(50% - 10px); bottom: calc(50% - 10px);
-  display: inline-flex; align-items: center; gap: 4px;
-}
-.mrow.mine .flip .fi { flex-direction: row-reverse }
-.mrow.mine .flip .fc { transform: scaleX(-1) }
-.flip .fc { flex: none }
-.flip .fi { min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 8px; gap: 6px }
-/* 要去谁那里: 名字可以折行, 不撑出门外。 */
-.flip .fn { min-width: 0; overflow-wrap: anywhere }
-.flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
-.flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
-/* 说给谁: 贴着气泡写在门里, 与气泡首行对齐。不吃点击 —— 点到它就是点门。
-   门竖排: 描述在上、换视角箭头在下, 描述折几行箭头就跟着往下让, 两者不叠。
-   contain: size —— 门的内容不参与这一行的高度, 描述再长也不撑高一行。 */
-.mwho .av.go { cursor: pointer }
-.mwho .av.go:hover { border-color: var(--accent); background: #2f55c914 }
-
-.mrow.mark { justify-content: center }
-.mrow.mark > * { flex: 1; max-width: 520px }
-
-/* 换视角后一条旧消息都不在了 (换到别的会话): 整列淡入。有交集的走 chat.js 的逐条 FLIP (位移 + 底色)。 */
-.thread-in.flipping { animation: flip .26s ease }
-@keyframes flip { 0% { opacity: 1 } 45% { opacity: 0; transform: scaleX(.985) } 100% { opacity: 1 } }
-/* 逐条 FLIP 滑行中: 空白门不画、不接点击, 列抬到后面兄弟之上 —— 否则 sticky 的箭头 (定位元素) 按 DOM 序压在气泡上。 */
-.thread-in.fl-run .flip { visibility: hidden; pointer-events: none }
-.thread-in.fl-run .mcol { position: relative; z-index: 1 }
-@media (prefers-reduced-motion: reduce) {
-  .thread-in.flipping { animation: none }
-  .flip { transition: none }
-}
 
 /* ── 一轮回复 ───────────────────────────────────────────────────── */
 /* 只是一根竖轴, 不是卡片: section 的默认白底 / 边框在这里收掉。本轮的账 (模型 /
@@ -506,7 +356,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tg-head { order: 9; display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; padding: 0 2px }
 .mstat { display: inline-flex; align-items: center; gap: 4px 10px; flex-wrap: wrap }
 /* 两方对话里只藏模型 / ctx —— 时刻与耗时每条 wizard 消息都留着。 */
-.mrow.two :is(.mstat, .say-cap, .ho-acct) :is(.chip, .tg-tok) { display: none }
 .ho-acct { display: inline-flex; align-items: center; gap: 4px 8px }
 :is(.tg-head, .mstat, .say-cap, .ho-acct) :is(.chip.model, .chip.tier), .tg-tok, .tg-dur {
   padding: 0; border: 0; border-radius: 0; background: none; font-weight: 400;
@@ -524,8 +373,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
   .chathead { padding: 8px 12px; gap: 8px }
   .chathead .back { display: block }
   .thread { padding: 12px }
-  .mcol { max-width: calc(86% + var(--av)) }
-  .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
     .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
   .usage { padding: 8px 12px }
   .usage.page { padding-bottom: calc(8px + env(safe-area-inset-bottom)) }
@@ -536,15 +383,12 @@ button.mchip.rcpt:hover { text-decoration: underline }
    一条 !important 把 hidden 的语义钉死, 三块视图容器的显隐都靠它。 */
 [hidden] { display: none !important }
 
-
 /* ══ 关系图 ═════════════════════════════════════════════════════════ */
 .wtools {
   flex: none; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 8px 20px; background: #fff; border-bottom: 1px solid #d0d7de;
   font-size: 11.5px; color: #57606a;
 }
-.wtools .wstat { flex: 1; display: flex; gap: 6px; align-items: baseline; color: #8c959f }
-.wtools .rng { color: var(--ink) }
 .wtools .warn { color: #9a6700 }
 .wtools .hint { margin-left: auto; color: #b1bac4 }
 .wscroll { position: relative; flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch }
@@ -597,9 +441,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .strip .cap { font-size: 11px; color: #8c959f }
 
 /* 微信通道状态徽标。 */
-.wxm { flex: none; margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 10.5px; white-space: nowrap; color: #2f7d32; background: #2f7d3214 }
-.wxm.paused { color: #94741f; background: #bf870014 }
-.wxm.down { color: #c62828; background: #c6282814 }
 
 /* wizard 徽标 —— 日程里提到 wizard 时用它, 同聊天的可点进线程。 */
 .wchip {
@@ -638,25 +479,9 @@ button.mchip.rcpt:hover { text-decoration: underline }
 
 /* ══ 忙闲: 名字右边唯一的状态位 (名片 · 关系树 · 侧栏共用 stTag) ══
    只有执行中带颜色与呼吸; 空字 (侧栏) 就只剩那盏灯。 */
-.wst {
-  flex: none; align-self: center; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; line-height: 16px;
-  padding: 0 6px; border-radius: 8px; background: #eef0f3; color: var(--mute); white-space: nowrap; font-weight: 500;
-}
-.wst::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b1bac4 }
-.wst.run { background: #dafbe1; color: #1a7f37 }
-.wst.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
-.wst.wait { background: #fbefff; color: #8250df }
-.wst.wait::before { background: #8250df; animation: pulse 1.4s infinite }
-.wst.off { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line) }
-.wst.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
-.wst:empty { padding: 0; background: none; box-shadow: none }
-.wst:empty::before { width: 7px; height: 7px }
 /* ══ 关系图 · 关系树 (家谱与派活合成一棵, 以当前 role 为中心) ══════════
    它替换的是侧栏的会话列表: 标题、图例与会话列表的分组标题同一种读法, 卡片就是会话项 (.ci)。 */
-.tview h2 .warn { color: #9a6700; font-weight: 400 }
 .tree.all > li + li { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eaeef2 }
-.tsolo { font-size: 11.5px; color: var(--faint); margin: 0 8px 10px }
-.tview .pempty { padding: 18px 8px }
 
 /* 树: 每条入边是一道实线, 从父卡片底下一路落到自己卡片的头像旁, 末端一枚箭头, 颜色 = 关系种类。
    兄弟共用的那段竖干上, 后画的 (更下方的节点) 盖住先画的; 竖线往上伸到 ul 顶为止 (clip-path 只裁上边)。 */
@@ -676,68 +501,10 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tree li.clone { --lc: #8250df }
 .tree li.fork { --lc: #b39ddb }
 .tree li.peer { --lc: #0969da }
-/* 卡片 = 会话项; label 骑在它左上角, 紧挨箭头。 */
-.tci { position: relative; overflow: visible }
-.tci.me .t .nm { color: var(--accent) }
-/* 连接用的祖先: 没和视角对过话, 只为把对过话的后代挂回家谱 —— 淡一档。 */
-.tci.via { opacity: .55 }
-.tci.via:hover { opacity: 1 }
-.tci.ghost { opacity: .5; filter: grayscale(1) }
-.tci.ghost:hover { opacity: .8 }
-.tlab { position: absolute; left: 4px; top: -8px; display: flex; gap: 3px; z-index: 2 }
-.tlab .ek { box-shadow: 0 0 0 2px var(--card) }
 
-/* 边的 label: 辅助信息, 淡色; 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
-.ek {
-  flex: none; font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 4px; white-space: nowrap;
-  font-weight: 500; color: var(--mute); background: #f1f3f6;
-}
-.ek.spawn { color: #a8642a; background: #d4700f12 }
-.ek.clone { color: #7a5bb8; background: #8250df12 }
-.ek.clone[data-cpoint] { cursor: pointer }
-.ek.clone[data-cpoint]:hover { background: #8250df2e }
-.ek.fork { color: #8f7bb8; background: #8250df0a }
-.ek.peer { color: #4a74b0; background: #0969da10 }
-.ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
-
-/* ══ 宪章 · 按节 ═══════════════════════════════════════════════════ */
-/* 通用 details summary (SHARED_CSS) 带灰底、大写和 ::before 箭头 —— 这里全部重置, 箭头自己画。 */
-.cmix { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; margin: 2px 0 6px }
-.cmix i { display: block; min-width: 3px; background: #c4cbd3 }
-.cmix i.top { background: #57606a }
-.csec { border-top: 1px solid #eaeef2 }
-.csec:first-of-type { border-top: 0 }
-.csec > summary {
-  display: grid; grid-template-columns: 14px minmax(0, 1fr) minmax(60px, 160px) 92px; align-items: center; gap: 10px;
-  padding: 9px 4px; margin: 0 -4px; border-radius: 6px; border: 0; background: none;
-  cursor: pointer; list-style: none; user-select: none;
-  font-size: 13px; font-weight: 400; color: var(--ink); text-transform: none; letter-spacing: 0;
-}
-.csec > summary::-webkit-details-marker { display: none }
-.csec > summary::before { content: "▸"; font-size: 11px; color: var(--faint); transition: transform .12s; justify-self: center }
-.csec[open] > summary::before { content: "▸"; transform: rotate(90deg) }
-.csec > summary:hover { background: #f6f8fa }
-.csec .ct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.csec[open] .ct { font-weight: 600 }
-.csec .cbar { height: 6px; border-radius: 3px; background: #eaeef2; overflow: hidden }
-.csec .cbar i { display: block; height: 100%; border-radius: 3px; background: #afb8c1 }
-.csec.top .cbar i { background: #57606a }
-.csec .cn { text-align: right; font-size: 11.5px; color: var(--mute); font-family: ui-monospace, Menlo, monospace; white-space: nowrap }
-.csec .cn small { color: var(--faint); margin-left: 6px }
-.csec .md-body { font-size: 13px; line-height: 1.6; margin: 0 0 12px 24px; padding: 2px 0 2px 12px; border-left: 2px solid #eaeef2; overflow-wrap: anywhere }
-.csec .md-body > :first-child { margin-top: 0 }
-.csec .md-body > :last-child { margin-bottom: 0 }
-.csec .md-body ul { padding-left: 18px }
-.csec .md-body pre { white-space: pre-wrap }
 /* 关系 / 日程 / 宪章这类视图名很短, 窄屏上该让位的是副标题, 不是标题。 */
-.outer .ch-who .t { flex-shrink: 0 }
 .psec h3 .cx { white-space: nowrap; margin-left: auto; border: 0; background: none; padding: 0; cursor: pointer; font: 11px/1 inherit; color: var(--mute) }
 .psec h3 .cx:hover { color: var(--ink) }
-@media (max-width: 640px) {
-  .csec > summary { grid-template-columns: 14px minmax(0, 1fr) 84px }
-  .csec .cbar { display: none }
-  .csec .md-body { margin-left: 8px }
-}
 
 /* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */
 .pstats {
@@ -1002,24 +769,9 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 
 /* 搜索跳到的那一句: 气泡闪一圈视角色。 */
-.mrow.hit .mb > * { animation: hit 1.6s ease-out }
-/* clone 徽标落到的那次 clone_wizard 调用: 调用框本身再闪一圈。 */
-.mrow .bubble.tool.hit { animation: hit 2.4s ease-out }
 @keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }
 
-
 /* ── P7-S3 严格群治理面板 (govbar): 成员 / 游标 / 欠账, 钉在聊天头下面 ── */
-.govbar {
-  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
-  padding: 6px 14px; border-bottom: 1px solid var(--line); background: #f6f8fb;
-  font-size: 11.5px; color: var(--mute);
-}
-.govbar .gt { font-weight: 600; color: var(--ink); }
-.govbar .gm { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
-.govbar .gm b { font-weight: 600; color: var(--ink); }
-.govbar .gm.late b { color: #c0392b; }
-.govbar .gm.late { color: #c0392b; }
-@media (max-width: 760px) { .govbar { gap: 4px 10px; padding: 5px 10px; } }
 
 /* 消息头「过程」展开的 .rv-box 只是个挂载点: 里面的 .steps 已经是虚线过程框, 再描一层就成了框套框。 */
 .rv-msg > .rv-box { padding: 0; border: 0; border-radius: 0; background: none }
