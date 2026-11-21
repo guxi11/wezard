@@ -40,11 +40,6 @@ export const promptWantsFreshWizard = (prompt: string): boolean => WISH.test(pro
 /** 一条任务的 `since`: 上次放枪, 没放过就从建表那一刻算 —— 刚建好不立刻打一枪。 */
 export const sinceOf = (s: TaskState): number => s.lastFired ?? s.createdAt ?? Date.now();
 
-/** 列表回显: 规格与下次触发都摊成人话, 调用方直接念给用户听。 */
-/** 点名的目标到点正忙, 最多顺延这么久 (之后退回起白板执行)。 */
-export const TASK_POSTPONE_MS = 30 * 60_000;
-/** 安静任务那一轮最长等它跑多久再看终句 —— 超过就不转发了。 */
-export const TASK_QUIET_WAIT_MS = 2 * 3600_000;
 
 export const renderTask = (
   t: TaskRecord,

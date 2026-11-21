@@ -295,8 +295,6 @@ export const renderRoomRead = (
   };
 };
 
-/** 这个 wizard 是否在这个 room 里出现过 (成员 / 说过 / 被点名 / 被 re)。 */
-export const roomTouches = (s: RoomState, uid: string): boolean => everMember(s, uid) || s.msgs.some((m) => addressesWho(s, m, uid));
 
 /** duty 的归一化形状 (rolepage 的「未决」胶囊 / room 头部的待办数)。 */
 export const dutyFacts = (s: RoomState, n: RenderNames) => openDuties(s).map((d) => ({

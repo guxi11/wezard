@@ -375,13 +375,6 @@ export const wakeCostOf = (ctx: number, touchedAt: number, now: number, ttlMs: n
   return { cold, write: cold ? ctx : 0, times: Math.round((ctx / FRESH_CTX) * 10) / 10 };
 };
 
-/** tell_peer 回包里的一句: 这次唤醒的是冷且大的 wizard, 付了多少缓存重写 —— 让派活的下次先算这笔账。 */
-export const wakeNoteOf = (ctx: number, touchedAt: number, now: number, ttlMs: number): string => {
-  const w = wakeCostOf(ctx, touchedAt, now, ttlMs);
-  return w.cold && ctx >= BIG_COLD
-    ? `这次唤醒的缓存已冷 (超过 TTL ${Math.round(ttlMs / 60_000)} 分钟没动), 要整段重写 ~${k(ctx)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍; 这件活若不依赖它那段上下文, 下次白板 spawn 更省`
-    : "";
-};
 
 // tell_peer 派新活的门槛: 冷且这么大的, 先退回让派活的算账再说。点名、职责对口只说明
 // 相关, 不说明划算 —— 一句「直接转给它」就把整段 ctx 重写了一遍 (.relock 526k 那次)。

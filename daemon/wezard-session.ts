@@ -148,9 +148,6 @@ export const sessionBySid = (homeDir: string, sessionId: string): LiveSession | 
     .filter((r) => r.sessionId === sessionId && r.pane && pidAlive(r.pid))
     .sort((a, b) => b.statusUpdatedAt - a.statusUpdatedAt)[0];
 
-/** 注册表里进程还活着的会话各住在哪个 pane —— 「这个 pane 是不是会话 pane」的正面证据。 */
-export const sessionPanes = (homeDir: string): Set<string> =>
-  new Set(readRegistry(homeDir).filter((r) => r.pane && pidAlive(r.pid)).map((r) => r.pane));
 
 /** 注册表里进程还活着的会话 pid —— 不要求注册表带 `tmux` 字段 (codebuddy 的没有),
  *  「这个 pane 里住着活会话吗」用它对 pane 的进程树认, 而不是对 pane id 认。 */

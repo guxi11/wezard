@@ -8,7 +8,7 @@
 //
 // Nothing here touches tmux or the mirror bridge, so the standalone svr derives
 // exactly the same view from the records that were POSTed to it.
-import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
+import { labelFor, tagOfKey } from "./session-label.js";
 import { stripReminders } from "./reminder.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnUsage } from "./detail-store.js";
 import { costOf, modelLabel, priceOf, type Price, type Tokens } from "./pricing.js";
@@ -67,13 +67,6 @@ export interface TagSummary {
   usage: AggUsage;
 }
 
-export interface ChatSummary {
-  base: string;
-  /** Server clock when this snapshot was derived — the client ticks off it. */
-  at: number;
-  tags: TagSummary[];
-  usage: AggUsage;
-}
 
 // ── turn 结束判定 ─────────────────────────────────────────────────────
 // 三种证据, 由强到弱: closed (收口信号) → final text (closeTurn 可能滞后, 但
@@ -255,16 +248,3 @@ export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[],
   };
 };
 
-/** Group every turn of one chat by session key → the chat list. Most recently
- *  active tag first; the running ones naturally float up. */
-export const chatSummary = (records: readonly DetailRecord[], base: string, now: number): ChatSummary => {
-  const mine = liveTurns(records, now).filter((r) => r.target && baseOfKey(r.target) === base);
-  const byTarget = mine.reduce((m, r) => {
-    const k = r.target!;
-    return m.set(k, [...(m.get(k) ?? []), r]);
-  }, new Map<string, TurnDetailRecord[]>());
-  const tags = [...byTarget.entries()]
-    .map(([target, turns]) => summarizeTag(target, [...turns].sort((a, b) => a.createdAt - b.createdAt), now))
-    .sort((a, b) => b.lastTs - a.lastTs);
-  return { base, at: now, tags, usage: aggregate(mine, now) };
-};

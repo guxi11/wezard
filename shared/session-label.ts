@@ -135,9 +135,6 @@ export const normalizeTag = (raw: string | undefined): string =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 32);
 
-/** Default tag for a session spawned in `cwd` — the project's own name is what
- *  a human would have typed. */
-export const tagFromCwd = (cwd: string): string => normalizeTag(cwd.split("/").filter(Boolean).pop());
 
 /** `want`, or the first `want-N` not already in `taken`. */
 export const uniqueTag = (want: string, taken: ReadonlySet<string>, n = 1): string => {

@@ -33,7 +33,6 @@ const renderApprenticeRules = (): string[] => [
 
 /** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
 export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker";
-export const WIZARD_KINDS: readonly WizardKind[] = ["global-steward", "steward", "apprentice", "worker"];
 /** 缺省种类: 聊天的默认会话 (untagged target) 是那个群的管家, 其余都是工人。 */
 const defaultKindOf = (target: string): WizardKind => (tagOfKey(target) ? "worker" : "steward");
 
@@ -526,9 +525,6 @@ export const identityWorkspaceOf = (store: WizardStore | undefined, target: stri
   return anchorOf(store, id)?.workspace ?? "";
 };
 
-/** 名字: 名册里落定的 > 默认名。只读推导, 不写盘 —— 需要落定用 store.claim。 */
-export const wizardName = (rec: WizardRecord | undefined, chatName: string, target: string): string =>
-  (rec?.name ?? "").trim() || defaultNameOf(chatName, target);
 
 /** 名字落定: 名册有就用; 没有且推得出默认名就 claim (写盘去重); 都没有退回 slot id。
  *  推不出 (默认会话所在的聊天还没名字) 时不 claim —— 否则它会永久落成 `wizard-N`。 */

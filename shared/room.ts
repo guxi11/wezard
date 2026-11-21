@@ -143,10 +143,6 @@ export interface Member { who: Who; ord: number; via: JoinVia; since: number; by
 export type Slot = string;
 export const HOST_SLOT = "host";
 export const dutyKey = (msg: string, slot: Slot): string => msg + "@" + slot;
-export const splitDutyKey = (key: string): { msg: string; slot: Slot } => {
-  const i = key.indexOf("@");
-  return i < 0 ? { msg: key, slot: "" } : { msg: key.slice(0, i), slot: key.slice(i + 1) };
-};
 
 export interface Duty {
   key: string;
@@ -293,8 +289,6 @@ export const dutyAnswered = (s: RoomState, d: Duty, who: Who): boolean => {
   const wokeAt = s.msgs.reduce((at, r) => (touches(r) && r.wake.includes(who.id) ? Math.max(at, r.seq) : at), 0);
   return s.msgs.some((r) => r.kind === "reply" && r.seq > wokeAt && sameWho(r.author, who) && (r.re ?? []).includes(d.msg));
 };
-/** who 提出、仍未关的 duty。 */
-export const dutiesAskedBy = (s: RoomState, who: Who): Duty[] => openDuties(s).filter((d) => sameWho(d.asker, who));
 
 /** 2026-11-20 起 idList 修好之前, 没给 after 的 chat_ask 落成了 after:["undefined"] —— 这个假 id
  *  不指向任何消息, 视为「没有前置」(否则前置永不满足, 被点名者永不唤醒)。 */

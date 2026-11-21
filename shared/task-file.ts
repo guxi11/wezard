@@ -180,11 +180,6 @@ export interface TaskDraft {
 
 /** 安静任务的静默哨兵: 那一轮没什么可报, 终句就只写这一个词。 */
 export const QUIET = "QUIET";
-/** 终句的最后一个非空行是 `QUIET` (容许 `RESULT:` 前缀与反引号) = 这一轮不外发。 */
-export const isQuiet = (reply: string): boolean => {
-  const last = reply.trim().split("\n").map((l) => l.trim()).filter(Boolean).pop() ?? "";
-  return /^QUIET(?![A-Za-z])/.test(last.replace(/^RESULT:\s*/i, "").replace(/[`*]/g, "").trim());
-};
 
 /**
  * 新任务的源码。头上那段注释是 wizard 唯一的说明书 —— 它 Read 这个文件时看到的

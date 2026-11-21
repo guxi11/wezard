@@ -268,22 +268,6 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
 };
 
 // ── 微信通道 ─────────────────────────────────────────────────────────
-/** 群行 / 群详情头部名字旁的小标记: 怎么判、写什么只在这里, 页面照抄 text / tip。 */
-export interface WxMark { state: "live" | "paused" | "down"; text: string; tip: string }
-const agoText = (ms: number): string =>
-  ms < 60_000 ? "刚刚" : ms < 3600_000 ? Math.floor(ms / 60_000) + " 分钟前" : ms < 86400_000 ? Math.floor(ms / 3600_000) + " 小时前" : Math.floor(ms / 86400_000) + " 天前";
-export const wxMark = (w: WorldFactWeixin, now: number): WxMark => {
-  const state = w.state === "expired" ? "down" : w.pausedUntil > now ? "paused" : "live";
-  const head = { live: "🟢 微信", paused: "⏸️ 微信频控", down: "🔴 微信掉线" }[state];
-  const tip = [
-    state === "down" ? "微信通道掉线 —— 在企微单聊发 /wx bind 重新扫码" : "微信通道在线",
-    "对方最近开口: " + (w.lastInAt ? agoText(now - w.lastInAt) : "从没有"),
-    ...(state === "down" ? [] : ["这一轮还能发 " + w.budget + " 条 (对方每说一句补一份额度)"]),
-    ...(w.held ? ["压着 " + w.held + " 条没发出, " + (state === "down" ? "重新绑定后" : "对方再说一句就") + "取回"] : []),
-    ...(state === "paused" ? ["频控暂停出站, 还剩 " + Math.ceil((w.pausedUntil - now) / 60_000) + " 分钟"] : []),
-  ].join("\n");
-  return { state, text: head + (w.held ? " · 📬 压着 " + w.held : ""), tip };
-};
 
 // ── session ───────────────────────────────────────────────────────────
 // 同一个名字下的多个 session (/clear /new 轮换, handoff 重开): 按 sessionId 分段,

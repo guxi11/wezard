@@ -839,7 +839,3 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
 };
 
 // 兼容入口：新代码应分别早装 transport、晚装 events。
-export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger): void => {
-  installChannelTransport(client, log, cfg);
-  installChannelEvents(client, cfg, log);
-};

@@ -461,17 +461,6 @@ const parseOpenTools = (jsonlPath: string, raw: string): { names: string[]; rows
   return { names: [...open.values()], rows };
 };
 
-/** 交付收口行。
- *
- *  fan-out 之后 join 的载荷是「最后一条 assistant 文本」, 而一个分身的最后一句可能
- *  是"好的我开始了", 也可能是八百字散文 —— 两种都没法直接汇总。只在派活提示里
- *  要求收口成一行
- *  `RESULT: …`, 这里把它捞出来。取**最后一个**匹配 —— 中间复述过这个格式的那些
- *  不算数。捞不到返回 "", 调用方退回整段 lastText, 所以不遵守约定也只是退化。 */
-export const extractResult = (text: string, max = 800): string => {
-  const c = parseClosing(text, max);
-  return c.kind === "result" ? c.text : "";
-};
 
 /** 一轮的收口: `RESULT:` 交差 / `NEED:` 反问发话方 / `PROGRESS:` 中间进展 / 都没有 —— 外加交付物清单。
  *  分 result 与 need 是回执结算的事: 反问不是定论; progress 是中间回执, 行不落定。 */
