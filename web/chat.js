@@ -297,7 +297,7 @@
     return { g: { nodes: model.nodes.map(function (n) { return next[n.id]; }), links: links, hw: hw, hh: hh }, changed: changed };
   };
   // 一步力模拟。被钉住 (拖动中) 的节点 fx/fy 不动, 其余按力位移。
-  var gStep = function (g, alpha) {
+  var gStep = function (g, alpha, xs) {
     var ns = g.nodes, n = ns.length;
     if (!n) return;
     var k = Math.max(46, Math.min(110, 2 * Math.sqrt((g.hw * g.hh) / n)));
@@ -314,7 +314,7 @@
         var dx = p.x - q.x, dy = p.y - q.y, d2 = dx * dx + dy * dy;
         if (d2 < 0.02) { dx = 0.5 - Math.random(); dy = 0.5 - Math.random(); d2 = 0.02; }
         var d = Math.sqrt(d2), ux = dx / d, uy = dy / d;
-        var f = (k * k / d) * alpha * 0.13;
+        var f = (k * k / d) * alpha * 0.22;
         if (free(p)) { p.x += ux * f; p.y += uy * f; }
         if (free(q)) { q.x -= ux * f; q.y -= uy * f; }
         var min = rOf(p) + rOf(q) + 8;
@@ -329,8 +329,8 @@
       var lp = l.s, lq = l.t;
       var sx = lq.x - lp.x, sy = lq.y - lp.y, sd = Math.sqrt(sx * sx + sy * sy) || 0.01;
       // host 边比普通成员边短 (host 贴着自己的 room); 直连线略长。
-      var want = k * (l.host ? 0.7 : l.direct ? 1.05 : 0.95);
-      var sf = ((sd - want) / sd) * 0.09 * alpha;
+      var want = k * (l.host ? 0.55 : l.direct ? 0.9 : 0.75);
+      var sf = ((sd - want) / sd) * 0.2 * alpha;
       if (free(lp)) { lp.x += sx * sf; lp.y += sy * sf; }
       if (free(lq)) { lq.x -= sx * sf; lq.y -= sy * sf; }
     });
@@ -347,7 +347,7 @@
         if (l1.s === l2.s || l1.s === l2.t || l1.t === l2.s || l1.t === l2.t) continue;
         if (!cross(l1, l2)) continue;
         var mx = (l1.s.x + l1.t.x - l2.s.x - l2.t.x) / 2, my = (l1.s.y + l1.t.y - l2.s.y - l2.t.y) / 2;
-        var md = Math.sqrt(mx * mx + my * my) || 1, cf = k * 0.16 * alpha;
+        var md = Math.sqrt(mx * mx + my * my) || 1, cf = k * 0.3 * alpha * (xs || 1);
         [[l1.s, 1], [l1.t, 1], [l2.s, -1], [l2.t, -1]].forEach(function (e) {
           if (free(e[0])) { e[0].x += (mx / md) * cf * e[1]; e[0].y += (my / md) * cf * e[1]; }
         });
@@ -359,8 +359,37 @@
       p.y += (cy - p.y) * 0.010 * alpha;
       // 椭圆软墙: 模拟空间跟着左栏的长宽比走, 出来的团才填得满那一竖条
       var ex = p.x / g.hw, ey = p.y / g.hh, ee = ex * ex + ey * ey;
-      if (ee > 1) { var s = (1 - 1 / Math.sqrt(ee)) * 0.35; p.x -= p.x * s; p.y -= p.y * s; }
+      // 墙的力度跟着 alpha 走: 以前与热量无关, 热量衰减后斥力 / 弹簧都小了, 墙还在每帧往里挤, 把排开的边重新压成一团 (交叉数回升)。
+      if (ee > 1) { var s = (1 - 1 / Math.sqrt(ee)) * 0.35 * Math.min(1, alpha * 4); p.x -= p.x * s; p.y -= p.y * s; }
     });
+  };
+  var gTotalCross = function (links) {
+    var ccw = function (p, q, r) { return (r.y - p.y) * (q.x - p.x) > (q.y - p.y) * (r.x - p.x); };
+    var n = 0;
+    for (var i = 0; i < links.length; i++) for (var j = i + 1; j < links.length; j++) {
+      var a = links[i], b = links[j];
+      if (a.s === b.s || a.s === b.t || a.t === b.s || a.t === b.t) continue;
+      if (ccw(a.s, b.s, b.t) !== ccw(a.t, b.s, b.t) && ccw(a.s, a.t, b.s) !== ccw(a.s, a.t, b.t)) n++;
+    }
+    return n;
+  };
+  // 多起点: 力导向只管疏密、不管交叉, 稠密的二部图光靠调力平不下来, 而结果对起点很敏感
+  // (同一张图 20~60 条交叉)。所以暖机后在现有布局上重复「大幅抖动 → 带热量松弛」几次, 取交叉最少的那一份。
+  // 只在首次出图时跑 (节点多时少试几次控制首屏耗时); 之后的增量更新不再打乱已有位置。
+  var gBestLayout = function (g) {
+    var n = g.nodes.length;
+    if (n < 4 || g.links.length < 3) return;
+    var tries = n > 50 ? 3 : n > 30 ? 6 : 12, jit = 70, snap = g.nodes.map(function (p) { return [p.x, p.y]; }), best = null;
+    for (var t = 0; t < tries; t++) {
+      g.nodes.forEach(function (p, i) { p.x = snap[i][0] + (Math.random() - 0.5) * jit; p.y = snap[i][1] + (Math.random() - 0.5) * jit; });
+      // 跑到底再数: 常驻循环的热量衰减到头之后才是用户看到的终态, 中途的交叉数不算数 (松弛过程里它会来回涨落)。
+      for (var i2 = 0; i2 < 150; i2++) gStep(g, 0.6 * Math.pow(0.975, i2));
+      // 再用恒定的强交叉力专门拆一段 (只有交叉项重, 其余力照旧), 然后才数。
+      for (var i3 = 0; i3 < 80; i3++) gStep(g, 0.15, 3);
+      var c = gTotalCross(g.links);
+      if (!best || c < best.c) best = { c: c, pos: g.nodes.map(function (p) { return [p.x, p.y]; }) };
+    }
+    g.nodes.forEach(function (p, i) { p.x = best.pos[i][0]; p.y = best.pos[i][1]; });
   };
   // 常驻循环: alpha 逐帧衰减, 衰减到几乎为 0 就停帧; 拖动时 gtarget 把热量吊在 0.3 上。
   var gLoop = function () {
@@ -635,11 +664,12 @@
       // 暖机: 先排 80 步再出第一帧, 免得一开始全挤在原点; 之后继续在帧循环里松弛。
       var a = 1;
       for (var i = 0; i < 80; i++) { gStep(g, a); a *= 0.985; }
+      gBestLayout(g);
     }
     drawPos(g);
     if (first || S.gfit) { setViewBox(svg, g); S.gfit = false; }
     else fitToPanel(svg, g);
-    if (first) gKick(0.3);
+    if (first) gKick(0.02);
     else if (rec.changed) gKick(0.35);
   };
 
