@@ -60,12 +60,14 @@ const client = {
   on: (event: string, handler: any) => handlers.set(event, handler),
   replyStream: async (_frame: unknown, _id: string, text: string) => replies.push(text),
 };
+let sessionInfoStub: any = { cli: "claude", model: "opus", effort: "high", jsonlPath: "" };
 const bridge = {
   hasMirrorTarget: () => true,
   status: () => ({ mirrors: [] }),
   getCwd: () => ({ runningCwd: "/repo/current", pendingCwd: "/repo/next", defaultCwd: "/repo/default" }),
   newSession: async (...args: any[]) => { spawned.push(args); return { ok: false, reason: "spawn denied" }; },
   chatRoster: () => [{ base: "user:tester", name: "team", self: true, targets: ["user:tester#worker"] }],
+  sessionInfo: (who: string) => (who === "user:tester" ? sessionInfoStub : undefined),
   peers: async () => [{ target: "user:tester#worker", cwd: "/repo/current", cli: "codex", label: "🧙", paneAlive: true, busy: false, self: true, summary: "done" }],
 };
 installInboundRouter(client as any, cfg, pino({ level: "silent" }), bridge as any,
@@ -92,6 +94,14 @@ for (const command of ["/peers"]) {
   assert.doesNotMatch(text, />|协作：|分身：|起名：|寻址：|💡/);
 }
 assert.match(await run("/help"), /\/new/);
+assert.match(await run("/help"), /\/model/);
+// /model: daemon 自己答, 绝不注入 pane (spawned / 注入类调用都不该出现)。
+const spawnedBefore = spawned.length;
+assert.match(await run("/model"), /当前模型: opus · effort high · cli claude$/);
+assert.match(await run("/model sonnet"), /当前模型: opus .*不切换.*set_model/);
+sessionInfoStub = undefined;
+assert.match(await run("/model"), /当前无活会话.*默认模型/);
+assert.equal(spawned.length, spawnedBefore, "/model never spawns or injects");
 
 const sessions = closure(inbound, "const renderSessionsList =", "// /peers —");
 const renderSessions = new Function(transpile(`${sessions}\nreturn renderSessionsList;`))();

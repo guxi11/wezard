@@ -5,7 +5,7 @@
 ## [Unreleased]
 
 ### Removed
-- **企微侧 `/model` 命令 (人 2026-11-21「会卡住, 删掉这个命令」)**: 它从来不是 daemon 的命令, 只是未知 slash 被原样注入 pane, TUI 弹出交互式模型选择器, 等不到结果就卡住 pane。现在 `daemon/inbound.ts` 在授权后把 `/model [..]` 直接拦下, 回「/model 已移除, 换模型请让 wizard 用 set_model, 或改 config」, 不再注入 pane。MCP `set_model`、config 的 model / tiers、wizard 内部换模型 (`model-select.ts`) 不动。
+- **企微侧 `/model` 改为 daemon 自答 (人 2026-11-21「会卡住」→「/model 的实现, 换成 daemon 去查接待 wizard 的 model」)**: 它从来不是 daemon 的命令, 只是未知 slash 被原样注入 pane, TUI 弹出交互式模型选择器, 等不到结果就卡住 pane。现在 `daemon/inbound.ts` 在授权后拦下 `/model [..]`, 绝不注入 pane, 由 daemon 查接待 wizard (这条消息路由到的会话, 含 slot / `.name`) 的 `bridge.sessionInfo`: 模型取 transcript 最近一轮 assistant 的真实 model (`lastModel`, 绑定里只是启动参数, 兜底), 回 `[wezard] .name 当前模型: <model> · effort <e> · cli <backend>`; 无会话回「当前无活会话, 新会话用 <默认 cli> 默认模型」; 带参数仍不切换, 附「换模型请让 wizard 用 set_model 或改 config」。`/help` 补 `/model`。MCP `set_model`、`POST /wizard/model`、config 的 model / tiers 不动。
 
 ### Changed
 - **rolepage chat detail 消息头重排 (人 2026-11-21)**: ① 头改成一条「去向」, 整条只有一个箭头: 私聊 `发送人 → 收件人`; 群聊 `发送人 —room→ 收件人`, room 名朴素地嵌在箭头线上 (无 border / 圆角底, 仍可点跳 room), 房间视图里不重复写 room。② 发送人 / 去向信息直接挂在每颗气泡上方 (过程框里发消息的调用不再有这一行, 过程框也不再挂头; 一轮什么都没说出去时才在框上留一行头)。成功的 chat_reply / chat_say 在过程里连摘要行都不留; 失败 / 状态不明 / 不答 / 待送达 / 频道评论仍留可见的摘要。③ 靠右的气泡 (我) 整条头 `row-reverse`、箭头翻成 ← (群聊 `←room—`)、发送人贴着气泡那一侧, 左侧的 (他人) 保持原序; DOM 始终是阅读顺序, 镜像全在 CSS, 窄屏折行。点头像/名字切 role、点群名跳 room、点空白切 viewpoint 的交互不变。只改前端展示与过程框的渲染 (`web/chat.js`、`shared/detail-render.ts`), 不动数据模型 / 路由。

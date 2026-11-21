@@ -4,7 +4,8 @@ import { attachmentLine, inboxName, saveToInbox } from "./media.js";
 import type { Logger } from "pino";
 import { PRIMARY_BOT, type Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
+import { resolveCliBackend } from "../shared/cli-backends.js";
+import { lastModel, tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { noticeSuffixFor } from "./notices.js";
 import { renderTail } from "../shared/reminder.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
@@ -173,6 +174,17 @@ const isKillCommand = (text: string): boolean => text.trim() === "/kill";
 const isEnterCommand = (text: string): boolean => text.trim() === "/n";
 const isRevealCommand = (text: string): boolean => text.trim() === "/reveal";
 const isModelCommand = (text: string): boolean => /^\/model(?:\s|$)/i.test(text.trim());
+
+type ModelInfo = { cli: string; model: string; effort: string; jsonlPath: string } | undefined;
+/** `/model` 的回话: 有会话 = 转录里最近一轮真正用的模型 (绑定里的只是启动参数), 无会话 = 明说并给默认后端。 */
+const renderModelReply = (text: string, who: string, info: ModelInfo, defaultCli = ""): string => {
+  const name = displayName(who) || tagOf(who) || who;
+  const hasArg = text.trim().split(/\s+/).length > 1;
+  const tip = hasArg ? " · /model 不切换, 换模型请让 wizard 用 set_model 或改 config" : "";
+  if (!info) return `[wezard] .${name} 当前无活会话${defaultCli ? `, 新会话用 ${defaultCli} 默认模型 (config 的 tiers 可按档固定)` : ""}${tip}`;
+  const model = (info.jsonlPath ? lastModel(info.jsonlPath) : "") || info.model || "CLI 默认 (本会话还没发过言)";
+  return `[wezard] .${name} 当前模型: ${model} · effort ${info.effort || "默认"} · cli ${info.cli}${tip}`;
+};
 const isHelpCommand =(text: string): boolean => /^\/(?:help|\?|h)$/i.test(text.trim());
 
 // Static command reference. Grouped: session control, usage/info. Anything
@@ -190,6 +202,7 @@ const renderHelp = (): string =>
     "`/sessions` 列出本机所有 live 会话 · `/sessions <emoji|id>` 把本聊天改接到某一个",
     "`/stop` 打断当前生成 (Esc)",
     "`/kill` 结束本会话并移除 tmux pane (下条消息自动让新的 wizard 就位)",
+    "`/model` 查看本会话当前模型 / effort (只读; 换模型让 wizard 用 set_model)",
     "`/n` 向 CLI 输入回车 (Enter)",
     "`/reveal` 把终端的 tmux 窗口切到本会话",
     "`/wx` 微信 ClawBot: 列出 / `bind` 扫码绑定 (每个微信号 = 一个群聊) / `unbind` (仅审批人)",
@@ -869,10 +882,11 @@ export const installInboundRouter = (
       await replyText(frame, msg, who, r.ok ? "🗑️ 会话已结束，pane 已移除" : `[wezard] /kill failed: ${r.reason ?? "unknown"}`);
       return { stop: true };
     }
-    // `/model` 已移除: 原样注入 pane 会让 TUI 弹出交互式模型选择器, 等不到回执就把 pane 卡死。
-    // 在企微侧拦下并回一句提示, 绝不退化成注入。(换模型走 MCP set_model / config, 内部能力不变。)
+    // `/model`: 原样注入 pane 会让 TUI 弹出交互式模型选择器, 把 pane 卡死 —— 所以绝不注入。
+    // 由 daemon 自己查「接待 wizard」(who = 这条消息会路由到的会话) 此刻真正在跑的模型回一行;
+    // 带参数不切换, 换模型走 MCP set_model / config (内部能力不变)。
     if (isModelCommand(text)) {
-      await replyText(frame, msg, who, "[wezard] /model 已移除 —— 换模型请让 wizard 用 set_model, 或改 config 里的 model / tiers。");
+      await replyText(frame, msg, who, renderModelReply(text, who, bridge.sessionInfo(who), resolveCliBackend(cfg.wrc).name));
       return { stop: true };
     }
     // Authorized `/n` — send a bare Enter to the live pane. Confirms a prompt /
