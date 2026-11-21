@@ -167,12 +167,18 @@ export interface HandoffDeps {
   /** Esc 打断 target 在飞的那一轮 (与 stop_wizard 的那一下同源, 无 teardown)。没有它就退回
    *  旧的排队语义 (等这一轮自然收口), 不打断。 */
   interrupt?: (target: string) => Promise<{ ok: boolean; reason?: string }>;
-  /** 只看 pane 本身闲没闲 (不含「这一轮的事件账落没落定」)。打断之后用: 被切断的轮不会再有
-   *  终句, 事件账永远 pending, 带 isBusy 的等待会永远等下去。 */
+  /** 只看 pane 本身闲没闲 (**true = 闲**, 与 isBusy 相反; 不含「这一轮的事件账落没落定」)。
+   *  打断之后用: 被切断的轮不会再有终句, 事件账永远 pending, 带 isBusy 的等待会永远等下去。 */
   paneIdle?: (target: string) => Promise<boolean>;
   /** 简报贴回成功后把它留档 (情景记忆): 新会话第一条消息之外, 简报原本无处可寻。 */
   archive?: (e: { target: string; mode: Pending["mode"]; at: number; sid: string; nextSid: string; brief: string }) => void;
 }
+
+/** 「闲没闲」→「忙没忙」: `waitForIdle` 的探针是 isBusy 极性 (true = 还忙, 继续等)。
+ *  daemon 里能拿到的是 `idleNow` (true = 闲) —— 直接塞进去会整个反过来: 闲着的 pane 被当成
+ *  永远在忙 (Esc 后「打断后仍未静下来」、排队永远等不到收口), 忙着的 pane 反被当成已静下来
+ *  (在飞的一轮上硬 /clear, 「/clear submission unconfirmed」)。接线一律过这一道。 */
+export const busyOf = (idle: (target: string) => Promise<boolean>) => async (target: string): Promise<boolean> => !(await idle(target));
 
 export type HandoffResult = { ok: true; brief: string } | { ok: false; status: number; reason: string; brief?: string };
 
@@ -415,7 +421,9 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         if (deps.interrupt) {
           const esc = await deps.interrupt(p.target);
           deps.log.info({ mod: "handoff", target: p.target, ok: esc.ok, reason: esc.reason }, "handoff: Esc 打断在飞这一轮直接交接");
-          const settle = await waitForIdle(p.target, deps.paneIdle ?? deps.isBusy, deps.selfWait?.settleMs ?? SELF_SETTLE_MS, () => false, { rampMs: 0, confirm: 2 });
+          // waitForIdle 吃的是 isBusy 极性; paneIdle 是 true=闲, 得翻过来 (见 busyOf)。
+          const paneBusy = deps.paneIdle ? busyOf(deps.paneIdle) : deps.isBusy;
+          const settle = await waitForIdle(p.target, paneBusy, deps.selfWait?.settleMs ?? SELF_SETTLE_MS, () => false, { rampMs: 0, confirm: 2 });
           const latest = adopt();
           if (latest) p = latest;
           if (settle.idle) return step({ ...p, stage: "restarting" });
