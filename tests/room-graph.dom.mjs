@@ -95,7 +95,11 @@ const server = createServer((req, res) => {
   const send = (type, body) => { res.statusCode = 200; res.setHeader("content-type", type); res.end(body); };
   if (u.pathname === "/role") return send("text/html; charset=utf-8", SHELL);
   if (u.pathname === "/chat/app.js") return send("text/javascript", APP);
-  if (u.pathname === "/api/world") return send("application/json", JSON.stringify(WORLD));
+  if (u.pathname === "/api/world") {
+    // 名册缺席 (svr 刚重启): 回包 degraded, 名字全是 id。
+    if (globalThis.__degrade) return send("application/json", JSON.stringify({ ...WORLD, degraded: true, names: {}, chatNames: {}, nodes: WORLD.nodes.map((n) => ({ ...n, name: n.target })) }));
+    return send("application/json", JSON.stringify(WORLD));
+  }
   if (u.pathname === "/api/room") return send("application/json", JSON.stringify(ROOM));
   if (u.pathname === "/api/wizard") return send("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "")));
   if (u.pathname === "/api/turn") return send("application/json", JSON.stringify({ ok: true, html: '<section class="turn-group" data-key="t:t1">box</section>' }));
@@ -338,6 +342,16 @@ try {
   const sz1 = await page.evaluate(() => ({ same: window.__nodeEl === document.querySelector(".rv-person"), h: +document.querySelector(".rv-graph").getAttribute("height") }));
   assert.equal(sz1.same, true, "缩放不重建节点");
   assert.ok(sz1.h > sz0.h, "高度也跟着变大: " + JSON.stringify({ sz0, sz1 }));
+
+  // 名册缺席 (svr 刚重启) 的首屏: 图里不露 id, 名册一到 (2s 重取) 立刻换成真名。
+  globalThis.__degrade = true;
+  await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  if (!(await page.$(".rv-graph"))) await page.click('[data-side="graph"]');
+  await page.waitForSelector(".rv-person", { timeout: 5000 });
+  const idLeak = await page.evaluate(() => [...document.querySelectorAll(".rv-graph text")].map((t) => t.textContent).filter((t) => /(?:chat|uid|dm):|w0{6}/.test(t)));
+  assert.deepEqual(idLeak, [], "名册缺席时图里不露 id: " + JSON.stringify(idLeak));
+  globalThis.__degrade = false;
+  await page.waitForFunction(() => [...document.querySelectorAll(".rv-person text.rv-nm")].some((t) => t.textContent === "alice"), null, { timeout: 8000 });
 
   // 侧栏拖拽调宽: 图视角记 wz.sbw.graph (与列表的 wz.sbw.list 互不相干), 图随之重算; 双击恢复默认。
   const sw0 = await page.evaluate(() => ({ side: document.querySelector(".side").getBoundingClientRect().width, svg: +document.querySelector(".rv-graph").getAttribute("width") }));

@@ -142,12 +142,21 @@
     if (who.kind === 'human') return 'human:' + who.id;
     return '';
   };
+  // 名册还没到 (svr 刚重启, 下一次推送最长 30s 才来) / 名字取不到时, 服务端会拿 id 当名字: 会话 key、uid、room id 永远不是名字。
+  // 与 shared/session-label.ts 的 displayName 同一条回落: 有 `#slot` 就用 slot, 否则宁可显示省略号占位也不露 id。
+  var ID_LIKE = /^(?:uid|user|chat|group|wezard|dm|adhoc):|^w[0-9a-f]{12}$/;
+  var safeName = function (s) {
+    s = String(s == null ? '' : s);
+    if (!ID_LIKE.test(s)) return s;
+    var h = s.indexOf('#');
+    return h >= 0 && h < s.length - 1 ? s.slice(h + 1) : '…';
+  };
   var nodeOf = function (id) {
     for (var i = 0; i < W.nodes.length; i++) if (W.nodes[i].target === id) return W.nodes[i];
     var uid = id.indexOf('uid:') === 0 ? id.slice(4) : '';
     var human = id.indexOf('human:') === 0;
     var name = uid ? (W.names[uid] || uid) : human ? (W.names[id.slice(6)] || id.slice(6)) : id;
-    return { target: id, kind: human ? 'human' : 'wizard', name: name, label: human ? '👤' : '🧙‍♂️', rels: [] };
+    return { target: id, kind: human ? 'human' : 'wizard', name: safeName(name), label: human ? '👤' : '🧙‍♂️', rels: [] };
   };
   // room 的名字 = 它的显示名 (host 起的 title > 聊天名 > 一个短代号)。
   // 不再用「N 人」或全量成员名当名字 —— 成员是侧栏的事 (gside)。
@@ -1593,8 +1602,11 @@
     return api('api/room', { room: id, limit: limit || 60 }).then(function (r) {
       if (gen !== S.roomGen) return false;
       if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; if (gside) gside.hidden = true; return; }
-      D.room = r.room; D.label = r.label || ''; D.members = r.members || []; D.duties = r.duties || [];
-      D.msgs = r.msgs || []; D.total = r.total || 0; D.earlier = r.earlier || ''; D.at = r.at;
+      // 服务端在名册缺席时拿 id 当名字 (成员 / 发话人): 一律过一遍 safeName, 名册到了下一轮取回来就是真名。
+      var fixM = function (ms) { return (ms || []).map(function (m) { return m && m.name && ID_LIKE.test(m.name) ? Object.assign({}, m, { name: safeName(m.name) }) : m; }); };
+      if (r.room && r.room.members) r.room = Object.assign({}, r.room, { members: fixM(r.room.members) });
+      D.room = r.room; D.label = r.label || ''; D.members = fixM(r.members); D.duties = r.duties || [];
+      D.msgs = (r.msgs || []).map(function (m) { return m && m.authorName && ID_LIKE.test(m.authorName) ? Object.assign({}, m, { authorName: safeName(m.authorName) }) : m; }); D.total = r.total || 0; D.earlier = r.earlier || ''; D.at = r.at;
       renderRoom(); scrollBottom();
     });
   };
@@ -1894,13 +1906,22 @@
 
   // ── 世界 ───────────────────────────────────────────────────────────
   var worldReq = null;
+  var worldRetry = 0;
+  var scheduleWorldRetry = function () {
+    if (worldRetry) return;
+    worldRetry = setTimeout(function () { worldRetry = 0; loadWorld(); }, 2000);
+  };
   var loadWorld = function () {
     if (worldReq) return worldReq;
     worldReq = api('api/world', { role: ROLE || '' }).then(function (r) {
       worldReq = null;
       if (!r.ok) { convsEl.innerHTML = '<div class="rv-none">' + esc(r.error || '世界视图加载失败') + '</div>'; return; }
-      W.at = r.at; W.rooms = r.rooms || []; W.nodes = r.nodes || [];
+      // 名册缺席 (svr 刚重启, 还没收到 daemon 推来的快照): 这份回包里的名字全是 id。已有一份好的就原样留着, 不拿 id 覆盖;
+      // 没有好的 (首屏) 就用占位名先画, 2s 后重取, 名册一到立刻补上 —— 不让 id 当名字露出来。
+      if (r.degraded && W.good) { W.degraded = true; scheduleWorldRetry(); return r; }
+      W.at = r.at; W.rooms = r.rooms || []; W.nodes = (r.nodes || []).map(function (n) { return n.name && ID_LIKE.test(n.name) ? Object.assign({}, n, { name: safeName(n.name) }) : n; });
       W.uidTargets = r.uidTargets || {}; W.chatNames = r.chatNames || {}; W.names = r.names || {}; W.degraded = !!r.degraded;
+      if (!r.degraded) W.good = true; else scheduleWorldRetry();
       // 日程栏要的 plans / 定时任务: 名册快照里就是全量 (带 gate 与出错), 每 6s 一次, 开着就看得到最新。
       W.plans = r.plans || []; W.schedules = r.schedules || [];
       renderSide();
