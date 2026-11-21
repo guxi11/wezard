@@ -72,7 +72,13 @@ const WORLD = {
   chatNames: { [G]: "群G", [OLD]: "老群" }, names: { [A]: "alice", [B]: "bob", U1: "张三", U2: "李四" }, humanNames: { "human:U1": "张三", "human:U2": "李四" },
   degraded: false,
 };
-const ROOM = { ok: true, at: Date.now(), room: ROOMS[0], label: "群G", members: memberViews, duties: [], msgs: msgs.filter((m) => m.room === G), total: 4 };
+// 服务端 wireMsg 给的 reQuote (见 tests/re-quote.test.ts): .4 答 .3 (第一条) + .1 + 一条查不到的。
+const reQuoteOf = (m) => m.id === "aa000001.4" ? [
+  { id: "aa000001.3", author: who("wizard", A), authorName: "alice", snippet: "查一下配置", at: T0 + 3000, room: G },
+  { id: "aa000001.1", author: who("human", "U1"), authorName: "张三", snippet: "谁来搭把手", at: T0 + 1000, room: G },
+  { id: "zz000000.404", missing: true },
+] : undefined;
+const ROOM = { ok: true, at: Date.now(), room: ROOMS[0], label: "群G", members: memberViews, duties: [], msgs: msgs.filter((m) => m.room === G).map((m) => (reQuoteOf(m) ? { ...m, reQuote: reQuoteOf(m) } : m)), total: 4 };
 // 搜索的服务端口径在 room-view-api.test.ts 验; 这里只验前端: 面板画得出三组、点一条消息能落到那一行。
 const SEARCH = (q) => ({
   ok: true, q,
@@ -229,6 +235,20 @@ try {
   assert.equal(counts.members, 3, "成员列 = alice / bob / 张三");
   assert.equal(counts.membar, false, "chat detail 上不再挂成员条");
   assert.ok(counts.headActs.indexOf("刷新") < 0, "右上角不再有刷新: " + counts.headActs);
+
+  // quote: 答的那条画成引用块 (发话人 + 摘要), 头部不再有「答」和裸 id; 多个 re 只画第一条, 其余收成 +N; 点击落到原消息并高亮。
+  const qt = await page.evaluate(() => {
+    const art = document.querySelector('.rv-msg[data-id="aa000001.4"]');
+    return { q: art.querySelector(".rv-bub .rv-quote .rq-it .rq-tx")?.textContent, who: art.querySelector(".rq-who")?.textContent, items: art.querySelectorAll(".rv-quote .rq-it").length, more: art.querySelector(".rq-more")?.textContent, head: art.querySelector(".rv-mh").textContent, restHidden: art.querySelector(".rq-rest").hidden };
+  });
+  assert.equal(qt.q, "查一下配置"); assert.equal(qt.who, "alice");
+  assert.equal(qt.more, "+2", "多 re 折成 +N: " + JSON.stringify(qt));
+  assert.ok(!/答/.test(qt.head) && !/↩/.test(qt.head), "头部没有「答」与裸 id: " + qt.head);
+  await page.click('.rv-msg[data-id="aa000001.4"] .rq-more');
+  assert.equal(await page.evaluate(() => document.querySelector('.rv-msg[data-id="aa000001.4"] .rq-rest').hidden), false, "点 +N 展开其余");
+  assert.equal(await page.evaluate(() => document.querySelectorAll('.rv-msg[data-id="aa000001.4"] .rq-rest .rq-gone').length), 1, "查不到的降级成「较早的消息」");
+  await page.click('.rv-msg[data-id="aa000001.4"] .rv-quote .rq-it');
+  await page.waitForFunction(() => document.querySelector('.rv-msg[data-id="aa000001.3"]').classList.contains("hit"), null, { timeout: 3000 });
 
   // 点一条消息的「过程」→ 服务端渲染的过程框进来
   await page.click(".rv-open");
