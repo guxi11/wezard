@@ -40,7 +40,7 @@ export const chatStyles = (): Asset => {
 /** /chat/vendor.js = markdown-it + highlight.js, 随包分发。原先走 unpkg: 外网慢的时候
  *  head 里的阻塞脚本能把整页卡上十几秒, 而这两个库本来就不随页面变。 */
 export const chatVendor = (): Asset => {
-  const parts = ["d3.min.js", "markdown-it.min.js", "highlight.min.js"].map(readAsset);
+  const parts = ["markdown-it.min.js", "highlight.min.js"].map(readAsset);
   return {
     body: parts.map((a) => a?.body ?? "").join(";\n"),
     type: "text/javascript; charset=utf-8",

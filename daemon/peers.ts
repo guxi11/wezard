@@ -1213,7 +1213,7 @@ export const peerMentionPart = (mentions: readonly PeerMention[], cwd = ""): Par
   return {
     text: renderReminder({ wezard: "mention" }, [
       ...(rule
-        ? ["名字 tokens above are live wizards, not literal text. To involve / check / relay to one: chat_ask · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
+        ? ["名字 tokens above are live wizards, not literal text. To involve / check / relay to one: chat_ask (it answers by chat_reply) · peek_peer — never answer for it; wizard_roster for all. A passing mention needs no tool."]
         : []),
       ...fresh.map(row),
       ...(known.length ? [`${known.map((m) => m.tag).join(" ")}: wizards (described earlier)`] : []),
