@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>room graph fixture</title>
-<style>body{margin:0}.app{display:flex;height:100vh}.side{width:332px;border-right:1px solid #ddd;display:flex;flex-direction:column}.side-body{flex:1;display:flex;min-height:0}.convs{flex:1;overflow:auto}.gside{flex:none;width:200px;border-left:1px solid #ddd;overflow:auto;padding:6px}.main{flex:1;display:flex;flex-direction:column;min-width:0}</style>
+<style>body{margin:0}.app{display:flex;height:100vh}.sbox{flex:none}.sbox svg{width:14px;height:14px}.side{width:max(332px,40vw);border-right:1px solid #ddd;display:flex;flex-direction:column}.side-body{flex:1;display:flex;min-height:0}.convs{flex:1;overflow:auto}.gside{flex:none;width:200px;border-left:1px solid #ddd;overflow:auto;padding:6px}.main{flex:1;display:flex;flex-direction:column;min-width:0}.chathead .back{display:none;border:0;background:none}@media (max-width:760px){.app{flex-direction:column}.side{width:auto;flex:1;border-right:0}.main{display:none}.app.reading .side{display:none}.app.reading .main{display:flex}.chathead .back{display:block}}</style>
 </head><body>
 <div class="app" id="app">
   <aside class="side">
@@ -9,7 +9,7 @@
     </div>
   </aside>
   <main class="main">
-    <header class="chathead" id="chathead"><div class="ch-who" id="ch-who"></div><div class="ch-acts" id="ch-acts"></div></header>
+    <header class="chathead" id="chathead"><button class="back" id="tb-back">‹</button><div class="ch-who" id="ch-who"></div><div class="ch-acts" id="ch-acts"></div></header>
     <div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div>
   </main>
   <aside class="gside" id="gside" hidden></aside>

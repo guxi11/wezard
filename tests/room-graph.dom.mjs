@@ -5,7 +5,7 @@
 // playwright 不在 node_modules 里就跳过 (跑法: NODE_PATH=<任意装了 playwright 的 node_modules> node tests/room-graph.dom.mjs)。
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
@@ -107,7 +107,12 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = "http://127.0.0.1:" + server.address().port;
 
 // 本机的 Chrome 就够 (不为了这一条验收去下载 playwright 配对的 Chromium)。
-const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+// 无桌面机器缺的系统库: scripts/shot-setup.sh 解在 ~/.cache/wezard-shot-libs, 存在就挂进 LD_LIBRARY_PATH (与 shot.mjs 同口径)。
+const shotLibs = join(process.env.HOME ?? "", ".cache", "wezard-shot-libs", "root", "usr", "lib", "x86_64-linux-gnu");
+const launchOpts = existsSync(shotLibs)
+  ? { env: { ...process.env, LD_LIBRARY_PATH: [shotLibs, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":") }, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] }
+  : {};
+const browser = await chromium.launch({ channel: "chrome", ...launchOpts }).catch(() => chromium.launch(launchOpts));
 try {
   const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
   const errs = [];
@@ -337,6 +342,8 @@ try {
   // 移动端 (≤760px): 列表 / 图与 chat detail 二选一; 点进聊天看得到 detail, ‹ 返回列表。
   await page.setViewportSize({ width: 400, height: 760 });
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  // 深链进来直接是 detail (窄屏 .reading); 先点 ‹ 回到列表 / 图那一页。
+  await page.click("#tb-back");
   await page.click('[data-side="list"]');   // 视图记在 localStorage: 上面停在图
   await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
   const vis = (sel) => page.evaluate((q) => { const e = document.querySelector(q); return !!e && getComputedStyle(e).display !== "none"; }, sel);
