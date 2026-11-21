@@ -67,7 +67,9 @@
     if (!id || !D.role) return false;
     if (id === D.role) return true;
     if (D.wizard && D.cardRole === D.role && id === D.wizard.id) return true;
-    return !!D.uid && D.cardRole === D.role && id === 'uid:' + D.uid;
+    if (!D.uid || D.cardRole !== D.role) return false;
+    // role 是 uid 形态 (只在 room 里露过面的 wizard) 时, 别处的节点 id 是它的注册 target: 经名册对回 uid 再比。
+    return id === 'uid:' + D.uid || (id.indexOf('uid:') !== 0 && id.indexOf('human:') !== 0 && nodeOf(id).uid === D.uid);
   };
   var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
   var fmtDay = function (ts) {
