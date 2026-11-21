@@ -390,7 +390,7 @@ export const resolveCliBackend = (cfg: CliBackendsConfig): CliBackend => {
 // to `--resume` with, which jsonl schema to normalize, which project-dir
 // encoding to compare panes against) derives from that instead of a global.
 //
-// `primaryBackend()` remains the tie-breaker for *write* paths — spawning a new
+// The primary backend (`_primary`) remains the tie-breaker for *write* paths — spawning a new
 // session has no path to derive from, so it uses `defaultCli`.
 
 let _backends: readonly CliBackend[] = [CLI_BACKEND_DEFAULTS.claude];
@@ -398,8 +398,6 @@ let _primary: CliBackend = CLI_BACKEND_DEFAULTS.claude;
 
 /** Active backends, primary first. Read-only snapshot of the last bind. */
 export const activeBackends = (): readonly CliBackend[] => _backends;
-/** Backend used when there is no path to derive one from (new-session spawns). */
-export const primaryBackend = (): CliBackend => _primary;
 
 /**
  * Resolve the primary backend and register every other known backend alongside

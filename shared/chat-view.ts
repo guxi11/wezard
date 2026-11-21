@@ -67,7 +67,6 @@ export interface TagSummary {
   usage: AggUsage;
 }
 
-
 // ── turn 结束判定 ─────────────────────────────────────────────────────
 // 三种证据, 由强到弱: closed (收口信号) → final text (closeTurn 可能滞后, 但
 // final 就是最后一条) → 静默超时。第三条是唯一的兜底: daemon 重启 / 漏收
@@ -179,45 +178,8 @@ export const isMark = (r: DetailRecord): r is MarkDetailRecord => r.kind === "ma
 
 export const isPost = (r: DetailRecord): r is PostDetailRecord => r.kind === "post";
 
-/** Real turns of one chat — every ghost dropped exactly once, up front, so the
- *  list / thread / status bar can never disagree about what counts. */
-const liveTurns = (records: readonly DetailRecord[], now: number): TurnDetailRecord[] =>
-  records.filter(isTurn).filter((r) => !isGhostTurn(r, now));
-
-/** Turns of one session key, oldest first — the thread order. */
-export const threadOf = (records: readonly DetailRecord[], target: string, now: number): TurnDetailRecord[] =>
-  liveTurns(records, now).filter((r) => r.target === target).sort((a, b) => a.createdAt - b.createdAt);
-
-/** 线程的一格: 一轮对话 (子 agent 轮内联在它的时间轴里), 或一道上下文断点。 */
-export type ThreadEntry =
-  | { kind: "turn"; turn: TurnDetailRecord; children: TurnDetailRecord[] }
-  | { kind: "mark"; mark: MarkDetailRecord };
-
-const entryTs = (e: ThreadEntry): number => (e.kind === "turn" ? e.turn.createdAt : e.mark.createdAt);
-
-/** 线程视图的完整序列: 断点标记 + 顶层 turn, 按时间排序。子 agent 的 turn 不占
- *  顶层位置 —— 它归到派它出去的那一轮名下 (父轮不在本线程时才退回顶层, 否则内容
- *  会整段消失)。 */
-export const threadEntries = (records: readonly DetailRecord[], target: string, now: number): ThreadEntry[] => {
-  const turns = threadOf(records, target, now);
-  const ids = new Set(turns.map((r) => r.id));
-  const parentOf = (r: TurnDetailRecord): string | undefined => {
-    const p = r.agent?.parentTurnId;
-    return p && ids.has(p) ? p : undefined;
-  };
-  const byParent = turns.reduce((m, r) => {
-    const p = parentOf(r);
-    return p ? m.set(p, [...(m.get(p) ?? []), r]) : m;
-  }, new Map<string, TurnDetailRecord[]>());
-  const marks = records.filter(isMark).filter((r) => r.target === target);
-  return [
-    ...turns.filter((r) => !parentOf(r)).map((turn): ThreadEntry => ({ kind: "turn", turn, children: byParent.get(turn.id) ?? [] })),
-    ...marks.map((mark): ThreadEntry => ({ kind: "mark", mark })),
-  ].sort((a, b) => entryTs(a) - entryTs(b));
-};
-
 export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[], now: number): TagSummary => {
-  // 子 agent 的一轮不是"一轮对话" —— 它内联在派它的那一轮里 (见 threadEntries),
+  // 子 agent 的一轮不是"一轮对话" —— 它内联在派它的那一轮里,
   // 所以轮数与预览都只看主会话自己的轮次; token/工具用量仍按全部计 (那是真花销)。
   const main = turns.filter((r) => !r.agent);
   const last = main[main.length - 1] ?? turns[turns.length - 1];
