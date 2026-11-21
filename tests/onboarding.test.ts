@@ -6,9 +6,8 @@ import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { chatPolicyOf } from "../daemon/chat-name.js";
 import { makeApproveHandler } from "../daemon/approval.js";
-import { answerOf, applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideHandoffOps, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, isOnboardingActive, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderOnboardingDone, validateOnboardingWorkspace, validateWorkspace, WIZARD_NAME_RE, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
+import { answerOf, applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideHandoffOps, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderOnboardingDone, validateOnboardingWorkspace, validateWorkspace, WIZARD_NAME_RE, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
 import { bindWizardStore, identityWorkspaceOf, loadWizardStore } from "../daemon/wizard.js";
-import { autoOrdinalOf } from "../daemon/wizard-names.js";
 import { stewardRoute } from "../daemon/steward.js";
 import { DAEMON, foldRoom, holderOf, mirrors, msgIdOf, openDuties, roomHost, sameWho, whoKey, type RoomOp } from "../shared/room.js";
 
@@ -109,7 +108,6 @@ try {
   const store = loadWizardStore(join(dir, "wizards3.json"));
   const obw = loadOnboardingStore(cfg);
   obw.begin(B);
-  assert.equal(isOnboardingActive(B), true, "在途豁免已开");
   const input = classifyOnboardingInput(ws) as Answer;
   const verdict = judgeOnboarding(store, B, input);
   assert.deepEqual(verdict, { kind: "bind-new", workspace: ws });
@@ -117,7 +115,7 @@ try {
   const bound = applyOnboarding(store, obw, B, verdict as Bind, (n) => { binds.push(n); bindSteward(cfg, src, B, n); }, () => "");
   assert.equal(bound.fresh, true);
   assert.equal(bound.workspace, ws);
-  assert.notEqual(autoOrdinalOf(bound.name), undefined, "新管家领自动中性名 (名字后置给 /name)");
+  assert.match(bound.name, /^[A-Z][a-z]+([A-Z][a-z]+[0-9A-Z]*)?$/, "新管家领自动中性名 (名字后置给 /name)");
   assert.deepEqual(binds, [bound.name], "绑定恰好写一次");
   const anchor = store.get(B)!;
   assert.equal(anchor.kind, "steward", "untagged 锚点 kind:steward");
@@ -126,7 +124,6 @@ try {
   assert.equal(JSON.parse(readFileSync(src, "utf8")).chatPolicy[B].steward, bound.name, "chatPolicy.<base>.steward 落盘");
   assert.equal(obw.get(B), undefined, "状态机终结 (没有第二步)");
   assert.equal(loadOnboardingStore(cfg).get(B), undefined, "终结落盘");
-  assert.equal(isOnboardingActive(B), false, "绑定即关出站豁免 (不再留告别窗口)");
   assert.equal(needsOnboarding(cfg, store, B), false, "绑定后不再引导");
   assert.equal(stewardRoute(cfg, store, B).target, B, "裸消息落管家锚点");
   assert.equal(identityWorkspaceOf(store, B), ws, "管家会话将起在给的目录");
@@ -317,11 +314,9 @@ try {
   // chatPolicyOf 读侧剥掉, 永不生效 (残留键只在 boot warn 里出现)。
   const obx = loadOnboardingStore(cfg);
   obx.begin("chat:wrEXEMPT");
-  assert.equal(isOnboardingActive("chat:wrEXEMPT"), true, "在途状态本身照记");
   cfg.chatPolicy = { "chat:wrEXEMPT": { speech: "strict" } };
   assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, undefined, "room 口径: 残留 speech 键读侧剥掉 (在途)");
   obx.finish("chat:wrEXEMPT");
-  assert.equal(isOnboardingActive("chat:wrEXEMPT"), false, "绑定即关窗");
   assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, undefined, "收尾后同样剥掉, 旧键永不生效");
   delete cfg.chatPolicy;
 } finally { rmSync(dir, { recursive: true, force: true }); }

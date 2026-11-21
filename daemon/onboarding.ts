@@ -85,16 +85,6 @@ export const guideRefusal = (rec: WizardRecord | undefined, action: string): str
     ? "引导会话只有 chat_reply / chat_say (本群 room) / onboard_bind 三件工具 (" + action + " 被拒): 话用 chat_reply / chat_say 说进 room, 目录与绑定用 onboard_bind 交给 daemon, 不要调别的工具或命令。"
     : "";
 
-// ── 在途登记 (chatPolicyOf 的 strict 豁免凭据) ────────────────────────
-// 出站 tracker 第一句就会把新群登记成首见 strict —— 不豁免的话, 对话式引导第二轮
-// 起模型发言就被人只见占位。所以「在途」的群一律按 implicit 出站, 显式 chatPolicy
-// 也不豁免它: 绑定落盘之前这个群还谈不上治理。绑定即关窗 (finish): 完成确认是 daemon
-// 的系统行, 不再等引导化身告别, 管家的回复从此走严格门的 chat_reply 流程。只在本进程
-// 内有效 (mirror-bridge 与 inbound 同进程)。
-const activeBases = new Set<string>();
-/** 这个群是否在引导途中。 */
-export const isOnboardingActive = (base: string): boolean => activeBases.has(base);
-
 // ── 在途状态 ──────────────────────────────────────────────────────────
 // <stateDir>/onboarding.json 只记**还没走完**的群; 走完的凭据是 config 里的绑定,
 // 不在状态里 —— crash / reload 后凭 config 就能接着判, 状态只是断点续传。
@@ -118,14 +108,12 @@ export interface OnboardingStore {
   get(base: string): OnboardingState | undefined;
   /** 进入 (或继续) 引导, 返回当前步。 */
   begin(base: string): OnboardingStep;
-  /** 绑定落盘后清掉在途状态并关掉出站豁免。 */
+  /** 绑定落盘后清掉在途状态。 */
   finish(base: string): void;
 }
 
 export const loadOnboardingStore = (cfg: Config): OnboardingStore => {
   const db = readStates(cfg);
-  // 在途播种: reload 后断点群继续豁免。
-  for (const b of Object.keys(db)) activeBases.add(b);
   const save = (): void => {
     try {
       mkdirSync(dirname(statePath(cfg)), { recursive: true });
@@ -134,8 +122,8 @@ export const loadOnboardingStore = (cfg: Config): OnboardingStore => {
   };
   return {
     get: (b) => db[b],
-    begin: (b) => { db[b] = db[b] ?? { step: "workspace" }; activeBases.add(b); save(); return db[b]!.step; },
-    finish: (b) => { activeBases.delete(b); if (db[b]) { delete db[b]; save(); } },
+    begin: (b) => { db[b] = db[b] ?? { step: "workspace" }; save(); return db[b]!.step; },
+    finish: (b) => { if (db[b]) { delete db[b]; save(); } },
   };
 };
 

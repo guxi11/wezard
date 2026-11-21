@@ -1,6 +1,7 @@
 // 单元测试: shared/allow-rules.ts + shared/claude-permissions.ts — 运行: npx tsx tests/allow-rules.test.ts
 import assert from "node:assert";
-import { alwaysAllowRulesFor, parseRule, ruleAllows, ruleMatchesAny, splitSegments, WEZARD_MCP_BUILTIN } from "../shared/allow-rules.js";
+import { alwaysAllowRulesFor, parseRule, ruleMatchesAny, splitSegments, WEZARD_MCP_BUILTIN } from "../shared/allow-rules.js";
+import { ruleAllows } from "./allow-rules-helper.js";
 import { mapClaudePermissions } from "../shared/claude-permissions.js";
 
 let passed = 0;

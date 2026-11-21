@@ -4,7 +4,8 @@
 // 覆盖"为什么这条命令没被白名单放行" —— 卡片「审核」行的数据源。ruleAllows
 // 的既有 56 条测试锁住"放不放行", 这里锁住"不放行时给出的理由对不对"。
 import assert from "node:assert";
-import { evaluateAllow, ruleAllows, ruleForSegment } from "../shared/allow-rules.js";
+import { evaluateAllow, ruleForSegment } from "../shared/allow-rules.js";
+import { ruleAllows } from "./allow-rules-helper.js";
 
 let passed = 0;
 let failed = 0;

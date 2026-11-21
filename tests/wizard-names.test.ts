@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FIRSTNAMES, LASTNAMES, LAP, autoNameAt, autoOrdinalOf, fullNameAt, lapPosOf, loadAutoNames } from "../daemon/wizard-names.js";
+import { FIRSTNAMES, LASTNAMES, LAP, autoNameAt, fullNameAt, loadAutoNames } from "../daemon/wizard-names.js";
 import { loadWizardStore, referencedTargets, slotInUse } from "../daemon/wizard.js";
 
 // ── 表: 每个首字母一个, first A→Y, last A→Z ─────────────────────────────
@@ -25,7 +25,6 @@ assert.equal(new Set(lap).size, LAP, "一轮 650 个两两不同 = 覆盖全部�
 assert.equal(fullNameAt(LAP), fullNameAt(0), "走满一轮回到起点");
 for (let k = 0; k < LAP; k++) {
   const i = k % 25, j = k % 26;
-  assert.equal(lapPosOf(i, j), k);
   assert.equal(fullNameAt(k + 1), FIRSTNAMES[(i + 1) % 25] + LASTNAMES[(j + 1) % 26], "两个下标一起前进");
 }
 
@@ -43,14 +42,9 @@ assert.equal(autoNameAt(third + 36 * 36 * LAP), "AliceAdams100");
 assert.throws(() => autoNameAt(-1));
 assert.throws(() => autoNameAt(1.5));
 
-// ── 反解 ────────────────────────────────────────────────────────────────
+// ── 不重名 ──────────────────────────────────────────────────────────────
 const many = Array.from({ length: 25 + LAP * 40 }, (_, o) => autoNameAt(o));
 assert.equal(new Set(many.map((x) => x.toLowerCase())).size, many.length, "大小写折叠后也不重");
-many.forEach((x, o) => assert.equal(autoOrdinalOf(x), o, `roundtrip ${x}`));
-for (const o of [third + 36 * LAP + 7, third + 1296 * LAP + 649, 10 ** 9]) assert.equal(autoOrdinalOf(autoNameAt(o)), o);
-for (const x of ["MayaCarter", "Zoe", "AliceAdams-2", "AliceAdams00", "AliceAdams01", "AliceAdamsa", "aliceadams", "Alicex", ""]) {
-  assert.equal(autoOrdinalOf(x), undefined, `not auto: ${x}`);
-}
 
 // ── 分配: 游标只进不退, 被占的跳过并消耗, 永不复用 ─────────────────────
 const dir = mkdtempSync(join(tmpdir(), "wizard-names-"));

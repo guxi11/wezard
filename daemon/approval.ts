@@ -2231,7 +2231,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
 
     // allowRules: matcher 拦下的工具里再挖细粒度豁免 (Bash 可按命令前缀区分)。
     // 交互卡工具 (AskUserQuestion 等) 在引擎内部硬保护, 规则写了也不放行。
-    // 用 evaluateAllow 而非 ruleAllows: 未命中时要把"因为哪一段"带到卡上,
+    // evaluateAllow 给完整裁决: 未命中时要把"因为哪一段"带到卡上,
     // 光知道"没放行"帮不了用户判断。判定本身零额外开销 (原本就要跑这一次)。
     const verdict = evaluateAllow(cfg.approval.allowRules, toolName, toolInput);
     if (!mustCard && verdict.allowed) {

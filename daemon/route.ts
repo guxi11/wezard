@@ -34,7 +34,7 @@ export interface RouteRow extends WizardBrief {
   cacheTtlMs?: number;
   /** 缓存最近一次被碰的时刻 = 最近一次真实请求的开始 (cacheTouchMs); 缺 = 退回 lastActivity (mtime)。 */
   cacheAt?: number;
-  /** 这段上下文里碰过的文件 (contextFiles), 相对路径以候选 cwd 为基准。 */
+  /** 这段上下文里碰过的文件 (contextMaterials 里 confirmed 的 read), 相对路径以候选 cwd 为基准。 */
   files: readonly string[];
   materials?: readonly ContextMaterial[];
   sessionId?: string;

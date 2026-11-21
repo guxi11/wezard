@@ -237,67 +237,9 @@ export interface Handoffs {
   status: () => HandoffQueueEntry[];
   /** 切断那一轮的终句被扣下了 (`cuttingTurn` 为真时): 记在这场交接上, 失败时补投。 */
   cut: (target: string, event: string) => void;
-  /** 切断那一轮的终句其实就是那一笔的交代 (见 `settlesCut`): 从这场交接的扣下集合里摘掉,
-   *  照常落定 —— 交接做成了也不再续问它, 没做成也不再补投第二遍。 */
+  /** 把一句终句从这场交接的扣下集合里摘掉: 交接做成了也不再续问它, 没做成也不再补投第二遍。 */
   keep: (target: string, event: string) => void;
 }
-
-/** 交接切断那一轮的终句算不算那一笔的交代 —— 算就照常落定投出, 不留成欠账给新会话续问。
- *  - 结论回**群里** (`chat`): 新会话贴回简报那一轮本就在同一个群里说话, 收尾即便只是「已交接」
- *    也不丢东西; 扣下它反倒让新会话再被「继续 <event>」点一次, 而它手里只有一个事件号
- *    (set_workspace 那一轮就这样被重问, 新管家去 read_chat 猜, 撞上了复用的群名)。
- *  - 结论回 **wizard**: 简报那一轮是私聊、不服务任何一笔, 抢答 (「已交接, 新会话接着干」)
- *    一旦落定, 真结论就再也到不了派活方 —— 只有显式 `RESULT:` / `NEED:` 才算数, 未标记的照旧扣下。 */
-export const settlesCut = (receiver: "chat" | "wizard" | undefined, closing: "need" | "result" | undefined): boolean =>
-  receiver === "chat" || (receiver === "wizard" && closing !== undefined);
-
-/** 交接要等的那「一轮」: transcript 里开当前这一轮的那句信封所指的注入事件, 加上绑在同一个
- *  turn 上的兄弟事件 —— 只有它们会被这次切断误伤。
- *
- *  为什么不能等整个台账 (2026-10-28 收窄): 一条 execution:"uncertain" 的旧事件永远不会落定
- *  (`settled` 只认 complete+finalized / canceled), 它在等, 交接就空耗满 SELF_IDLE_MS 再 504。
- *  8 次 idle 超时里的每一条 cut 都长这样: 卡住的事件比失败早 27min~10h 注入, 期间 pane 一直判闲。
- *  跨轮卡住的旧账由 cut / uncut 与 resumeOwed 兜底, 不在这里等。
- *
- *  不参与: `handoff:*` 内部事件 (简报/续问)、还没贴进 pane 的 (exposure none —— 交接闸
- *  handingOff 把 peer 注入 held 住, 本来也落不了定)、已经显式释放的 (releasedAt)。
- *  `dispatching` 例外: 那不是历史, 是此刻还在往 pane 里写。 */
-export interface RoundEvent {
-  id: string;
-  target: string;
-  turn?: string;
-  exposure: string;
-  execution: string;
-  releasedAt?: number;
-}
-export const handoffRound = <T extends RoundEvent>(target: string, active: string | undefined, rows: readonly T[]): T[] => {
-  const opener = active ? rows.find((e) => e.id === active && e.target === target) : undefined;
-  // 开场那条还没贴进 pane / 已被释放 → 这一轮没有会被切掉的终句, 也就不等。
-  const live = opener && opener.exposure !== "none" && !opener.releasedAt ? opener : undefined;
-  const turn = live?.turn;
-  return rows.filter((e) => e.target === target && !e.id.startsWith("handoff:") && e.exposure !== "none" && !e.releasedAt
-    && (e.execution === "dispatching" || (!!live && (e.id === live.id || (!!turn && e.turn === turn)))));
-};
-
-/** 这一轮还没收口: 还有事件既没落定也没被撤。传进来的行应是 reconcile 之后的最新状态。 */
-export const roundPending = (round: readonly { execution: string; finalized?: boolean }[]): boolean =>
-  round.some((e) => e.execution !== "canceled" && !e.finalized);
-
-const quote = (s: string): string => s.trim().split("\n").map((l) => `> ${l}`).join("\n");
-
-/** 交接后续答那一笔的注入正文: 带上谁问的、原话、交接切断那一轮被扣下的收尾。新会话没有旧
- *  transcript, 只给事件号它只能去翻记录猜; 有了原话与收尾, 那一笔若其实已答完 (假欠账),
- *  它一句 RESULT 就能自己收掉。 */
-export const resumeText = (event: string, ctx: { asker?: string; ask?: string; closing?: string; receiver?: string }): string =>
-  [
-    `继续 ${event} —— 这是你还没交代的同一项任务。核对已有结果后续办，不要重复已完成或交付未知的操作。`,
-    ctx.asker ? `问的是: ${ctx.asker}` : "",
-    ctx.ask?.trim() ? `原话:\n${quote(ctx.ask)}` : "",
-    ctx.closing?.trim() ? `已有结果与上次收尾:\n${quote(ctx.closing)}` : "",
-    ctx.ask?.trim() || ctx.closing?.trim()
-      ? `就按上面这件事收口；已做完就用 chat_reply({re, text: <结论>, status: "done"}) 交代。需要补信息时 status: "need", 要另派就开一条 chat_ask。`
-      : "",
-  ].filter(Boolean).join("\n\n");
 
 const SELF_IDLE_MS = 10 * 60_000;
 // self 排队等待的节拍与防死排队上限: 每片等一次 idle; 到上限只是把日志升到 warn、记录仍是
@@ -350,8 +292,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   const nextAt = (p?: Pending): number => Math.max(Date.now(), (p?.at ?? 0) + 1);
   const selfSliceMs = deps.selfWait?.sliceMs ?? SELF_WAIT_SLICE_MS;
   const selfIdleOpts: IdleOpts = { rampMs: deps.selfWait?.rampMs, confirm: deps.selfWait?.confirm };
-  // grace 探测不带 ramp: 这里的「忙」含事件账 (roundPending), 没有「输入还没开始处理」的
-  // 误判窗 —— 检闲要快, 一个本来就闲的交接不能白等 ramp 那 20s。
+  // grace 探测不带 ramp: 检闲要快, 一个本来就闲的交接不能白等 ramp 那 20s。
   const graceIdleOpts: IdleOpts = { rampMs: 0, confirm: deps.selfWait?.confirm ?? 2 };
   /** 已受理的排队请求开工: 前一场已了结 (或已失败 —— self 不被失败记录挡) 时, 顶掉旧记录开一场新的。
    *  `evenWhileResuming`: 简报已贴回、还在续答欠账的那场也照样接 (剩下的欠账由新一场的续答兜着)。 */

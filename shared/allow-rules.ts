@@ -383,17 +383,6 @@ export const evaluateAllow = (
   return { allowed: false, reason: { kind: "tool_not_listed", tool: toolName } };
 };
 
-/** 旧签名薄包装: 命中返回规则说明串, 未命中 undefined。调用方只关心"放不放行"
- *  时用它; 要向用户解释"为什么不放行"时用 evaluateAllow。 */
-export const ruleAllows = (
-  rules: string[],
-  toolName: string,
-  toolInput: unknown,
-): string | undefined => {
-  const v = evaluateAllow(rules, toolName, toolInput);
-  return v.allowed ? [...new Set(v.hits)].join(" + ") : undefined;
-};
-
 /**
  * deny / ask 规则的匹配判定 — 与 allow 的量词相反:
  * Bash 复合命令**任一段**命中即命中 (拒绝/追问要抓到藏在复合命令里的危险段,

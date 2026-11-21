@@ -1,26 +1,11 @@
 import assert from "node:assert/strict";
 import pino from "pino";
-import { createHandoffs, FAILED_STALE_MS, handoffAdmission, resumeText, SELF_GRACE_MS, SELF_SETTLE_MS, settlesCut, type Pending } from "../daemon/handoff.js";
+import { createHandoffs, FAILED_STALE_MS, handoffAdmission, SELF_GRACE_MS, SELF_SETTLE_MS, type Pending } from "../daemon/handoff.js";
 
 // 2026-11-13 人拍板: 收尾窗口不要了 —— 默认不等, 调用即 Esc; settle 只取证明静置的最小量。
 // (聊天命名那半边已删: 2026-11-16 聊天名整体下线, 见 tests/onboarding.test.ts)
 assert.equal(SELF_GRACE_MS, 0, "self handoff 默认无收尾窗口 (要短窗的部署配 selfWait.graceMs>0)");
 assert.equal(SELF_SETTLE_MS, 10_000, "Esc 后只等能证明静置的最小量; 量不出来走排队兜底");
-// ── handoff: 切断那一轮的终句算不算交代 ───────────────────────────────
-assert.equal(settlesCut("chat", undefined), true, "回群里的: 收尾照常落定");
-assert.equal(settlesCut("wizard", undefined), false, "回 wizard 的未标记收尾: 可能是抢答, 扣下");
-assert.equal(settlesCut("wizard", "result"), true);
-assert.equal(settlesCut("wizard", "need"), true);
-assert.equal(settlesCut(undefined, "result"), false, "不服务任何行: 维持旧行为");
-
-const text = resumeText("e4515c1", { asker: "user:T1 (在 bias)", ask: "set workspace to /x", closing: "已排入切换\n下一轮生效" });
-assert.match(text, /^继续 e4515c1/);
-assert.match(text, /问的是: user:T1 \(在 bias\)/);
-assert.match(text, /原话:\n> set workspace to \/x/);
-assert.match(text, /> 已排入切换\n> 下一轮生效/);
-assert.match(text, /chat_reply/);
-assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同一项任务。核对已有结果后续办，不要重复已完成或交付未知的操作。");
-
 // keep: 被摘掉的终句不进失败补投 (uncut), 其余照旧
 {
   const store = new Map<string, Pending>();
@@ -158,4 +143,4 @@ assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同
   }
 }
 
-console.log("handoff/chat-name: retired names never reused, cut finals that settle are kept, resume carries the ask; self handoff accepts-then-queues (takeover while waiting, queued behind executing), other keeps admission");
+console.log("handoff: keep drops a settled final from the cut set; self handoff accepts-then-queues (takeover while waiting, queued behind executing), other keeps admission");

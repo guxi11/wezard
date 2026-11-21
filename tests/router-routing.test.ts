@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { contextFiles, contextMaterials } from "../daemon/peers.js";
+import { contextMaterials } from "../daemon/peers.js";
 import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, routeReceiptDutiesOf, tierFor, type RouteRow } from "../daemon/route.js";
 import type { InFlight } from "../daemon/dispatch.js";
 
@@ -46,8 +46,7 @@ try {
   writeFileSync(fixture, JSON.stringify({ type: "assistant", message: { role: "assistant", content: [
     { type: "tool_use", id: "read-route", name: "Bash", input: { command: "cat daemon/route.ts" } },
   ] } }) + "\n");
-  const files = contextFiles(fixture);
-  assert.deepEqual(files, ["daemon/route.ts"]);
+  const files = ["daemon/route.ts"];
   assert.equal(decision(followup, [row({ files, materials: contextMaterials(fixture) })]).kind, "spawn", "无结果的调用不作强证据");
   assert.equal(decision(followup, [row({ cwd: "/repo/b", files })]).kind, "spawn");
   writeFileSync(fixture, [
