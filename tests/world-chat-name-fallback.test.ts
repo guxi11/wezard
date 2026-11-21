@@ -24,6 +24,11 @@ assert.equal(spanKey({ sessionId: "", start: 1234 }), "start:1234", "空 sid 段
 assert.equal(spanKey({ sessionId: "s1", start: 1 }), "s1");
 
 assert.ok(!("edges" in buildWorld([], EMPTY_FACTS, { base: "chat:x", self: "chat:x" }, Date.now())), "world 不再带 edges");
+// 休眠的 wizard 也带 uid (daemon cold 分支): uid 才认得出账本里的它, 不再另画一个 uid: 幽灵节点。
+const cold = { ...w("chat:g1#hh", "HenryHill", ""), uid: "wf5", alive: false, busy: false } as WorldFacts["wizards"][number];
+const wc = buildWorld([], { ...EMPTY_FACTS, absent: false, wizards: [cold], rooms: [{ id: "dm:x", kind: "dm", title: "", bound: false, host: { kind: "wizard", id: "wf5" }, members: [{ who: { kind: "wizard", id: "wf5" } }], openDuties: 0 }] as unknown as WorldFacts["rooms"] }, { base: "chat:g1", self: "chat:g1" }, Date.now());
+assert.equal(wc.uidTargets["wf5"], "chat:g1#hh", "uid → target 表里有休眠的它");
+assert.ok(!wc.nodes.some((n) => n.target === "uid:wf5"), "不画 uid 幽灵节点");
 // 未读: 游标之后别人说的行数, 不含自己。
 const me = { kind: "wizard", id: "w1" } as const, other = { kind: "human", id: "u" } as const;
 const st = { members: new Map([["wizard:w1", { seen: 2 }]]), msgs: [1, 2, 3, 4, 5].map((seq) => ({ seq, author: seq === 4 ? me : other })) } as unknown as RoomState;

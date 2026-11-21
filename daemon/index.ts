@@ -2184,6 +2184,9 @@ const main = async (): Promise<void> => {
         .map((w) => ({
           target: w.target,
           identity: identityOfRec(w),
+          // 账本里一切 wizard 引用都是 uid: 休眠 / 收掉的也得带上, 否则图把它的 uid 认成另一个「未知」幽灵节点,
+          // 真身 (没有 uid) 与幽灵并排画两个, 状态各说各话。
+          ...(w.uid ? { uid: w.uid } : {}),
           name: settleName(wizards, chatNameOf(cfg, w.target), w.target),
           description: w.description,
           chat: chatNameOf(cfg, w.target),
