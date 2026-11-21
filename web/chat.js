@@ -215,8 +215,8 @@
   // ── 力导向图 ───────────────────────────────────────────────────────
   //  room = 胶囊, 人 = 方块, wizard = 圆点 (填色 / 外圈示意 working · idle · warm · cold)。
   //  边三种: 成员 (细灰) / host → room (橙色加粗) / 两个 wizard 的 dm 收成的直连线 (点线 = 打开那个 room)。
-  //  布局由常驻的力模拟逐帧算出 (斥力 + 弹簧 + 向心 + 碰撞 + 椭圆软墙, 无依赖): 初次出图先暖机,
-  //  之后继续松弛; 拖节点会升温, 邻居跟着走, 松手后放开它继续排布。
+  //  布局 = stress majorization (无依赖, 见 gStep): 初次出图从径向树起点一次排到收敛,
+  //  之后在帧循环里继续松弛; 拖节点会升温, 邻居跟着走, 松手后放开它继续排布。
   //  数据刷新只做增量: 节点对象 (坐标 / 速度) 常驻在 S.gnodes, 新来的落在邻居旁, 没了的删掉,
   //  其余只改样式 / 文字 —— 不整图重建、不重排; 只有节点或边真的增减才给模拟补一点热量。
   // 有人 (human) 的 room 始终画 room 节点; 只有恰好两个 wizard 才收成直连线。
@@ -341,108 +341,181 @@
     S.glsig = lsig;
     return { g: { nodes: model.nodes.map(function (n) { return next[n.id]; }), links: links, hw: hw, hh: hh }, changed: changed };
   };
-  // 一步力模拟。被钉住 (拖动中) 的节点 fx/fy 不动, 其余按力位移。
-  var gStep = function (g, alpha, xs) {
-    var ns = g.nodes, n = ns.length;
-    if (!n) return;
-    var k = Math.max(46, Math.min(110, 2 * Math.sqrt((g.hw * g.hh) / n)));
-    var free = function (p) { return p.fx == null; };
-    // 宽度不同的胶囊按长边当半径, 免得左右压在一起
-    var rOf = function (p) { return p.isRoom ? p.w / 2 : p.r; };
-    var cx = 0, cy = 0;
-    ns.forEach(function (p) { cx += p.x; cy += p.y; });
-    cx /= n; cy /= n;
-    for (var a = 0; a < n; a++) {
-      var p = ns[a];
-      for (var b = a + 1; b < n; b++) {
-        var q = ns[b];
-        var dx = p.x - q.x, dy = p.y - q.y, d2 = dx * dx + dy * dy;
-        if (d2 < 0.02) { dx = 0.5 - Math.random(); dy = 0.5 - Math.random(); d2 = 0.02; }
-        var d = Math.sqrt(d2), ux = dx / d, uy = dy / d;
-        var f = (k * k / d) * alpha * 0.22;
-        if (free(p)) { p.x += ux * f; p.y += uy * f; }
-        if (free(q)) { q.x -= ux * f; q.y -= uy * f; }
-        var min = rOf(p) + rOf(q) + 8;
-        if (d < min) {
-          var o = (min - d) * 0.5 * 0.45;
-          if (free(p)) { p.x += ux * o; p.y += uy * o; }
-          if (free(q)) { q.x -= ux * o; q.y -= uy * o; }
-        }
-      }
-    }
+  // 布局 = stress majorization (局部 SMACOF, 即 Graphviz neato 的做法): 任意两点的目标距离 = 图上的带权最短路,
+  // 每一步把每个点挪到「让它与所有点的距离最接近目标」的位置 (权 1/d², 近处的关系说了算)。比之前的
+  // 斥力 + 弹簧 + 交叉力 + 椭圆墙 + 随机多起点 (几项互相打架, 真实拓扑上 10~30 条交叉、叶子叠成一团、每次增量整图挪动)
+  // 少了所有调不平的魔数: 一份确定的起点 (径向树) 跑到收敛就是结果, 增量从当前位置接着收敛, 只动该动的。
+  // 节点不重叠由一个包围盒碰撞项单独负责 (含名字标签, 按缩放后的字号算)。
+  var GK = 54;   // 一条普通边的目标长度 (世界单位)
+  var gDeg = function (g) {
+    if (g._deg) return g._deg;
+    var d = {};
+    g.links.forEach(function (l) { d[l.s.id] = (d[l.s.id] || 0) + 1; d[l.t.id] = (d[l.t.id] || 0) + 1; });
+    return (g._deg = d);
+  };
+  // 边的目标长度: 枢纽的边要长到一圈放得下它所有的邻居 (每个邻居约占 34 单位弧长), 否则叶子只能叠在一起;
+  // room 胶囊比圆点宽, 边从胶囊中心出发, 补上胶囊的半宽; host 边略短, 让 host 贴着自己的 room。
+  var gLen = function (g, l) {
+    var dg = gDeg(g), m = Math.max(dg[l.s.id] || 1, dg[l.t.id] || 1);
+    var ex = (l.s.isRoom ? l.s.w / 2 - 10 : 0) + (l.t.isRoom ? l.t.w / 2 - 10 : 0);
+    return Math.max(GK, m * 34 / (2 * Math.PI)) * (l.host ? 0.85 : 1) + ex;
+  };
+  // 目标距离矩阵 (Floyd, n ≤ 一两百时几毫秒): 拓扑或 room 宽度没变就沿用上一份。不连通的块按「比最远还远一点」摆在旁边。
+  var gPrep = function (g) {
+    if (g._D) return g._D;
+    var ns = g.nodes, n = ns.length, ix = {}, i, j, k;
+    var key = ns.map(function (p) { return p.id + ':' + (p.w || 0); }).join('|') + '#' + S.glsig;
+    if (S.gD && S.gD.key === key) return (g._D = S.gD.D);
+    var D = new Float64Array(n * n).fill(Infinity);
+    ns.forEach(function (p, i) { ix[p.id] = i; D[i * n + i] = 0; });
     g.links.forEach(function (l) {
-      var lp = l.s, lq = l.t;
-      var sx = lq.x - lp.x, sy = lq.y - lp.y, sd = Math.sqrt(sx * sx + sy * sy) || 0.01;
-      // host 边比普通成员边短 (host 贴着自己的 room); 直连线略长。
-      var want = k * (l.host ? 0.55 : l.direct ? 0.9 : 0.75);
-      var sf = ((sd - want) / sd) * 0.2 * alpha;
-      if (free(lp)) { lp.x += sx * sf; lp.y += sy * sf; }
-      if (free(lq)) { lq.x -= sx * sf; lq.y -= sy * sf; }
+      var a = ix[l.s.id], b = ix[l.t.id], L = gLen(g, l);
+      if (a !== b && L < D[a * n + b]) { D[a * n + b] = L; D[b * n + a] = L; }
     });
-    // 边交叉: 两条不共端点的边相交时, 把它们的中点沿连线方向推开 (四个端点各带一份) —— 力导向本身不管交叉。
-    var ccw = function (a, b, c) { return (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x); };
-    var cross = function (l1, l2) {
-      var A = l1.s, B = l1.t, C = l2.s, D = l2.t;
-      return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
-    };
-    var LS = g.links;
-    for (var i1 = 0; i1 < LS.length; i1++) {
-      for (var i2 = i1 + 1; i2 < LS.length; i2++) {
-        var l1 = LS[i1], l2 = LS[i2];
-        if (l1.s === l2.s || l1.s === l2.t || l1.t === l2.s || l1.t === l2.t) continue;
-        if (!cross(l1, l2)) continue;
-        var mx = (l1.s.x + l1.t.x - l2.s.x - l2.t.x) / 2, my = (l1.s.y + l1.t.y - l2.s.y - l2.t.y) / 2;
-        var md = Math.sqrt(mx * mx + my * my) || 1, cf = k * 0.3 * alpha * (xs || 1);
-        [[l1.s, 1], [l1.t, 1], [l2.s, -1], [l2.t, -1]].forEach(function (e) {
-          if (free(e[0])) { e[0].x += (mx / md) * cf * e[1]; e[0].y += (my / md) * cf * e[1]; }
+    for (k = 0; k < n; k++) for (i = 0; i < n; i++) {
+      var dik = D[i * n + k];
+      if (dik === Infinity) continue;
+      for (j = 0; j < n; j++) { var v = dik + D[k * n + j]; if (v < D[i * n + j]) D[i * n + j] = v; }
+    }
+    var mx = 0;
+    for (i = 0; i < n * n; i++) if (D[i] !== Infinity && D[i] > mx) mx = D[i];
+    for (i = 0; i < n * n; i++) if (D[i] === Infinity) D[i] = mx * 0.6 + GK * 2;
+    S.gD = { key: key, D: D };
+    return (g._D = D);
+  };
+  // 包围盒 [半宽, 半高, 中心下移]: 人 = 圆点 + 下方名字 (字号随 viewBox 缩放放大, 见 drawPos 的 --lbs), room = 胶囊。
+  // 圆点上方左右两角各可能挂一枚徽标 (lead ★ / 视角眼, 约伸出 n.r 外 6~10), 留够 9。
+  var gBox = function (p, lbs) {
+    if (p.isRoom) return [p.w / 2 + 3, 13, 0];
+    var lh = ((panelBox().w || 332) <= 420 ? 11.5 : 10.5) * (lbs || 1);
+    var hw = Math.max(p.r + 9, Math.min(11, String((p.ref && p.ref.name) || '').length) * 0.3 * lh + 3);
+    var top = p.r + 9, bot = p.r + 3 + lh;
+    return [hw, (top + bot) / 2, (bot - top) / 2];
+  };
+  var gLbsNow = function () { return (S.gdom && +S.gdom.lbs) || S.glbs || 1; };
+  // 碰撞: 两个包围盒相交就沿穿透最浅的轴各退一半 (被钉住的不动, 另一个退全程)。
+  var gCollide = function (g, s) {
+    var ns = g.nodes, n = ns.length, lbs = gLbsNow();
+    var bs = ns.map(function (p) { return gBox(p, lbs); });
+    for (var a = 0; a < n; a++) for (var b = a + 1; b < n; b++) {
+      var p = ns[a], q = ns[b], A = bs[a], B = bs[b];
+      var dx = q.x - p.x, dy = (q.y + B[2]) - (p.y + A[2]);
+      var ox = A[0] + B[0] - Math.abs(dx), oy = A[1] + B[1] - Math.abs(dy);
+      if (ox <= 0 || oy <= 0) continue;
+      var fp = p.fx == null, fq = q.fx == null;
+      if (!fp && !fq) continue;
+      var wp = fp && fq ? 0.5 : fp ? 1 : 0;
+      if (ox < oy) { var mx = ox * s * (dx < 0 ? -1 : 1); p.x -= mx * wp; q.x += mx * (1 - wp); }
+      else { var my = oy * s * (dy < 0 ? -1 : 1); p.y -= my * wp; q.y += my * (1 - wp); }
+    }
+  };
+  // 一步: 每个点一次局部 SMACOF 更新 (Gauss–Seidel, 就地), alpha 决定这一步走多远; 被钉住 (拖动中) 的 fx/fy 不动。
+  // g.anchor (拖动时): 每个点额外拴在拖动开始时的位置上, 权重 = 它全部 stress 权重 —— 离被拖点越远越不动;
+  // 不拴的话 stress 只认相对距离, 拖一个点整张图会跟着平移。cs = 碰撞力度 (缺省随 alpha)。返回这一步最大的位移, 供收敛判断。
+  var gStep = function (g, alpha, cs) {
+    var ns = g.nodes, n = ns.length, mv = 0;
+    if (n < 2) return 0;
+    var D = gPrep(g), t = Math.min(1, alpha * 2.5), an = g.anchor;
+    for (var i = 0; i < n; i++) {
+      var p = ns[i];
+      if (p.fx != null) { p.x = p.fx; p.y = p.fy; continue; }
+      var sx = 0, sy = 0, sw = 0;
+      for (var j = 0; j < n; j++) {
+        if (j === i) continue;
+        var q = ns[j], d = D[i * n + j], w = 1 / (d * d);
+        var dx = p.x - q.x, dy = p.y - q.y, e = Math.sqrt(dx * dx + dy * dy);
+        if (e < 0.01) { dx = 0.5 - Math.random(); dy = 0.5 - Math.random(); e = Math.sqrt(dx * dx + dy * dy); }
+        sx += w * (q.x + d * dx / e); sy += w * (q.y + d * dy / e); sw += w;
+      }
+      if (an && an[p.id]) { sx += sw * an[p.id][0]; sy += sw * an[p.id][1]; sw *= 2; }
+      var mx = (sx / sw - p.x) * t, my = (sy / sw - p.y) * t;
+      p.x += mx; p.y += my;
+      mv = Math.max(mv, Math.abs(mx), Math.abs(my));
+    }
+    gCollide(g, cs == null ? Math.min(0.5, alpha * 2) : cs);
+    return mv;
+  };
+  // 径向树起点: 每个连通块从度数最大的点 BFS, 子树按叶子数分扇区、按目标边长外推 —— 树上零交叉, stress 只需微调。
+  var gRadialInit = function (g) {
+    var ns = g.nodes, dg = gDeg(g), adj = {}, done = {}, offX = 0;
+    g.links.forEach(function (l) { (adj[l.s.id] = adj[l.s.id] || []).push(l); (adj[l.t.id] = adj[l.t.id] || []).push(l); });
+    var other = function (l, u) { return l.s === u ? l.t : l.s; };
+    ns.slice().sort(function (a, b) { return (dg[b.id] || 0) - (dg[a.id] || 0) || (a.id < b.id ? -1 : 1); }).forEach(function (root) {
+      if (done[root.id]) return;
+      var kids = {}, q = [root], comp = [], leaves = {}, R = 0;
+      done[root.id] = true;
+      while (q.length) {
+        var u = q.shift();
+        comp.push(u); kids[u.id] = [];
+        (adj[u.id] || []).slice().sort(function (a, b) { return (dg[other(a, u).id] || 0) - (dg[other(b, u).id] || 0); }).forEach(function (l) {
+          var v = other(l, u);
+          if (done[v.id]) return;
+          done[v.id] = true; kids[u.id].push({ v: v, len: gLen(g, l) }); q.push(v);
         });
       }
-    }
-    ns.forEach(function (p) {
-      if (!free(p)) { p.x = p.fx; p.y = p.fy; return; }
-      p.x += (cx - p.x) * 0.010 * alpha;
-      p.y += (cy - p.y) * 0.010 * alpha;
-      // 椭圆软墙: 模拟空间跟着左栏的长宽比走, 出来的团才填得满那一竖条
-      var ex = p.x / g.hw, ey = p.y / g.hh, ee = ex * ex + ey * ey;
-      // 墙的力度跟着 alpha 走: 以前与热量无关, 热量衰减后斥力 / 弹簧都小了, 墙还在每帧往里挤, 把排开的边重新压成一团 (交叉数回升)。
-      if (ee > 1) { var s = (1 - 1 / Math.sqrt(ee)) * 0.35 * Math.min(1, alpha * 4); p.x -= p.x * s; p.y -= p.y * s; }
+      var count = function (u) { var k = kids[u.id]; return (leaves[u.id] = k.length ? k.reduce(function (s, c) { return s + count(c.v); }, 0) : 1); };
+      var place = function (u, a0, a1, rad) {
+        var at = a0;
+        kids[u.id].forEach(function (c) {
+          var w = (a1 - a0) * leaves[c.v.id] / leaves[u.id], mid = at + w / 2, r = rad + c.len;
+          c.v.x = Math.cos(mid) * r; c.v.y = Math.sin(mid) * r; R = Math.max(R, r);
+          place(c.v, at, at + w, r); at += w;
+        });
+      };
+      count(root);
+      root.x = 0; root.y = 0;
+      place(root, -Math.PI, Math.PI, 0);
+      comp.forEach(function (p) { p.x += offX + R; });
+      offX += 2 * R + GK * 2;
     });
+    var cx = 0;
+    ns.forEach(function (p) { cx += p.x; });
+    cx /= ns.length || 1;
+    ns.forEach(function (p) { p.x -= cx; });
   };
-  var gTotalCross = function (links) {
-    var ccw = function (p, q, r) { return (r.y - p.y) * (q.x - p.x) > (q.y - p.y) * (r.x - p.x); };
-    var n = 0;
-    for (var i = 0; i < links.length; i++) for (var j = i + 1; j < links.length; j++) {
-      var a = links[i], b = links[j];
-      if (a.s === b.s || a.s === b.t || a.t === b.s || a.t === b.t) continue;
-      if (ccw(a.s, b.s, b.t) !== ccw(a.t, b.s, b.t) && ccw(a.s, a.t, b.s) !== ccw(a.s, a.t, b.t)) n++;
-    }
-    return n;
+  // 主轴转到面板的长边方向: 只转不缩, 距离一概不变 (左栏竖条 / 宽屏都填得满)。
+  var gAlign = function (g) {
+    var ns = g.nodes, n = ns.length;
+    if (n < 3) return;
+    var cx = 0, cy = 0, sxx = 0, syy = 0, sxy = 0;
+    ns.forEach(function (p) { cx += p.x; cy += p.y; });
+    cx /= n; cy /= n;
+    ns.forEach(function (p) { var x = p.x - cx, y = p.y - cy; sxx += x * x; syy += y * y; sxy += x * y; });
+    var rot = (g.hh >= g.hw ? Math.PI / 2 : 0) - 0.5 * Math.atan2(2 * sxy, sxx - syy), c = Math.cos(rot), s = Math.sin(rot);
+    ns.forEach(function (p) { var x = p.x - cx, y = p.y - cy; p.x = x * c - y * s; p.y = x * s + y * c; });
   };
-  // 多起点: 力导向只管疏密、不管交叉, 稠密的二部图光靠调力平不下来, 而结果对起点很敏感
-  // (同一张图 20~60 条交叉)。所以暖机后在现有布局上重复「大幅抖动 → 带热量松弛」几次, 取交叉最少的那一份。
-  // 只在首次出图时跑 (节点多时少试几次控制首屏耗时); 之后的增量更新不再打乱已有位置。
-  var gBestLayout = function (g) {
-    var n = g.nodes.length;
-    if (n < 4 || g.links.length < 3) return;
-    var tries = n > 50 ? 3 : n > 30 ? 6 : 12, jit = 70, snap = g.nodes.map(function (p) { return [p.x, p.y]; }), best = null;
-    for (var t = 0; t < tries; t++) {
-      g.nodes.forEach(function (p, i) { p.x = snap[i][0] + (Math.random() - 0.5) * jit; p.y = snap[i][1] + (Math.random() - 0.5) * jit; });
-      // 跑到底再数: 常驻循环的热量衰减到头之后才是用户看到的终态, 中途的交叉数不算数 (松弛过程里它会来回涨落)。
-      for (var i2 = 0; i2 < 150; i2++) gStep(g, 0.6 * Math.pow(0.975, i2));
-      // 再用恒定的强交叉力专门拆一段 (只有交叉项重, 其余力照旧), 然后才数。
-      for (var i3 = 0; i3 < 80; i3++) gStep(g, 0.15, 3);
-      var c = gTotalCross(g.links);
-      if (!best || c < best.c) best = { c: c, pos: g.nodes.map(function (p) { return [p.x, p.y]; }) };
-    }
-    g.nodes.forEach(function (p, i) { p.x = best.pos[i][0]; p.y = best.pos[i][1]; });
+  // 估计出图后的标签放大倍数 (同 drawPos 的 --lbs: viewBox 宽 / svg 宽, 1~1.5), 碰撞按它留位置。
+  var gLbs = function (g) {
+    var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    g.nodes.forEach(function (p) {
+      var b = gBox(p, 1);
+      x0 = Math.min(x0, p.x - b[0]); x1 = Math.max(x1, p.x + b[0]);
+      y0 = Math.min(y0, p.y + b[2] - b[1]); y1 = Math.max(y1, p.y + b[2] + b[1]);
+    });
+    var pw = Math.max(240, (panelBox().w || 332) - 12), ph = Math.max(260, (panelBox().h || 620) - 38 - legendH());
+    return Math.max(1, Math.min(1.5, Math.max((x1 - x0 + 52) / pw, (y1 - y0 + 52) / ph)));
+  };
+  // 首次出图: 径向树起点 → stress 跑到收敛 → 主轴对齐面板 → 按估计的标签尺寸再收一段 (碰撞跟上)。确定性, 同一张图每次一样。
+  var gLayout = function (g) {
+    if (g.nodes.length < 2) { g.nodes.forEach(function (p) { p.x = 0; p.y = 0; }); return; }
+    gRadialInit(g);
+    for (var i = 0; i < 300; i++) if (gStep(g, 0.4) < 0.05 && i > 20) break;
+    gAlign(g);
+    S.glbs = gLbs(g);
+    // 收尾: stress 步子逐渐收小, 碰撞保持全力 —— 最后由碰撞说了算, 名字标签不压在一起。
+    for (var j = 0; j < 80; j++) gStep(g, 0.4 * Math.pow(0.95, j), 0.5);
   };
   // 常驻循环: alpha 逐帧衰减, 衰减到几乎为 0 就停帧; 拖动时 gtarget 把热量吊在 0.3 上。
+  // 没缩放 / 没平移过 (视野还是「整张图」) 时视野跟着内容走: 增量长出来的节点不会落在框外; 拖动中不跟, 免得画面在指针下滑走。
+  var gUntouched = function () { return (S.gzoom || 1) === 1 && !S.gpx && !S.gpy; };
   var gLoop = function () {
     S.graf = 0;
     var g = S.g;
     if (!g || !S.gdom) return;
     gStep(g, Math.max(S.galpha || 0, S.gtarget || 0));
     S.galpha = (S.galpha || 0) * 0.97;
+    var svg = !S.gdrag && gUntouched() && convsEl.querySelector('.rv-graph');
+    if (svg) setViewBox(svg, g);
     drawPos(g);
     if (S.galpha > 0.012 || S.gtarget) S.graf = requestAnimationFrame(gLoop);
   };
@@ -579,7 +652,11 @@
       if (!start) return;
       var dx = e.clientX - start.x, dy = e.clientY - start.y;
       if (!S.gmoved && dx * dx + dy * dy < 16) return;
-      if (!S.gmoved) { try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器 */ } }
+      if (!S.gmoved) {
+        try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器 */ }
+        // 拖节点: 其余点拴在此刻的位置上 (见 gStep 的 anchor), 只有近邻被带着走。
+        if (start.id && S.g) { var an = {}; S.g.nodes.forEach(function (p) { an[p.id] = [p.x, p.y]; }); S.g.anchor = an; }
+      }
       S.gmoved = true;
       // 拖动期间只改这一处, 不重建 DOM —— 重建会把指针捕获和这次拖拽一起丢掉。
       if (start.id) {
@@ -606,6 +683,7 @@
       try { svg.releasePointerCapture(e.pointerId); } catch (err) { /* 已释放 */ }
       // 放开钉子, 热量不再吊着: 它和邻居在力的作用下自然落定。
       if (held) { held.fx = null; held.fy = null; }
+      if (S.g) S.g.anchor = null;
       S.gtarget = 0;
       gKick(0.15);
     };
@@ -620,7 +698,8 @@
       svg.setAttribute('viewBox', [(b.x + (b.width * (1 - f)) / 2), (b.y + (b.height * (1 - f)) / 2), b.width * f, b.height * f]
         .map(function (v) { return v.toFixed(1); }).join(' '));
     };
-    svg.ondblclick = function () { S.gzoom = 1; S.gpx = 0; S.gpy = 0; S.gfit = true; renderGraph(); gKick(0.5); };
+    // 双击 = 复位视野并整图重排 (拖乱了 / 增量攒多了时回到确定的那一份)。
+    svg.ondblclick = function () { S.gzoom = 1; S.gpx = 0; S.gpy = 0; S.gfit = true; S.grelayout = true; renderGraph(); };
     svg.onclick = function () { setTimeout(function () { S.gmoved = false; }, 0); };
   };
   var viewBoxOf = function (g) {
@@ -671,15 +750,16 @@
       });
     });
   };
+  // 帧循环里每帧都会调: 值没变就不写属性。
   var setViewBox = function (svg, g) {
-    var vb = viewBoxOf(g);
-    svg.setAttribute('width', vb.width);
-    svg.setAttribute('height', vb.height);
-    svg.setAttribute('viewBox', vb.box.map(function (v) { return v.toFixed(1); }).join(' '));
+    var vb = viewBoxOf(g), box = vb.box.map(function (v) { return v.toFixed(1); }).join(' ');
+    if (svg.getAttribute('width') !== String(vb.width)) svg.setAttribute('width', vb.width);
+    if (svg.getAttribute('height') !== String(vb.height)) svg.setAttribute('height', vb.height);
+    if (svg.getAttribute('viewBox') !== box) svg.setAttribute('viewBox', box);
   };
   // 面板尺寸变了 (窗口缩放 / 旋转屏 / 左栏宽度变): svg 跟着撑满, 视野保持「每像素多少世界单位」不变、
-  // 中心不动 —— 节点大小和位置原样, 只是看得见的范围随面板变大变小; 力模拟的墙 (hw/hh) 已按新尺寸重算,
-  // 补一点热量让整团向新的中心松弛, 不重排、不重建。
+  // 中心不动 —— 节点大小和位置原样, 只是看得见的范围随面板变大变小 (视野没动过的, gLoop 会接着把它收成整张图);
+  // 补一点热量让碰撞按新的标签缩放重新留位, 不重排、不重建。
   var fitToPanel = function (svg, g) {
     var vb = viewBoxOf(g), cur = svg.viewBox.baseVal;
     var ow = parseFloat(svg.getAttribute('width')) || 0, oh = parseFloat(svg.getAttribute('height')) || 0;
@@ -733,17 +813,15 @@
       if (h) { h.outerHTML = head; bindHead(); }
     }
     syncGraphDom(svg, g);
-    if (first) {
-      // 暖机: 先排 80 步再出第一帧, 免得一开始全挤在原点; 之后继续在帧循环里松弛。
-      var a = 1;
-      for (var i = 0; i < 80; i++) { gStep(g, a); a *= 0.985; }
-      gBestLayout(g);
-    }
+    // 整图排一次只在还没排过时 (首次出图 / 双击重排); 从列表切回图沿用常驻坐标, 拖过的位置不丢。
+    var lay = first && !S.glaid || S.grelayout;
+    if (lay) { gLayout(g); S.glaid = true; S.grelayout = false; }
     drawPos(g);
     if (first || S.gfit) { setViewBox(svg, g); S.gfit = false; }
     else fitToPanel(svg, g);
-    if (first) gKick(0.02);
+    if (lay) gKick(0.02);
     else if (rec.changed) gKick(0.35);
+    else if (first) gKick(0.05);
   };
 
   // ── 左栏: 列表 / 图 ─────────────────────────────────────────────────
