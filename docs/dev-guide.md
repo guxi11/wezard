@@ -85,7 +85,7 @@
 - 前端 [web/chat.js](../web/chat.js): `KIND_TAG` (kind → 中文标签, 缺了就没标签) 与 `DUTY_KIND`。路由在 [shared/chat-http.ts](../shared/chat-http.ts) (`/api/room`、`/api/world` …), daemon 与独立 svr 共用; svr 是另一个进程, 通过 POST 收 `WorldFacts` ([shared/world.ts](../shared/world.ts)), 新 room 级字段要进 `WorldFacts` 才到得了 svr。
 - 其它按 `kind` / `sys` 扫账本的消费者: [daemon/room-overdue.ts](../daemon/room-overdue.ts)、[daemon/room-watchdog.ts](../daemon/room-watchdog.ts)、[daemon/notices.ts](../daemon/notices.ts) — 新行是否应被它们计入 (逾期 / 活动), 自己 grep 一遍。
 
-**e. 文档**: 行 schema 的真相是代码; [docs/room/contract.md](room/contract.md) §2 是它的人读版, **改了行 schema 就同步** (它目前没列 `interrupt` / `sys`, 见交代里的不一致)。镜像 / 唤醒 / 逾期规则变了同步 §3a / §3b / §4a。
+**e. 文档**: 行 schema 的真相是代码; [docs/room/contract.md](room/contract.md) §2 是它的人读版, **改了行 schema 就同步**。镜像 / 唤醒 / 逾期规则变了同步 §3a / §3b / §4a。
 
 **怎么测**
 

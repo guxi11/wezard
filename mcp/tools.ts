@@ -395,7 +395,7 @@ export const createWezardServer = (): McpServer => {
   }, async (a) => unwrap("plan_update", await daemonPost("/plans/update", a as Record<string, unknown>)));
 
   // ── chat_* / room_*: room 是唯一的沟通对象 ────────────────────────────────
-  // 这九个工具就是全部出站与全部可见性管理 —— 没有「回执」通道, 也没有终句兜底:
+  // 这组 chat_* / room_* 工具就是全部出站与全部可见性管理 —— 没有「回执」通道, 也没有终句兜底:
   // 要谁收到什么, 就写成一行; 要关一笔账, 就给 chat_reply 的 status。
   server.registerTool(
     "chat_say",

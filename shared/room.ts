@@ -1,4 +1,4 @@
-// room 模型的纯核心 (契约: /tmp/wezard-room-contract.md, 已拍板)。
+// room 模型的纯核心 (契约: docs/room/contract.md, 已拍板)。
 //
 // 一条总原则: **完成信号、出处、发言权都是账本行上的显式字段**, 不从 transcript / 终句 /
 // 信封里推断。room 是唯一的沟通对象 —— 企微群 / 单聊 / topic 帖是绑定了传输的 room,

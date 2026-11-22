@@ -2,9 +2,9 @@
 //
 // 在这之前, 一个会话只是 `chat:wrkS…#tag` 这么一个路由 key —— 它不知道自己叫
 // 什么、为什么存在、谁生的它、群里还有谁。于是每次协作都要人在提示词里重讲一遍。
-// wizard 把这些沉到一条记录里, 并在 spawn 时以 `--append-system-prompt` 的形式
-// 写进那个进程的上下文: 身份不是聊天历史里的一句话 (会被 /clear 抹掉、会被挤出
-// 窗口), 而是随进程终身存在的前缀。
+// wizard 把这些沉到一条记录里, 并以宪章 preamble 的形式随首条注入进那个会话的上下文
+// (spawn 时停在 `charters/<sid>.md`, 由 `charterPending` 前置); /clear、压缩、重生时重挂:
+// 身份不是聊天历史里的一句话 (会被 /clear 抹掉、会被挤出窗口), 而是每次被抹掉后补回的前缀。
 //
 //   wizard   = target(一个聊天里的一个会话) + 名字 + 职责 + 记忆 + 家谱
 //   clone    = parent 非空的 wizard; fork 了父亲的会话, 开局就带着父亲读过的东西
@@ -1035,7 +1035,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
   ];
 };
 
-/** 开局宪章 —— spawn 时作为 `--append-system-prompt` 压进进程。
+/** 开局宪章 —— spawn 时停在 `charters/<sid>.md`, 由 `charterPending` 作为 preamble 前置到首条注入。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / room 是唯一的沟通对象。 */
 export const renderCharter = (a: CharterArgs): string => {

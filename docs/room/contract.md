@@ -49,11 +49,13 @@ type Who = { kind: "human"; id: string /*userid*/ }
   status?: "done"|"need"|"progress"|"passed"|"canceled"|"error";  // 仅 reply; error 只有 daemon 能写
   closes?: string[];                    // 本行实际关掉的 duty (msgId@holder), append 时算定 —— 完成的唯一事实
   wake: string[];                       // 本行实际唤醒的 wizard uid (预算降级的不在内)
+  interrupt?: boolean;                  // 带 interrupt 投递 (先 Esc 打断再投; 限权见 §3b)
   for?: string; after?: string[]; planId?: string;
   files?: { path: string; kind: "image"|"file"|"voice"|"video"; name: string }[];
   origin: "inbound"|"tool"|"daemon"|"migrate";
   ext?: string;                         // 企微 msgid (入站去重 / 占位气泡挂点)
-  bubble?: { stream: string; expires: number } }   // 只挂在人话行: 第一条 re 它的 reply 覆盖占位气泡
+  bubble?: { stream: string; expires: number };    // 只挂在人话行: 第一条 re 它的 reply 覆盖占位气泡
+  sys?: string }                        // daemon 系统行的机器语义 (undelivered / left / quota …), 用于去重, 不给模型推断
 
 // duty 移交
 { op: "move";  duty: string /*msgId*/; from: Who; to: Who; by: Who }
@@ -184,7 +186,7 @@ export const hostOf = (members: readonly { who: Who; ord: number }[]): string | 
 - 之后再闲下来仍未关 → 写一条 system 行进该 room (to = 提问者, 镜像进企微)。
 - 同一 duty 只升级一次, 账本里留行即去重。
 
-## 6. 迁移脚本 `scripts/migrate-rooms.mjs` (可重复跑)
+## 6. 迁移脚本 `cli/migrate-rooms.ts` (可重复跑)
 
 - **只读源**: routes.jsonl、state/members.json、state/chats/*.jsonl、wizards.json、state/message-events.json。原文件一个字不改。
 - **uid**: 每个实例的 uid 由 §1 的 `uidOf` 现算 (脚本不写 wizards.json; daemon boot 回填同一个值)。

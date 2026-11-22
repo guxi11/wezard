@@ -13,6 +13,7 @@ docs/*
 !docs/evolve/
 !docs/room/
 !docs/v3-design.md
+!docs/dev-guide.md
 !docs/v3-p3-steward-table.md
 !docs/probe-steward.mjs
 !docs/measure-roster.mjs
