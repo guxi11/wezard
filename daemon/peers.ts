@@ -429,28 +429,30 @@ export const renderDialog = (turns: readonly Turn[], per = 800, lastPer = per): 
  *  peek 从前靠刮终端回答「它卡在哪」; transcript 答得更准: 一个不在转圈、却悬着
  *  工具调用的会话, 就是停在审批卡 / 本地弹窗上等人点。一句新的人话会让没收到结果
  *  的调用作废 (被打断的那些), 所以遇到带正文的 user 行就清空。 */
-export const openToolUses = (jsonlPath: string): string[] =>
-  readTailUntil(jsonlPath, (raw) => parseOpenTools(jsonlPath, raw), (r) => r.rows > 0).names;
+export const openToolUses = (jsonlPath: string, sinceMs = 0): string[] =>
+  readTailUntil(jsonlPath, (raw) => parseOpenTools(jsonlPath, raw, sinceMs), (r) => r.rows > 0).names;
 
-const parseOpenTools = (jsonlPath: string, raw: string): { names: string[]; rows: number } => {
+const parseOpenTools = (jsonlPath: string, raw: string, sinceMs = 0): { names: string[]; rows: number } => {
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  const open = new Map<string, string>();
+  const open = new Map<string, { name: string; at: number }>();
   let rows = 0;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
-    let row;
-    try { row = normalize(JSON.parse(line)); } catch { continue; }
+    let row, at = 0;
+    try { const parsed = JSON.parse(line); at = stampMs((parsed as { timestamp?: unknown }).timestamp); row = normalize(parsed); } catch { continue; }
     const content = row?.message?.content;
     if (!row || row.isMeta || row.isSidechain || !content) continue;
     rows++;
     if (row.message?.role === "user" && stripMeta(blockText(content)).trim()) open.clear();
     if (!Array.isArray(content)) continue;
     for (const b of content) {
-      if (b.type === "tool_use" && b.id) open.set(b.id, b.name ?? "?");
+      if (b.type === "tool_use" && b.id) open.set(b.id, { name: b.name ?? "?", at });
       if (b.type === "tool_result" && b.tool_use_id) open.delete(b.tool_use_id);
     }
   }
-  return { names: [...open.values()], rows };
+  // 比 `sinceMs` 还早的悬空调用是上一个 CLI 进程留下的 (被杀 / 被打断): 现在这个进程
+  // 不可能正等着它的审批, 不能算「停在审批卡上」。时间戳认不出 (0) 的照旧算悬着。
+  return { names: [...open.values()].filter((t) => !(t.at > 0 && t.at < sinceMs)).map((t) => t.name), rows };
 };
 
 /** The peer's most recent assistant message — the handoff payload when one

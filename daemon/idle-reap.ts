@@ -28,3 +28,14 @@ export const idleSkipReason = (c: IdleCandidate, now: number, idleMs: number): s
   if (now - c.lastActiveAt < idleMs) return "recent";
   return undefined;
 };
+
+/** 最后一次活动 = 本进程见到的活动 / transcript 最后一条真记录 / pane 出生时刻, 取最晚。
+ *  出生时刻必须算进来: `--resume` 重生的 pane 要等到有人说话才写新记录, 旧 transcript
+ *  会让它刚起来就「闲了几小时」, 下一轮清扫立刻收掉 —— 唤醒因此永远贴不进去 (死循环)。
+ *  transcript 的外部 mtime 仍不信 (见 peers.lastRecordMs)。 */
+export const lastActiveOf = (a: { seenAt?: number; transcriptAt?: number; paneBornAt?: number }): number =>
+  Math.max(a.seenAt ?? 0, a.transcriptAt ?? 0, a.paneBornAt ?? 0);
+
+/** pane 里进程的年龄 (秒, ps etime) 折成出生时刻; 认不出 = 0 (不参与取最晚)。 */
+export const paneBornAt = (now: number, etimeSec: number | undefined): number =>
+  etimeSec === undefined ? 0 : now - etimeSec * 1000;

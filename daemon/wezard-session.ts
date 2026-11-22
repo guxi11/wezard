@@ -24,6 +24,8 @@ export interface LiveSession {
   /** `idle` = 输入框等人; `busy` = 正在跑一轮; 其它值原样透传。 */
   status: string;
   statusUpdatedAt: number;
+  /** 这个 CLI 进程启动的时刻 (epoch ms); 注册表没写 = 0。 */
+  startedAt: number;
   /** `%N`; 进程不在 tmux 里时为 ""。 */
   pane: string;
   name: string;
@@ -67,6 +69,7 @@ const parseRow = (raw: string): LiveSession | undefined => {
       sessionId: r.sessionId,
       status: typeof r.status === "string" ? r.status : "",
       statusUpdatedAt: typeof r.statusUpdatedAt === "number" ? r.statusUpdatedAt : 0,
+      startedAt: typeof r.startedAt === "number" ? r.startedAt : 0,
       pane: paneOf(r.tmux),
       name: typeof r.name === "string" ? r.name : "",
       endpoint: typeof r.endpoint === "string" ? r.endpoint : typeof r.url === "string" ? r.url : "",

@@ -3906,9 +3906,17 @@ const main = async (): Promise<void> => {
         .filter((t): t is string => !!t),
     );
     const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
+    // 账本里游标之后还有待投给它的唤醒行: 收了 pane, 下一轮 hub 又得重生它去贴 —— 投得进去
+    // 是白起一次 CLI, 投不进去就是循环 (BobZane)。有欠着的唤醒就不收, 先让 hub 投完。
+    const owedWake = new Set(
+      [...(roomHub?.pending().keys() ?? [])]
+        .map((uid) => wizardStore()?.byUid(uid)?.target)
+        .filter((t): t is string => !!t),
+    );
     return (target, sid) =>
       taskOwners.has(target) ? "owns scheduled task"
         : pendingSids.has(sid) ? "pending approval"
+        : owedWake.has(target) ? "wake owed"
         : undefined;
   };
   // 两种清扫串行: 并发时同一个 pane 会被两边各收一次 (第二次 kill-pane 失败、日志重复)。

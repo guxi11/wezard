@@ -1,12 +1,12 @@
 // 空闲回收 (wrc.mirror.idleReapMin): 阈值 + 豁免矩阵 (纯函数), 外加 bridge / index 接线的源码钉。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { idleSkipReason, type IdleCandidate } from "../daemon/idle-reap.js";
+import { idleSkipReason, lastActiveOf, paneBornAt, type IdleCandidate } from "../daemon/idle-reap.js";
 import { ConfigSchema } from "../shared/config.js";
 import { mkdtempSync, writeFileSync, utimesSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lastRecordMs } from "../daemon/peers.js";
+import { lastRecordMs, openToolUses } from "../daemon/peers.js";
 
 const MIN = 60_000;
 const now = 1_000_000_000_000;
@@ -86,5 +86,42 @@ assert.ok(!/notify|sendText|replyStream|sendMessage/.test(wiring), "只打日志
 }
 assert.ok(/const mtimeOf = \(target: string\): number => transcriptActiveAt\(target\) \|\| now;/.test(src), "pane 上限的「最久没动」排序同口径");
 assert.ok(idx.slice(idx.indexOf("const idleSweep"), idx.indexOf("setInterval(idleSweep")).includes('"idle reap sweep"') && !/if \(r\.reaped\.length\) log\.info/.test(wiring), "每轮清扫都留日志");
+
+// ── ⑦ 刚重生的 pane 不被回收 (BobZane 每 5 分钟被杀又拉起的死循环) ──
+{
+  const staleTranscript = now - 304 * MIN; // transcript 最后一条真记录: 5 小时前
+  const justBorn = paneBornAt(now, 29); // 29s 前 respawn
+  assert.equal(justBorn, now - 29_000, "etime 折成出生时刻");
+  assert.equal(paneBornAt(now, undefined), 0, "认不出年龄 → 0, 不参与取最晚");
+  const young = lastActiveOf({ transcriptAt: staleTranscript, paneBornAt: justBorn });
+  assert.equal(idleSkipReason(idle({ lastActiveAt: young }), now, idleMs), "recent", "旧 transcript + 刚重生 → 不收");
+  // 旧 transcript + pane 早就起来了且之后毫无动静 → 照旧回收
+  const old = lastActiveOf({ transcriptAt: staleTranscript, paneBornAt: paneBornAt(now, 200 * 60) });
+  assert.equal(idleSkipReason(idle({ lastActiveAt: old }), now, idleMs), undefined, "旧 transcript + 旧 pane + 无新活动超过 idleReapMin → 照旧收");
+  assert.equal(lastActiveOf({ seenAt: now - MIN, transcriptAt: staleTranscript, paneBornAt: 0 }), now - MIN, "三个时钟取最晚");
+  assert.equal(lastActiveOf({}), 0, "全不知道 → 0 (activity unknown, 不收)");
+}
+assert.ok(reaper.includes("lastActiveOf(") && reaper.includes("paneBornAt(now") && reaper.includes("psSnap()"), "reapIdle 把 pane 出生时刻并进活动时钟");
+assert.ok(!reaper.includes("lastRecordMs") && !reaper.includes("mtimeMs"), "仍不信外部 mtime");
+assert.ok(wiring.length > 0 && idx.slice(idx.indexOf("const reapVeto"), idx.indexOf("const serialReap")).includes('"wake owed"'), "有待投唤醒行的 pane 不收");
+
+// ── ⑧ 上一个进程留下的悬空 tool_use 不算「停在审批卡」 (唤醒贴不进去的根因) ──
+{
+  const dir = mkdtempSync(join(tmpdir(), "idle-reap-hang-"));
+  try {
+    const f = join(dir, "s.jsonl");
+    const t0 = Date.parse("2026-11-22T15:13:00.165Z");
+    writeFileSync(f, JSON.stringify({ type: "assistant", timestamp: "2026-11-22T15:13:00.165Z", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } }) + "\n");
+    assert.deepEqual(openToolUses(f), ["Bash"], "不给 sinceMs: 照旧悬着");
+    assert.deepEqual(openToolUses(f, t0 - 1), ["Bash"], "CLI 进程在它之前启动 → 它可能在等审批, 照旧悬着");
+    assert.deepEqual(openToolUses(f, t0 + 1), [], "CLI 进程在它之后才启动 (resume 出来的) → 不可能在等审批, 不算悬着");
+    const g = join(dir, "nots.jsonl");
+    writeFileSync(g, JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "Read", input: {} }] } }) + "\n");
+    assert.deepEqual(openToolUses(g, t0 + 1), ["Read"], "认不出时间戳 → 朝『有人在等』的方向失败");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+const hangingSrc = src.slice(src.indexOf("const hanging = ("), src.indexOf("const parkedNow"));
+assert.ok(hangingSrc.includes("openToolUses(jsonl, startedAt)"), "hanging 只数本 CLI 进程启动之后发出的调用");
+assert.ok(src.includes("live.startedAt)") && (src.match(/hanging\(target, live\.sessionId, live\.startedAt\)/g) ?? []).length === 2, "idleVerdict / parkedNow 都带上进程启动时刻");
 
 console.log("idle-reap: 阈值 + 豁免矩阵 + 配置 + 接线全过");

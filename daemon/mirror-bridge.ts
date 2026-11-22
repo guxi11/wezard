@@ -52,7 +52,7 @@ import { replAskqInput } from "../shared/repl-script.js";
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor, type WakeTail } from "./notices.js";
 import { dispatchPickerPolicy, pickerPolicy, pressNoticeOf } from "./picker-policy.js";
-import { idleSkipReason } from "./idle-reap.js";
+import { idleSkipReason, lastActiveOf, paneBornAt } from "./idle-reap.js";
 import { markManagedPane, renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./spawn-tmux.js";
 import { prepareSessionHooks, sessionHookArgs } from "../shared/session-hooks.js";
 import { prepareSessionSkills, sessionSkillArgs } from "../shared/session-skills.js";
@@ -6568,19 +6568,22 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!live) return undefined;
     if (live.status === "busy") return false;
     if (live.status !== "idle") return undefined;
-    return !hanging(target, live.sessionId);
+    return !hanging(target, live.sessionId, live.startedAt);
   };
   /** 闲着却悬着工具调用 = 停在审批卡 / 本地弹窗上。resume / fork 会换 sid: 悬着的
    *  调用记在注册表报的当前那份 transcript 里。 */
-  const hanging = (target: string, sid: string): boolean => {
+  const hanging = (target: string, sid: string, startedAt = 0): boolean => {
     const bound = jsonlOf(target);
     const jsonl = bound ? join(dirname(bound), `${sid}.jsonl`) : "";
-    return !!jsonl && existsSync(jsonl) && openToolUses(jsonl).length > 0;
+    // 只数这个 CLI 进程启动之后发出的调用: 重生 / resume 的 pane 读到的是上一个进程被杀时
+    // 留在 transcript 里的悬空调用, 它没有任何审批在等 —— 误判成「停在审批卡」会让
+    // requireIdle 的唤醒永远贴不进去 (BobZane 循环的第二半)。
+    return !!jsonl && existsSync(jsonl) && openToolUses(jsonl, startedAt).length > 0;
   };
   const parkedNow = (target: string): boolean => {
     const pane = paneOf(target);
     const live = pane ? activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find(Boolean) : undefined;
-    return live?.status === "idle" && hanging(target, live.sessionId);
+    return live?.status === "idle" && hanging(target, live.sessionId, live.startedAt);
   };
   const idleNow = async (target: string): Promise<boolean> => {
     // An interrupt footer vetoes stale idle records; never strip its dim text.
@@ -7979,13 +7982,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (idleMs <= 0) return { reaped, skipped };
       const snap = await paneSnapshot();
       if (!snap) return { reaped, skipped };
+      // pane 里 shell 的年龄 = 这个 pane 被本进程 (或更早) spawn / respawn 出来的时刻。resume
+      // 出来的 pane 不会写新的 transcript 记录, 只信 transcript 会让刚重生的 pane 下一轮就被收。
+      const ps = await psSnap();
+      const bornAtOf = new Map(snap.rows.map(([id = "", , , pid = ""]) => [id, paneBornAt(now, ps.etimes.get(Number(pid)))] as const));
       for (const target of allTargets()) {
         const pane = paneOf(target);
         // 没活 pane 的绑定 (已经睡着的 / spawn-mode) 不是候选。
         if (!pane || !snap.watchedBy.has(pane)) continue;
         const a = byTarget.get(target);
         const sessionId = a?.sessionId || deps.store.get(target)?.sessionId || "";
-        const lastActiveAt = Math.max(seenAt.get(target) ?? 0, transcriptActiveAt(target));
+        const lastActiveAt = lastActiveOf({ seenAt: seenAt.get(target), transcriptAt: transcriptActiveAt(target), paneBornAt: bornAtOf.get(pane) });
         const why = idleSkipReason({
           lastActiveAt,
           watched: !!snap.watchedBy.get(pane),
