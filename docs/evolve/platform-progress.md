@@ -61,9 +61,10 @@
 
 ## 进行中
 
-- **duty 逾期提醒** 已上线 (AliceZane `cc80495`, 测试 113/115): `shared/room-overdue.ts` 纯函数 + `daemon/room-overdue.ts` 扫描, 与看门狗同节拍; `rooms.overdue.remindMin/groupMin` (60/120, 0 = 关)。首轮: remind 4 / group 4 (Leo 95869f8f.1、wezard-1 7aeb85fc.208、workspace de721ddb.3/.5)。**白板审查中** → `DavidClark` (standard), f7c92997.1; 有问题回给 AliceZane 改, 审完两个都 stop。AliceZane 的遗留: 处理人不在名册、又没被看门狗取消的 duty 照样提醒。
-- **成员栏 UI 重做** → `BobAdams` (standard), 850bee9d.1, `after` YaraYoung 的 48437ae5.1 (同改 web/chat.js)。
-- **群公告**: 方案已在群里提 (7aeb85fc.292), 等 admin 表态。
+- **成员栏 UI 重做 + 顶部群公告** → `BobAdams` (standard), 850bee9d.1 + 850bee9d.2; `after` YaraYoung 的 48437ae5.1 与 FrankEvans 的 13cc3d30.1 (同改 web/chat.js)。交差后看截图报 admin, stop。
+- **群公告后端** (admin 7aeb85fc.299 批) → `FrankEvans` (standard), 13cc3d30.1: 账本 `NoticeOp`、`room_name({notice})`、人用 `/notice`、改动发「📌 群公告」+ notices.ts 提示、charter 带 home 群公告、/api 带 `notice`。
+- **人也有 duty** (admin 7aeb85fc.300) → `HenryGreen` (standard), 11937e21.1, `after` 13cc3d30.1: wizard 对人 need / chat_ask 点名人 → 人名下开 duty; 人下一句话关账 (有引用只关被引用的) 并唤醒提问的 wizard (修: 现在没点名的人话只叫醒 host); 人名下 duty 只做 group 级逾期; wizard 在等人时不计逾期。
+- admin 的 7aeb85fc.291 / .299 / .300 都回了 progress, 各件收尾后 done。
 - 常驻 duty d6977146.1 已 passed 关掉 (admin 授权直接在群里汇报; 否则逾期提醒会每 2h 误报它)。
 
 ## 已完成
@@ -80,6 +81,7 @@
 | 2026-11-22 | `/help` 协作一节改成 room 口径; `wizard.ts` 身份注释去 `tell_peer` | 见 git log |
 | 2026-11-22 | 删 `shared/turn-state.ts` 与恒空的 `WorldFacts.inflight` / `routeReceiptDutiesOf` / `WizardBrief.turns` (-64 行); 顺带发现 delegate 的占用 veto 恒空 (登记 P1) | 见 git log |
 | 2026-11-22 | 测试基线 109→111 / 113: `codex-backend` (bin 覆盖已退役) 与 `wizard-stream` W-2 (all=1 已退役) 改断言现行行为 | 见 git log |
+| 2026-11-22 | duty 逾期提醒 (AliceZane `cc80495`), 白板 DavidClark 审出 3 一般 + 若干小, 修于 `f80c80c`: group 等 remind 被读到才报、remind 不受唤醒预算、每 duty 失败隔离、按 holder 计时去重、move 算活动、跳过无主 duty。遗留: 失败隔离断言偏弱; host 换人后行为无专测; 首轮旧 `sys:"overdue-group"` 行不再算已给 (重启后实测未重报) | `cc80495` `f80c80c` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
