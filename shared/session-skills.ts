@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readlinkSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { writeIfChanged } from "./session-hooks.js";
+import { ensureBundledSkills } from "./skill-sync.js";
 
 export interface SessionSkillSpec {
   /** --plugin-dir 用的插件目录。 */
@@ -30,6 +31,10 @@ const skillDirs = (stateDir: string): Array<{ name: string; dir: string }> => {
 /** 写插件壳并把 <stateDir>/skills/* 软链进去。没有 skill 就返回 undefined ——
  *  daemon 照常跑, 只是 pane 里少了这批工具知识。 */
 export const prepareSessionSkills = (stateDir: string): SessionSkillSpec | undefined => {
+  // 包内置的 skill (企微文档套件) 先落到 <stateDir>/skills: 新装零操作, 老装升级 npm 后
+  // 第一次 spawn 就拿到新版; 用户改过 / 删过的不覆盖 (规则见 skill-sync.ts)。
+  // 物化失败只意味着少一批工具知识, 不能挡住挂载本身。
+  try { ensureBundledSkills(stateDir); } catch { /* 忽略 */ }
   const skills = skillDirs(stateDir);
   if (!skills.length) return undefined;
   const pluginDir = join(stateDir, "session-skill-plugin");

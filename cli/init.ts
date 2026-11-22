@@ -17,6 +17,8 @@ import { parse as parseJsonc } from "jsonc-parser";
 import { appendUnique, patchJsonc } from "../shared/config-writer.js";
 import { mapClaudePermissions, readClaudePermissions } from "../shared/claude-permissions.js";
 import { expandHome } from "../shared/paths.js";
+import { loadConfig } from "../shared/config.js";
+import { ensureBundledSkills } from "../shared/skill-sync.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
@@ -373,6 +375,30 @@ const main = async (): Promise<void> => {
   // `wezard-init --import-claude-permissions <path>` 增量补进来 (内部去重)。
   if (enableHook) await importClaudePerms(settingsPathFor(primary), true);
 
+// ── Step 1d: 内置 skill 落地 ──────────────────────────────────────────
+// 包内 skills/ (企微文档套件) 拷进 <stateDir>/skills, spawn 时按会话挂进 pane
+// (shared/session-skills.ts)。默认装、不询问 (2026-11-22 人拍板); 不想要的用
+// "wezard skills remove", 之后不再装回。它首次使用会自己装 wecom-cli 并走审批卡,
+// 这里只保证"知识"到位 —— 所以离线 / 没装 CLI 的用户也不该在这一步失败。
+const installBundledSkills = (): void => {
+  const stateDir = (() => {
+    try { return expandHome(loadConfig().config.daemon.stateDir); } catch { return expandHome("~/.wezard/state"); }
+  })();
+  const reports = ensureBundledSkills(stateDir);
+  for (const r of reports) {
+    if (r.error) log(c.yellow("  ⚠ skill " + r.name + ": " + r.error + " (跳过)"));
+    else if (r.mode === "foreign") log(c.yellow("  ⚠ skill " + r.name + ": 已有你自己的版本, 保持不变 (wezard skills install --force 可覆盖)"));
+    else if (r.mode === "held") log(c.dim("  skill " + r.name + ": 已按你的设置跳过"));
+    else if (r.mode === "gone") log(c.dim("  skill " + r.name + ": 目录已删除, 不再自动安装"));
+    else if (r.mode !== "current") {
+      log(c.green("  ✓ skill " + r.name + ": " + (r.mode === "adopt" ? "已就位" : r.mode + " " + r.wrote + " 文件")));
+    }
+  }
+  const live = reports.filter((r) => !r.error && r.mode !== "held" && r.mode !== "gone");
+  if (live.length) log(c.dim("    首次用企微文档类能力时, skill 会自己装 wecom-cli 并走审批卡"));
+};
+
+  installBundledSkills();
   ensureBuild();
   if (enableHook) runSync();
   // marketplace 插件只存在于 claude 家族 (只提供 commands/*, 不再带 hook 或 MCP);

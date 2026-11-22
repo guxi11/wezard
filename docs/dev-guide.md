@@ -137,6 +137,19 @@ reminder = 挂在一句话尾巴上的 `<system-reminder wezard="<kind>" …>…
 - `npx tsx tests/chat-record.test.ts` (第 2 节: `renderTail` 排序、`stripReminders`、`parseEnvelope` 不被旁注干扰、`reminderLabel`) — 加了新块就照 `chatlog` 那段抄断言。
 - `npx tsx tests/inject-event-marker.test.ts` (`withMsg` / `envelopeFor` / `carriesMsg`)、`tests/reminder-legacy.test.ts` (老转录里的信封仍读得回, 改 `envelopeOfAttrs` 必跑)。
 
+## 4. 加一份**内置 skill** (随包走, spawn 时按会话挂)
+
+「只该在 wezard 会话里出现」的 skill (眼下是 `wecom-unified`) 走两段: 包内 `skills/<name>/` 是随 npm 发的权威副本, 物化到 `<stateDir>/skills/<name>/` 后由 [shared/session-skills.ts](../shared/session-skills.ts) 用 `--plugin-dir` 挂进 pane (codex 没有这个参数, 不注入)。**全机 `~/.claude/skills` / `~/.codebuddy/skills` 一个字节都不写**, 也别落到项目级 `<cwd>/.claude/skills` —— [daemon/cfg-sync.ts](../daemon/cfg-sync.ts) 会把项目级 skills 在各后端 / 项目间同步, 等于把全局注入又装回去。
+
+**要动的**
+
+1. 内容: `skills/<name>/` (必须带 `SKILL.md`)。上游的许可文本放 `skills/LICENSE.<name>.txt`, **不要放进 skill 目录**: 「收编」判的是**逐文件全同**, 多一个 LICENSE 就会把已经手拷过的老用户判成 `foreign`。
+2. 代码: **一行为零**。`shared/skill-sync.ts` 的 `ensureBundledSkills` 按 `skills/*/SKILL.md` 自动发现, `wezard skills` 命令也自动覆盖; 只需要在 `package.json` 的 `files` 里保证 `skills/**` 在 (已有)。
+3. 合并规则**只实现一次** (在 `planSkillMerge`): 覆盖前必须核对「盘上这份是不是我们上次写的」(stamp 里的 sha)。别在别处写 rsync / `cp -r` —— 那会静默吃掉用户改过的东西。规则表就在函数上方。
+4. 测: `npx tsx tests/skill-sync.test.ts` (纯函数逐条 + 落盘一轮 install → current → gone → held → revive)。加了新规则就照抄一批断言。
+
+**触发出现在两处, 加第三处前先想清楚**: `wezard init` 收尾 (默认装、不询问) 与每次 spawn 前的 `prepareSessionSkills`。后者是「老用户升级 npm 后自动拿到新版」的唯一路径, 早退只看 stamp 的 version + 内容签名, 正常情况下零盘 IO。**别把物化塞进 daemon boot**: 每条 spawn 已经会走到。
+
 ---
 
 ## 通用规矩
