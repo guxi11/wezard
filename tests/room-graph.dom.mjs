@@ -268,12 +268,12 @@ try {
   await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });   // 回到 G 接后面的成员栏验收
   await page.waitForSelector(".rv-msg", { timeout: 5000 });
 
-  // 成员栏: 每成员一行 (状态点 · 名字 · host / lead / 视角图标 · 待交代 · 最近发言); 人在前, wizard 按 host → 忙 → 最近发言; 头一行 = 成员 N · 待交代 M。
+  // 成员栏: 每成员一行 (状态着色的多边形 · 名字 · host / lead / 视角图标 · 待交代 · 最近发言); 人在前, wizard 按 host → 忙 → 最近发言; 头一行 = 成员 N · 待交代 M。
   const gs = await page.evaluate(() => {
     const items = [...document.querySelectorAll("#gside .gs-item")].map((it) => ({
       nm: it.querySelector(".nm").textContent, hostTip: (it.querySelector(".gs-host") || {}).title || "", hostTxt: (it.querySelector(".gs-host") || {}).textContent || "",
       human: !!it.querySelector(".gs-mem.human"), roleTxt: (it.querySelector(".gs-role") || {}).textContent || "",
-      st: (it.querySelector(".gs-st") || {}).title || "", stCls: (it.querySelector(".gs-st") || {}).className || "", ago: (it.querySelector(".gs-ago") || {}).textContent || "",
+      st: ((it.querySelector(".gs-mem .smi") || {}).querySelector?.("title") || {}).textContent || "", stCls: ((it.querySelector(".gs-mem .smi") || {}).getAttribute?.("class")) || "", ago: (it.querySelector(".gs-ago") || {}).textContent || "",
       due: (it.querySelector(".gs-due") || {}).textContent || "", oneLine: it.querySelector(".gs-row").getBoundingClientRect().height < 40, grp: it.classList.contains("grp"),
     }));
     return { items, head: document.querySelector("#gside .gs-head").textContent, headTip: document.querySelector("#gside .gs-hl").title,
