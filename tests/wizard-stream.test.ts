@@ -17,6 +17,7 @@ import { H, W, room, say, uid } from "./room-fixture.js";
 const A = W(uid(1)), B = W(uid(2)), H1 = H("U1");
 const now = Date.now();
 const G = room("chat:wrG", [A, H1, B], now - 5000);
+// q1 是「老行」: 人话信封删之前落账的人话行 text 末尾还带着信封 —— 读侧 (rowText) 剥掉, 老行不改写。
 const q1 = say(G, { author: H1, kind: "say", text: "跑个测试\n<system-reminder wezard=\"envelope\" kind=\"human\" from=\"U1\">\n</system-reminder>", origin: "inbound" }, { now: now - 3500 });
 
 const turn: TurnDetailRecord = {
@@ -73,7 +74,7 @@ const run = async (): Promise<void> => {
   const woke = late.stream[1], out = late.stream[2];
   assert.equal(woke.row.id, q1.id, "唤醒它的人话按账本画 (注入原文不再画一遍)");
   assert.equal(woke.row.text, "跑个测试", "账本行正文剥掉 reminder");
-  assert.match(woke.row.rems, /rem-tag[^>]*>&lt;envelope · U1&gt;/, "reminder 收成按种类命名的折叠标签");
+  assert.ok(!woke.row.rems, "老行末尾的信封 / 提醒尾巴读侧剥掉, 人话气泡里不再出现 <envelope> 标签 (新行本就不带)");
   assert.ok(!late.stream.some((r: { id: string }) => r.id === "t1:in"), "注入那一轮的入消息不重复画");
   assert.match(out.html, /class="turn-group/, "出消息是过程框");
   assert.match(out.html, /工具调用|Bash/, "工具调用必须在出消息里 (旧版的完整度)");

@@ -33,10 +33,12 @@ type Use = "M" | "C";
 /** 种类注册表: 每种块允许写哪些属性 (`wezard` 自己不列)。渲染只认这里登记过的; 新增一个属性
  *  = 在这里加一行并说清谁读它。读者在行尾。 */
 export const REMINDER_KINDS = {
+  // 信封现在只剩定时任务 (task) 在写: 人话信封 2026-11-22 删了 (谁说的 = 账本行作者, 哪个群 = room 唤醒头
+  // `【label】(roomId)`), 同伴 / 回执信封更早退役。下面带「只读」的属性都是老转录 / 老账本行里还认得的历史写法。
   envelope: {
     kind: "M", from: "M", scope: "M",                 // 出处: parseEnvelope → rolepage / mirror
-    "chat-key": "M",                                  // 人话: 改名不变的群 key —— 仅当它不是接话 wizard 的 home 群才写 (mirror openingOf 缺省即 home); room 唤醒头 `(roomId)` 已带群
-    chat: "M",                                        // 只读: 老转录里的群显示名 (无任何读者, 已无写入方)
+    "chat-key": "M",                                  // 定时任务: 注入频道 key (空 = 私聊); 只读: 老人话信封里 home 群之外的群 key
+    chat: "M",                                        // 只读: 老人话信封里的群显示名 (无任何读者, 已无写入方)
     "asker-user": "M", "asker-chat": "M",              // 只读: 老转录里 peer 信封带的链头人话 (openingOf); 已无写入方
     msg: "M",                                         // 注入事件 id: 提交见证 / 轮次↔事件绑定 / serves 反查
     event: "M",                                       // 定时任务信封的群根行 id (老回执也带, 只读)
@@ -106,6 +108,16 @@ export const parseReminders = (text: string): Reminder[] =>
 
 export const stripReminders = (text: string): string => text.replace(REMINDER_RE, "").trim();
 
+// 一个 wezard 提醒块 (开标签带 `wezard=`, 不跨过别的 `</system-reminder>`), 前面是渲染方写的换行。
+const WEZARD_BLOCK = String.raw`\n<system-reminder wezard="[^"]*"[^>]*>(?:(?!<\/system-reminder>)[\s\S])*<\/system-reminder>`;
+// 图片 @path 行是 index 在尾巴之后才续上的 (账本行 = 原话 + 尾巴 + `\n@path`), 剥尾巴时原样保留。
+const TRAILING_BLOCKS_RE = new RegExp(`(?:${WEZARD_BLOCK})+((?:\\n@[^\\n]*)*)\\s*$`);
+
+/** 老账本行兼容: 人话行落账本时曾把提醒尾巴 (信封 / steward hint / 点名提示 / 名册增量) 一起写进 text。
+ *  现在账本行只存原话、尾巴在唤醒时才挂, 但已落的老行不改写 (id / seq 不变) —— 读侧用它把行**末尾连续的**
+ *  wezard 提醒块剥掉。只剥末尾: 人原话中间 / 行首引用的 `<system-reminder>` 字面量不动。 */
+export const stripLegacyTail = (text: string): string => text.replace(TRAILING_BLOCKS_RE, "$1");
+
 const rankOf = (attrs: Attrs): number => {
   const i = TAIL_ORDER.indexOf(attrs.wezard ?? "");
   return i < 0 ? TAIL_ORDER.length : i;
@@ -148,7 +160,7 @@ export interface Envelope {
   from: string;
   /** wizard 之间的私聊。 */
   private: boolean;
-  /** Stable inbound principal (改名不变); 缺省 = 这个会话的 home 聊天。 */
+  /** 注入频道的稳定 key: 定时任务信封写 (空串 = 私聊, 不进 chatKey); 老人话信封在 home 群之外的群写。缺省 = 这个会话的 home 聊天。 */
   chatKey?: string;
   /** Original human request, preserved across private dispatch and receipts. */
   asker?: Asker;
@@ -167,8 +179,6 @@ export type ReceiptStatus = "done" | "need" | "error" | "progress" | "timeout" |
 
 type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {
-  /** `chatKey` 只在人说话的群不是接话 wizard 的 home 群时才给 (home 是读侧缺省, 写了是纯重复)。 */
-  human: (user: string, chatKey?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "human", from: user, ...(chatKey ? { "chat-key": chatKey } : {}) }),
   /** `channel` = 实际注入频道 key: 空串表示私聊, 非空公开信封按稳定 key 归属; `event` = 定时任务对应的群根行。 */
   task: (taskId: string, channel: string, event?: string): EnvelopeAttrs => ({
     wezard: "envelope", kind: "task", from: taskId,

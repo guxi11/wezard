@@ -17,7 +17,7 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, TURN_METRICS, type CliBackendName, type NormalizedTranscriptLine } from "../shared/cli-backends.js";
 import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
 import { tildePath, type Part } from "./notices.js";
-import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope } from "../shared/reminder.js";
+import { parseEnvelope, renderReminder, type Envelope } from "../shared/reminder.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -574,10 +574,6 @@ const answerOf = (
 // 所以正文不再复述属性 (谁说的、在哪个群、件号): 模型读得到开标签, 正文只写
 // 属性推不出的表达语义与工具使用约定; 自动终句去向由 daemon 执行。
 export { parseEnvelope, type Envelope };
-
-/** 身份来自入站 userid, 包括本聊天私信; home 不能代替真实发话人。 */
-export const renderHumanEnvelope = (user: string, chatKey?: string): string =>
-  renderReminder(envelopeAttrs.human(user, chatKey), []);
 
 /** 人对管家说的那一轮挂一行「自己答还是派出去」: 宪章里的检查项离这句话太远, sonnet 档的管家一接到活
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */

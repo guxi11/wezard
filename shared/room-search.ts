@@ -5,7 +5,7 @@
 // 消息新的在前, 只回前 MSG_MAX 条但报总数; 片段在第一处命中前后各留一截, 起点落在词/句边界上。
 import { splitInline } from "./role-render.js";
 import type { RoomFact } from "./room-view.js";
-import { whoKey, type RenderNames, type RoomState, type Who } from "./room.js";
+import { rowText, whoKey, type RenderNames, type RoomState, type Who } from "./room.js";
 
 /** 有人参与的 room = 群聊 (绑定企微的群 / 单聊 / topic / 微信, 或账本里有人发过话); 其余 (wizard 之间的 dm / adhoc) = 会话。 */
 export const isPeopleRoom = (r: Pick<RoomFact, "bound" | "kind" | "members">): boolean =>
@@ -123,7 +123,7 @@ export const searchRooms = (
     if (!f) continue;
     for (const m of s.msgs) {
       const files = (m.files ?? []).map((x) => x.name).join(" ");
-      const text = plain(splitInline(m.text ?? "").body + (files ? " 📎 " + files : ""));
+      const text = plain(splitInline(rowText({ text: m.text ?? "", origin: m.origin })).body + (files ? " 📎 " + files : ""));
       if (!text || !hit(text)) continue;
       const low = text.toLowerCase();
       found.push({

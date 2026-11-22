@@ -11,7 +11,7 @@
 // 一样 —— 名字只是把 uid 换成给人看的写法。
 import {
   holderOf, openDuties, roomHost, sameWho, whoKey,
-  renderMsgLine, type FileRef, type JoinVia, type MsgKind, type MsgOrigin, type MsgRow,
+  renderMsgLine, rowText, type FileRef, type JoinVia, type MsgKind, type MsgOrigin, type MsgRow,
   type ReplyStatus, type RenderNames, type RoomKind, type RoomState, type SpeakBasis, type Who,
   isBoundRoom,
 } from "./room.js";
@@ -64,9 +64,9 @@ const stripMd = (t: string): string => t.replace(/[`*_~|#>]/g, "").replace(/\s+/
 export const buildRoomFact = (s: RoomState, n: RenderNames): RoomFact => {
   const host = roomHost(s);
   const lastRow = s.msgs[s.msgs.length - 1];
-  const preview = lastRow && stripMd(lastRow.files?.length && !lastRow.text.trim()
+  const preview = lastRow && stripMd(lastRow.files?.length && !rowText(lastRow).trim()
     ? "📎 " + lastRow.files.map((f) => f.name).join(", ")
-    : lastRow.text).slice(0, 80);
+    : rowText(lastRow)).slice(0, 80);
   return {
     id: s.id,
     kind: roomKindOf(s),
@@ -131,7 +131,7 @@ export interface RoomMsg {
 
 export const toRoomMsg = (m: MsgRow, n: RenderNames): RoomMsg => ({
   id: m.id, seq: m.seq, at: m.at, room: m.room, author: m.author, authorName: n.nameOf(m.author), ord: m.ord, speak: m.speak,
-  kind: m.kind, text: m.text, ...(m.to?.length ? { to: m.to } : {}), ...(m.re?.length ? { re: m.re } : {}),
+  kind: m.kind, text: rowText(m), ...(m.to?.length ? { to: m.to } : {}), ...(m.re?.length ? { re: m.re } : {}),
   ...(m.status ? { status: m.status } : {}), ...(m.files?.length ? { files: m.files } : {}), origin: m.origin,
   ...(m.sys ? { sys: m.sys } : {}), ...(m.bubble ? { bubble: true } : {}),
 });
@@ -302,7 +302,7 @@ export const renderRoomRead = (
 export const dutyFacts = (s: RoomState, n: RenderNames) => openDuties(s).map((d) => {
   const holder = holderOf(s, d);
   const row = s.byId.get(d.msg);
-  const text = row ? stripMd(row.text) : "";
+  const text = row ? stripMd(rowText(row)) : "";
   return {
     key: d.key, msg: d.msg, seq: d.seq, kind: d.kind, at: d.at,
     asker: d.asker, askerName: n.nameOf(d.asker), holder, holderName: holder ? n.nameOf(holder) : "", slot: d.slot,

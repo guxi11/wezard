@@ -43,7 +43,7 @@ type Who = { kind: "human"; id: string /*userid*/ }
   ord: number;                          // 作者此刻的加入序 (人 / daemon = 0)
   speak: "member"|"human"|"daemon"|"join-req";  // 发言权判定结果: 放行依据。被拒不成行, 只进 daemon.log
   kind: "say"|"ask"|"task"|"reply"|"file"|"join-req"|"system"|"trigger";  // trigger = 定时任务唤醒 (daemon 写)
-  text: string;
+  text: string;                         // 人话行 (origin inbound) 只存人的原话 (+ 图片 @path 行), 不带任何 <system-reminder> 提醒尾巴 / 信封; 老行曾带尾巴, 读侧用 rowText 剥 (不改写老行)
   to?: Who[];                           // 点名
   re?: string[];                        // reply 指向的消息 id (可多条)
   status?: "done"|"need"|"progress"|"passed"|"canceled"|"error";  // 仅 reply; error 只有 daemon 能写
@@ -125,6 +125,7 @@ spawn / clone / delegate 增 `room?` (子 wizard 以 via:"spawn" 免审入群); 
 
 **一行 op:"msg" 镜像进企微 ⇔ room 绑定了传输 ∧ origin ∉ {inbound, migrate} ∧ kind ≠ trigger。**
 - 也就是说 wizard 的 say / ask / task / reply / file / join-req、daemon 的 system 行 (未交代升级、离开 canceled、额度 / 预算拒绝说明) **全部**进群, 没有受众开关、没有按作者或轮次的例外。
+- **提醒尾巴在唤醒时才挂, 不进账本**: 人话触发的唤醒, 渲染时 (room-hub `deliver` → `tailOf` → `injectText({tail})`, 实现见 `daemon/wake-tail.ts`) 才按「被唤醒的 wizard + 触发它的人话行」算管家自查 (steward hint) 与点名提示 (mention), 与名册增量 (notice) 同一道边界、pane 放行后才渲染。触发行里没有人话 (同伴 / 回执 / 定时) 不挂这两种。人话**不再带信封**: 「谁说的」= 行作者, 「在哪个群」= 唤醒头 `【label】(roomId)`; 重载后接回这一轮的出处 (mirror `openingOf`) 也读这两处 —— 人话行的 room 是绑定 room → channel = 群, dm / adhoc → 私下 (`""`); 老转录里的人话信封 (`wezard="envelope" kind="human"`) 读侧仍认。
 - inbound 不回镜 (它本来就来自企微); migrate 是历史; trigger 是定时任务唤醒, 不是对人说的话。
 - 非 msg 的 op (join / leave / seen / move / name / notice) 不镜像 (公告变动由上面那条 daemon system 行镜像)。无绑定的 dm / adhoc room 一律不镜像, 只在 rolepage 可见。
 - 形态: 气泡头署作者名; 人话行带 bubble 时, **第一条 re 它的 reply** 覆盖占位气泡, 之后的作为新消息。file 行走媒体消息。

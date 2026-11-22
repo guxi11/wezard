@@ -1,5 +1,6 @@
 import type { ClearAttempt } from "./handoff.js";
 import { envelopeFor, parseEnvelope, renderTail } from "../shared/reminder.js";
+import { turnOpening } from "./turn-opening.js";
 import { charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand, inspectCodexHooks, trustCodexHookSet, type CodexHook } from "../shared/codex-hooks.js";
@@ -49,7 +50,7 @@ import { paneIdentityMatches, paneReclaimMatches, type MirrorAttachment, type Mi
 import { hasMirrorAskq, mootMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { replAskqInput } from "../shared/repl-script.js";
 import { isAutoWindowActive } from "./session-cache.js";
-import { noticeSuffixFor } from "./notices.js";
+import { noticeSuffixFor, type WakeTail } from "./notices.js";
 import { dispatchPickerPolicy, pickerPolicy, pressNoticeOf } from "./picker-policy.js";
 import { idleSkipReason } from "./idle-reap.js";
 import { markManagedPane, renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -2683,7 +2684,9 @@ export interface MirrorBridge {
    *  pushes assistant output via the standalone path. */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, opts?: { from?: TurnFrom; speaker?: string; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
+  injectText: (target: string, text: string, opts?: { from?: TurnFrom; speaker?: string; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt;
+    /** 唤醒时才挂的提醒尾巴 (room-hub 按触发行算): 与名册增量同一道边界, pane 放行之后才渲染 / 记去重。 */
+    tail?: WakeTail }) => Promise<InjectResult>;
   /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
   verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
   /** pane + 里面 CLI 进程的身份串 (`%0:<panePid>:<pid>`); 认不出 undefined。handoff 用它在 sid 抖动时确认仍是同一个进程。 */
@@ -3912,27 +3915,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     from?.kind === "peer" && from.public ? from.from : undefined;
 
   /** reload 后 tail 从 EOF 接上: 正在跑的这一轮的开头那句已在身后, 它的印章随旧进程没了。
-   *  那句话自己挂着信封 (谁说的、私聊还是哪个群) —— 读回来就是这一轮的出处。没挂信封 = undefined。 */
-  /** 回执 / 定时任务信封携带当前 event (事件表已退役, 只认信封自己带的)。 */
-  const rowOf = (env: { kind: string; receipt?: boolean; event?: string }): string | undefined =>
-    env.receipt || env.kind === "task" ? env.event : undefined;
+   *  那句话自己带着出处 —— 信封 (定时任务 / 老转录), 或 room 唤醒头 + 触发行 (见 turn-opening.ts); 都读不出 = undefined。 */
   const openingOf = (a: AttachState): { channel: string; speaker?: string; from?: TurnFrom; query: string } | undefined => {
     const t = a.jsonlPath ? lastUserTurn(a.jsonlPath, a.openingOffset) : undefined;
-    const env = t?.env;
-    a.activeEventId = env?.eventId;
-    if (!env) return undefined;
-    const home = baseOfKey(a.target);
-    const handed = false; // transfer 语义已随路由表退役
-    const from: TurnFrom | undefined =
-      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(handed ? { transferred: true } : env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...((turn) => (turn ? { turn } : {}))(rowOf(env)), ...(env.asker ? { asker: env.asker } : {}) }
-      : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
-      : undefined;
-    return {
-      channel: env.private ? "" : env.chatKey || home,
-      speaker: env.kind === "human" ? `user:${env.from}` : undefined,
-      from,
-      query: t!.text,
-    };
+    a.activeEventId = t?.env?.eventId;
+    return turnOpening(t, baseOfKey(a.target), (name) => wizardStore()?.byName(stripSigil(name))?.target);
   };
 
   /** 频道印章: 有新印章就换频道; 没有则 `reset` (CLI 手敲 / 人从聊天发起) 回到
@@ -7913,7 +7900,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         sessionId: sid, eventId: opts?.eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
         physicalGuard: opts?.handoff ? async (phase) => { const ok = permission() && await verifyClearInput(target, opts.handoff!, phase, permission) && permission(); if (!ok) pinRejected = true; return ok; } : undefined,
         requireIdle: opts?.requireIdle ? () => idleNow(target) : undefined,
-        prepareText: () => (full = pre + text + renderTail(envelope, noticeSuffixFor(target, text))),
+        prepareText: () => (full = pre + text + renderTail(envelope, noticeSuffixFor(target, text, opts?.tail?.via, opts?.tail?.lead))),
         beforeInput,
       });
       if (pinRejected) return { ...r, ok: false, retryable: false, reason: "handoff process/session or continuation authority changed at physical input; carry withheld" };

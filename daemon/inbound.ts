@@ -5,9 +5,7 @@ import type { Logger } from "pino";
 import { PRIMARY_BOT, type Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
 import { resolveCliBackend } from "../shared/cli-backends.js";
-import { lastModel, tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
-import { noticeSuffixFor } from "./notices.js";
-import { renderTail } from "../shared/reminder.js";
+import { lastModel, tailTurnsWithTools, type PeerInfo } from "./peers.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { parseWxCommand, wxCommandHandler } from "./weixin-cmd.js";
 import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim, shouldBotAutoClaim, persistBotClaim, ackBotClaim } from "./claim.js";
@@ -17,9 +15,9 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
-import { chatNameOf, stewardTierOf, type CharterGuard } from "./chat-name.js";
+import { chatNameOf, type CharterGuard } from "./chat-name.js";
 import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, openInstance, settleName, wizardStore } from "./wizard.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward, type StewardRoute } from "./steward.js";
 import { parseInstanceName } from "./classes.js";
@@ -48,7 +46,7 @@ const chatPrincipal = (msg: BaseMessage): string =>
 // 还原成裸 `.name`、@ 已由 stripAt 剥掉、去掉开头的空白与不可见字符) 落在**消息
 // 开头**的那个 `.x` 才是目标 —— 认不认识都算 (不认识 = 叫一个新 wizard 出来)。
 // 正文里的 `.fix` / `.gitignore` 一律只是提及, 哪怕名册里真有这个名字。
-// 选中的那个 token 从正文里摘掉, 其余 `.foo` 原样留着 (见 peerMentions)。
+// 选中的那个 token 从正文里摘掉, 其余 `.foo` 原样留着 (见 wake-tail.ts peerMentionsOf)。
 // Token 规则收在 session-label(nameTokenRe / allNames),路由与标注共用同一把尺子。
 const NAME_RE = nameTokenRe();
 const LEAD_NOISE_RE = /^[\s​-‍⁠﻿]+/u;
@@ -1053,30 +1051,6 @@ export const installInboundRouter = (
     return hit;
   };
 
-  // 路由用掉的那个 `.name` 已被 parseTag 摘走,正文里剩下的每个 `.x` 都可能是
-  // 用户在指另一个 wizard。解析走 bridge 自己的 resolvePeerTag —— peer 工具用的
-  // 同一套(全局名册),所以标注出来的地址一定是 peek_peer/chat_ask 打得中的;
-  // 解析不到的 `.foo` 与自指静默略过。
-  const peerMentions = (who: string, text: string): PeerMention[] => {
-    const mb = bridge;
-    const seen = new Set<string>();
-
-    return allNames(text).flatMap((name): PeerMention[] => {
-      const r = mb.resolvePeerTag(who, name);
-      if (!r.ok || r.target === who || seen.has(r.target)) return [];
-      seen.add(r.target);
-      const { runningCwd, defaultCwd } = mb.getCwd(r.target);
-      return [{
-        tag: name,
-        target: r.target,
-        chat: chatNameOf(cfg, r.target),
-        foreign: r.foreign,
-        job: wizardStore()?.get(r.target)?.description ?? "",
-        cwd: runningCwd || defaultCwd,
-      }];
-    });
-  };
-
   // 名字 → 它指向谁。哪个 `.x` 是路由不在这里定: parseTag 只认消息开头那一个。
   // 裸消息 (name = "") 走管家接待 (§3): 绑定的管家身份在本群的化身; 解析要新开化身时先落记录
   // (名字/身份/种类来自身份锚点), 会话由 gate 的 ensureSession 在身份的工作区里起。
@@ -1249,23 +1223,14 @@ export const installInboundRouter = (
     return true;
   };
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
-    // 斜杠命令按行解析,尾巴上多挂一段会让它不再被识别成命令 —— 只标注普通消息。
-    const slash = text.trimStart().startsWith("/");
-    const hint = slash ? [] : [peerMentionPart(peerMentions(who, text), ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(who)))];
-    // 谁、在哪个群说的 —— transcript 里只有这一段记着它 (room_read 从那里读回来)。
-    // 私信也带真实 userid, 不能从 wizard home/defaultChat 猜; 稳定 chat key 只在不是 home 群时才写
-    // (mirror openingOf 缺省就是 home, 在 home 群说话写出来是纯重复; 群本身由 room 唤醒头带)。
+    // 账本行只存人的原话: 信封已删 (谁说的 = 行作者, 哪个群 = 行所在 room), 管家自查 / 点名提示 /
+    // 名册增量这些提醒尾巴也不在这里拼 —— 它们在唤醒渲染那一刻才挂 (wake-tail.ts / room-hub)。
     const channel = chatPrincipal(msg);
-    const envelope = slash ? "" : renderHumanEnvelope(msg.from.userid, channel === baseOfKey(who) ? undefined : channel);
-    const steward = slash || !stewardTierOf(cfg, who) ? "" : renderStewardHint();
-    // 同一条边界上再挂: 点名提示, 以及这个 wizard 不在场时群里发生的成员变动 (见 notices.ts,
-    // 近几次注入里给过的不再重复)。
-    const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
     // P7-S1 只记录不动行为: 人话 dispatch 前落一行 human (同步内存记账, 落盘在后台)。
     // room 模型: 人话行的去重键 = 企微 msgid (账本行 ext), 事件表已退役。
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), rawText: text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body });
+      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

@@ -111,3 +111,11 @@ export const parseInjection = (raw: string): InjectBlock[] | undefined => {
   }
   return blocks;
 };
+
+/** 一次唤醒里**最后一条人话行**: 它在哪个 room、谁说的 (userid)。没有人话行 = undefined。
+ *  作者认形状: 行里 wizard 写作 `.名字`、daemon 写作 `wezard`, 其余就是人 (nameOf 对人渲染 userid)。
+ *  人话信封删了之后, 重载接回「这一轮是谁在哪说的」只剩这一处 —— 与 parseInjection 读同一个唤醒头 / 行头。 */
+export const humanOpening = (raw: string): { room: string; speaker: string } | undefined =>
+  (parseInjection(raw) ?? [])
+    .flatMap((b) => b.lines.filter((l) => l.author && !l.author.startsWith(".") && l.author !== "wezard").map((l) => ({ room: b.room, speaker: l.author })))
+    .at(-1);

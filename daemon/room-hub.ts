@@ -18,6 +18,7 @@ import {
   renderMsgLine, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
   isDirectParent,
 } from "../shared/room.js";
+import type { WakeTail } from "./notices.js";
 import type { RoomStore } from "./rooms.js";
 import { sleep } from "../shared/std.js";
 
@@ -41,7 +42,11 @@ export interface HubPorts {
   live?: (target: string) => Promise<boolean>;
   idle: (target: string) => Promise<boolean>;
   interrupt: (target: string) => Promise<void>;
-  paste: (target: string, text: string) => Promise<PasteResult>;
+  /** `tail` = 这次唤醒要挂的提醒尾巴 (见 tailOf); pane 放行之后才由 injectText 渲染。 */
+  paste: (target: string, text: string, tail?: WakeTail) => Promise<PasteResult>;
+  /** 唤醒时才挂的提醒尾巴 (管家自查 / 点名提示): 按「被唤醒的 target + 触发它的行」现算, 不写进账本行。
+   *  只对人话触发行挂 (见 wake-tail.ts); 没有就不挂。 */
+  tailOf?: (target: string, triggers: readonly MsgRow[]) => WakeTail | undefined;
   /** 有 duty 被关账之后 (任何 status, 任何来路) —— lead 摘章等对账用; 抛错不影响 append。 */
   onClosed?: () => void;
   /** 轮终等 Stop hook 的 grace (ms, 缺省 3000; 测试给 0)。只对来问过 hook 的 wizard 生效。 */
@@ -229,7 +234,7 @@ export const createRoomHub = (p: HubPorts) => {
       await p.interrupt(w.target); // 先 Esc 打断再投, 不拆 pane (§3b I-1); 被打断那一轮的 duty 不关
     }
     const { text, seen, msgs } = render(uid, rooms);
-    const res = await p.paste(w.target, text);
+    const res = await p.paste(w.target, text, p.tailOf?.(w.target, [...rooms.values()].flat()));
     if (res === "ok") {
       for (const [room, rows] of rooms) for (const t of rows)
         p.log?.info({ room, msgId: t.id, target: w.target, lagMs: now() - t.at }, "room: delivered"); // O3: 账本行 at → 注入成功 (msgId 同上, 避开 pino 的 msg 键)

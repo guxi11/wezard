@@ -50,6 +50,10 @@ const none: Section = { text: "", keys: [] };
 /** 这一次注入是从哪来的 —— 人在某个群里说的话, 还是别的 (同伴 / 回执 / 定时)。 */
 export interface Via { human?: { channel: string } }
 
+/** 一次唤醒注入要额外挂的尾巴 (room-hub 按触发行算, injectText 在 pane 放行之后交给 noticeSuffixFor):
+ *  `lead` 排在名册增量前面 (点名提示 / 管家自查), `via` 说明这次注入是从哪来的。 */
+export interface WakeTail { lead: readonly Part[]; via: Via }
+
 export interface NoticeBox {
   /** 把一条变动投给一批 wizard。自己做的事自己知道, 所以调用方负责把当事人排除在外。
    *  字符串 = 一行自由文字 (note)。 */

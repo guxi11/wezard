@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { expandHome } from "./paths.js";
+import { stripLegacyTail } from "./reminder.js";
 
 // ── 身份 ───────────────────────────────────────────────────────────────
 
@@ -628,10 +629,13 @@ export const leaveOps = (s: RoomState, who: Who, by: Who, now: number, why = "")
 export interface RenderNames { nameOf: (w: Who) => string; roomLabel: (room: string) => string }
 
 const statusTag = (m: MsgRow): string => (m.status ? " [" + m.status + "]" : "");
+/** 行正文的读法: 人话行 (origin inbound) 曾把提醒尾巴一起写进 text, 老行不改写、读侧剥掉 (见 stripLegacyTail);
+ *  新行只存原话, 剥一遍是空操作。只有 inbound 行带过尾巴, 别的来源的 text 原样返回。 */
+export const rowText = (m: Pick<MsgRow, "text" | "origin">): string => (m.origin === "inbound" ? stripLegacyTail(m.text) : m.text);
 export const renderMsgLine = (m: MsgRow, n: RenderNames, max = 500): string => {
   const to = m.to?.length ? " → " + m.to.map(n.nameOf).join(", ") : "";
   const re = m.re?.length ? " (re " + m.re.join(",") + ")" : "";
-  const body = m.text.replace(/\s+/g, " ").trim();
+  const body = rowText(m).replace(/\s+/g, " ").trim();
   const files = m.files?.length ? " 📎" + m.files.map((f) => f.name).join(",") : "";
   return "[" + m.id + "] " + n.nameOf(m.author) + to + re + statusTag(m) + ": " + (body.length > max ? body.slice(0, max) + "…(+" + (body.length - max) + ")" : body) + files;
 };
@@ -651,7 +655,7 @@ export const unreadFor = (s: RoomState, who: Who, triggers: readonly string[] = 
   let used = 0;
   for (let i = eligible.length - 1; i >= 0; i--) {
     const m = eligible[i]!;
-    const cost = triggers.includes(m.id) ? 0 : Math.min(m.text.length, 500);
+    const cost = triggers.includes(m.id) ? 0 : Math.min(rowText(m).length, 500);
     if (picked.length && used + cost > budget && !triggers.includes(m.id)) continue;
     picked.unshift(m);
     used += cost;

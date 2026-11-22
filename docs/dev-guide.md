@@ -107,10 +107,10 @@ reminder = 挂在一句话尾巴上的 `<system-reminder wezard="<kind>" …>…
    - 渲染时 `unregisteredAttrs` 会**静默丢掉**没登记的属性 (类型只挡字面量, 挡不住展开进来的)。属性一直不出现先查这里。
 2. `TAIL_ORDER` — 若是尾巴上的旁注块, 把名字放进去决定位置 (现序: `envelope, message-event, hint, lead, after, mention, chatlog, roster, pending`; 信封必须打头, `parseEnvelope` 取最后一个信封)。表外的排最后。**preamble 类** (如 `charter`, 只随 pane 首条注入、不在尾巴) 不进 `TAIL_ORDER`。
 3. 写入方: `renderReminder({ wezard: "<kind>", … }, lines)` (永远以 `\n` 起头 — 读侧的正则锚行首), 再交给注入口:
-   - 人话 / 同伴: 经 `opts.envelope` 或 `renderTail(envelope, …旁注)` ([daemon/mirror-bridge.ts](../daemon/mirror-bridge.ts) `injectText`, [daemon/inbound.ts](../daemon/inbound.ts));
+   - 定时任务 / 记忆整理: 经 `opts.envelope` 或 `renderTail(envelope, …旁注)` ([daemon/mirror-bridge.ts](../daemon/mirror-bridge.ts) `injectText`); **人话不再写信封, 也不把旁注拼进账本行** —— 人话触发的唤醒由 [daemon/wake-tail.ts](../daemon/wake-tail.ts) `humanWakeTail` 按触发行现算 `lead` 段 (steward hint / 点名提示), 经 `injectText({tail})` 在 pane 放行后挂上, 账本行只存原话;
    - 名册类增量: 放进 [daemon/notices.ts](../daemon/notices.ts) 的信箱, 下一次注入随带。
    - `renderTail` 只收**渲染好的块**, 块外的字会被丢, 别喂正文。
-4. 读回 (只有被代码读的才需要): `parseEnvelope` 只认 `wezard=envelope` 且 `kind ∈ ENVELOPE_KINDS` (`peer|human|task`)。新的**信封种类**要同时改 `ENVELOPE_KINDS`、`Envelope.kind`、`envelopeOfAttrs`, 以及读它的 [daemon/peers.ts](../daemon/peers.ts) (`talkTurns` / 标记归属) 与 `mirror-bridge.ts` 的 `openingOf` 一带。非信封的旁注块 (hint / roster 一类) **不需要** parse。
+4. 读回 (只有被代码读的才需要): `parseEnvelope` 只认 `wezard=envelope` 且 `kind ∈ ENVELOPE_KINDS` (`peer|human|task`; 现在只有 `task` 有写入方, `peer` / `human` 是读老转录用的)。新的**信封种类**要同时改 `ENVELOPE_KINDS`、`Envelope.kind`、`envelopeOfAttrs`, 以及读它的 [daemon/peers.ts](../daemon/peers.ts) (`talkTurns` / 标记归属) 与 `mirror-bridge.ts` 的 `openingOf` 一带 (无信封的 room 唤醒由 `openingOf` 经 [shared/inject-view.ts](../shared/inject-view.ts) `humanOpening` 读回 room / 发话人)。非信封的旁注块 (hint / roster 一类) **不需要** parse。
 5. 读侧 strip / collapse — **通常什么都不用加**:
    - `stripMeta` ([daemon/peers.ts](../daemon/peers.ts) `META_RE`)、`cleanUserText` ([daemon/mirror-bridge.ts](../daemon/mirror-bridge.ts) `META_TAG_RE`)、`stripReminders` (`REMINDER_RE`) 都是按 `<system-reminder>` 标签名通吃, 与 kind 无关。**别另起标签名** — 那才需要改这三处。
    - rolepage: [shared/detail-render.ts](../shared/detail-render.ts) `splitReminders` → `reminderLabel` ([shared/reminder.ts](../shared/reminder.ts)), 默认标签 = kind 名 (`<roster>`); 想要自定义标签 (如 `回执 · x · need`) 或标成机器块 (`machine`, 样式 `.rem-m`) 在 `reminderLabel` 加分支。

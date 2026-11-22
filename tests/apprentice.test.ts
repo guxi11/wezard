@@ -4,7 +4,7 @@
 // Part B: 锁定 —— evictStaleName 永不顶学徒; /new 被拦 (整理记忆 + 原会话继续, 不换会话);
 //         /kill 被拦; 定时任务 fresh 恒 false (显式 true 也不行)。
 // Part C: 连续会话 × 多群 —— 两个群点名学徒都落同一个 target (P2 锚点回落), 不新建化身;
-//         每条注入信封带各自群的 chat=, 回复按发话群回去; 首触 spawn 在学徒工作区。
+//         账本行只存原话 (不挂信封 / 提醒尾巴), 回复按发话群回去 (dispatch.channel); 首触 spawn 在学徒工作区。
 // Part D: 提醒线减半 + 审批豁免判定 + 巡检装配 (config 权威, quiet, 有界, 幂等)。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -141,9 +141,9 @@ assert.equal(dispatched2.length, 2);
 assert.equal(dispatched2[0]!.principal, anchor2, "A 群点名落学徒唯一会话");
 assert.equal(dispatched2[1]!.principal, anchor2, "B 群点名也落同一个会话 (不是每群一个化身)");
 assert.equal(spawned2.length, 1, "没有为 B 群新开化身");
-assert.ok(dispatched2[0]!.text.includes(String.raw`chat-key="chat:chat:A"`), "A 群 (非学徒 home) 注入的信封带 chat-key");
-assert.ok(dispatched2[1]!.text.includes(String.raw`chat-key="chat:chat:B"`), "B 群注入的信封带 chat-key");
-assert.ok(!/ chat="/.test(dispatched2[0]!.text), "信封不再写 chat 显示名");
+assert.equal(dispatched2[0]!.text, "帮我看下 A 群的事", "人话只存原话: 不挂信封 / 提醒尾巴 (哪个群 = 唤醒头, 谁说的 = 行作者)");
+assert.equal(dispatched2[1]!.text, "B 群也有个问题");
+assert.ok(!dispatched2.some((d) => d.text.includes("<system-reminder")), "inbound 不再拼任何 <system-reminder>");
 assert.equal(dispatched2[0]!.channel, "chat:chat:A", "回复回发话群 A");
 assert.equal(dispatched2[1]!.channel, "chat:chat:B", "回复回发话群 B");
 assert.equal(store2.get("chat:A#学徒"), undefined, "A 群没有学徒化身记录");

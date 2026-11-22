@@ -117,6 +117,7 @@ const peerCode = ts.transpileModule("return ({" + source.slice(peerStart, peerEn
 const attachment = { sessionId: "sid", tmuxPane: "%delivery", jsonlPath: "test.jsonl", justSpawned: true, muteUntilInject: true, pendingFromCli: true, activePeerTurn: "old-task" };
 const seals: unknown[] = [];
 let notices = 0;
+let noticeArgs: unknown[] = [];
 idle = false;
 const env = {
   byTarget: new Map([["target", attachment]]), paneUsable: async () => true,
@@ -125,7 +126,7 @@ const env = {
   listJsonls: () => [], dirname: () => ".", jsonlIsPostClearChild: () => false,
   // injectText 的注入前判定已换成三态 `probePane` (unknown 不再当 pane 死了去重生)。
   probePane: async () => ({ state: "session" }),
-  cfg: {}, log: { child: () => ({}) }, noticeSuffixFor: () => { notices++; return " notice"; },
+  cfg: {}, log: { child: () => ({}) }, noticeSuffixFor: (...a: unknown[]) => { notices++; noticeArgs = a; return " notice"; },
   rememberInject() {}, touch: () => {}, pushSeal: (_a: unknown, seal: unknown) => seals.push(seal), sealKeys: (s: string) => [s],
   idleVerdict: () => idle, idleNow: async () => idle, isClearCommand: () => false, armSilentForkRebind() {}, inject,
 };
@@ -150,4 +151,14 @@ physical = async (_p, _t, _i, _l, _f, _b, _j, _m, guard) => {
 assert.equal((await injectText("target", "receipt", { requireIdle: true })).ok, true);
 assert.equal(seals.length, 1);
 assert.equal(attachment.activePeerTurn, "old-task", "only transcript activation may replace the active peer turn");
+// 唤醒尾巴 (room-hub 按触发行算的 steward hint / 点名提示): 原样交给 noticeSuffixFor 的 via / lead,
+// 在 pane 放行后 prepareText 里才渲染 —— 不是 injectText 自己拼, 也不进账本行。
+physical = async () => ({ ok: true });
+const tail = { via: { human: { channel: "chat:G" } }, lead: [() => ({ text: "", keys: [] })] };
+assert.equal((await injectText("target", "human line", { requireIdle: true, tail })).ok, true);
+assert.equal(noticeArgs[2], tail.via, "tail.via 交给 noticeSuffixFor");
+assert.equal(noticeArgs[3], tail.lead, "tail.lead 交给 noticeSuffixFor");
+assert.equal((await injectText("target", "peer line", { requireIdle: true })).ok, true);
+assert.equal(noticeArgs[2], undefined, "没有 tail 的注入 (同伴 / 回执 / 定时) 不带 via / lead");
+assert.equal(noticeArgs[3], undefined);
 console.log("pane delivery: idle revalidation, attribution boundary, default interjection, retry evidence and timeout fencing passed");
