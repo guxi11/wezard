@@ -1,3 +1,4 @@
+import { PaneInputError } from "../daemon/pane-input.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
@@ -28,9 +29,9 @@ const scanned: string[] = [], errors: string[] = [];
 let fail = true, maximum = 0;
 const ctx = vm.createContext({
   createKeyedScheduler, client: { on() {} }, byTarget: panes, cfg: { wrc: { mirror: {} }, approval: { enabled: true }, daemon: { stateDir: "/unused" } }, readHookMode: () => "wecom",
-  process: { env: {} }, Date, setInterval: () => 0,
+  PaneInputError, process: { env: {} }, Date, setInterval: () => 0,
   normAssistant: (text: string) => text, statSync: () => ({ mtimeMs: 0 }), cliOf: () => "codebuddy",
-  log: { warn: (e: { target: string }) => errors.push(e.target), info() {} },
+  log: { warn: (e: { target: string }) => errors.push(e.target), info() {}, debug() {} },
   mootMirrorPicker() {}, looksLikePicker: () => false,
   withPaneInput: async (_pane: string, action: (live: () => boolean) => Promise<void>, opts: { guard: () => boolean }) => {
     if (opts.guard()) await action(opts.guard);

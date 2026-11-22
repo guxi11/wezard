@@ -32,7 +32,7 @@ import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit, clipLine } from "../shared/std.js";
 import { withImageClipboard, pasteVerifiedImage } from "./image-input.js";
 import { createKeyedScheduler } from "../shared/keyed-scheduler.js";
-import { withPaneInput } from "./pane-input.js";
+import { PaneInputError, withPaneInput } from "./pane-input.js";
 import {
   activeBackends,
   resolveCliBackend,
@@ -437,7 +437,7 @@ const renderTaskNotification = (block: string): string => {
 const cleanUserText = (wrapped: string): string => {
   // 多行注入落盘时被 CLI 包了一层 `<pasted_content>` (见 peers.unwrapPasted) —— 先剥,
   // 否则回显去重对不上, 我们自己注入的那一行会被认成「人在 CLI 里敲的」, 整轮回复
-  // 因此被 出处门 挡在群外 (公开的 tell_peer / 定时任务的多行提示全中)。
+  // 因此被 出处门 挡在群外 (公开的 chat_ask / 定时任务的多行提示全中)。
   const raw = unwrapPasted(wrapped);
   const nameMatch = raw.match(SLASH_TAG_RE);
   const slashCmd = nameMatch?.[1]?.trim() ?? "";
@@ -2875,7 +2875,7 @@ export interface MirrorBridge {
    *  never the user's default. Recorded so every respawn relaunches with it. */
   setEffort: (target: string, effort: Effort) => Promise<EffortSelectResult>;
   /** Every bound session's transcript, with its mtime (0 = not written yet).
-   *  No tmux — a stat each. read_chat folds a chat's history out of these. */
+   *  No tmux — a stat each. room_read folds a chat's history out of these. */
   transcripts: () => Array<{ target: string; jsonlPath: string; mtime: number }>;
   /** Latest assistant message of `target` — the handoff payload between agents. */
   lastText: (target: string) => string;
@@ -3043,7 +3043,7 @@ interface AttachState {
    *  零星 item 属于同一场对话。 */
   channel?: string;
   speaker?: string;
-  /** 本轮是同伴公开派来的 (tell_peer public:true) —— 那个同伴的 target。回复进群时头
+  /** 本轮是同伴公开派来的 (bound room 的 chat_ask) —— 那个同伴的 target。回复进群时头
    *  写成 `🧙‍♂️ me： 🧙‍♂️ 它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
   replyTo?: string;
   /** 这场对话的出处 —— 与 channel 同生同灭。续写轮 (没有新的印章) 沿用它: 私聊里的
@@ -6475,7 +6475,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (/^(user|chat|group|external_user):/.test(raw)) {
       return all.includes(raw) ? hit(raw) : { ok: false, reason: `no running session '${raw}'` };
     }
-    // 名字属于身份 (§2): 优先落「身份在调用方本聊天的化身」(A 群里的 tell_peer 点名只找
+    // 名字属于身份 (§2): 优先落「身份在调用方本聊天的化身」(A 群里的 chat_ask 点名只找
     // A 群的化身, 不串 B 群的); 身份在本聊天没有化身时回落锚点化身 (旧世界的跨群寻址)。
     const named = ((t) => (t && sameBot(self, t) ? t : undefined))(manifestationOf(wizardStore(), raw, baseOfKey(self)));
     if (named && all.includes(named)) return hit(named);
@@ -7234,7 +7234,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       void maintenance.schedule(`picker:${a.target}`, pane, (signal) => pickerOne(a, pane, sid, gen, signal))
         ?.catch((e: unknown) => {
           if (maintenanceValid(a, pane, sid, gen, maintenance.signal)) a.pickerSentinelFp = undefined;
-          log.warn({ target: a.target, err: (e as Error).message }, "picker sentinel tick failed");
+          // 真实输入抢占维护任务是预期行为 (pane-input canceled), 不是故障。
+          const preempted = e instanceof PaneInputError && e.code === "canceled";
+          (preempted ? log.debug : log.warn).call(log, { target: a.target, err: (e as Error).message }, "picker sentinel tick failed");
         });
     }
   };
