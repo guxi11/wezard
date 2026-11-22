@@ -27,8 +27,8 @@
   var S = { openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
   var SIDE_KEY = 'wezard.role.side';
   try { if (localStorage.getItem(SIDE_KEY) === 'graph') S.view = 'graph'; } catch (e) { /* 隐私模式 */ }
-  // 时间范围 (列表与图共用, 见 roomInScope): 只按 room 的最后动静切 —— 正在看的 room 照旧总在; 有未决 duty 的 room 也留着, 但「只有 wizard 的两人 dm」除外 (见 roomInScope)。
-  // 成员不单独过窗口: 成员跟着 room 走 —— 多人群的成员随群一起展示, 只靠一间过期的两人 dm 连着的 wizard 不展示。
+  // 时间范围 (列表与图共用, 见 roomInScope): 只按 room 的最后动静切 —— 有未决 duty / 有未读的 room 与正在看的 room 照旧总在; 成员不单独过窗口, 跟着 room 走。
+  // 图上谁出现另有一条规则 (见 renderGraph): wizard 只随多人 room 一起展示, 只靠两人 dm 连着的不展示。
   // 选中的那档与左栏视图开关一样记在 localStorage, 默认 2d。
   var WIN_KEY = 'wezard.role.winMin';
   var WINS = [[60, '1h'], [120, '2h'], [360, '6h'], [720, '12h'], [1440, '1d'], [2880, '2d'], [0, '全部']];
@@ -43,13 +43,10 @@
   };
   var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
   var inWin = function (ts) { return !WIN || (!!ts && ts >= winCut()); };
-  // 列表与图「画哪些 room」的唯一口径: 窗口内有动静 / 正在看的那个 (滑出窗口也不能从眼前消失) / 视角有未读 / 留着未决 duty ——
-  // 最后一条不适用于两个 wizard 的 dm (isDirectRoom): 它在图上收成 wizard 之间的一条直连线, 一旦让 duty 把它留下, 那间 dm 的两端 wizard 就整个被拖进图里,
-  // 而它们本来既没加入任何展示中的多人群、dm 窗口内也没有消息 (admin: 没有消息就不该展示)。duty 本身没丢: 在那个 wizard 的页面 / pending_items 里都还在。
-  // 成员不单独过窗口: 成员跟着 room 走 (见 participants), 否则 room 的成员边画不出来。
-  // 窗口外但视角自己有未读的 room 也算在范围内 (未读 = 与列表角标 / 图上红点同一个数, 见 unreadOf)。
+  // 列表与图「画哪些 room」的唯一口径: 窗口内有动静 / 正在看的那个 (滑出窗口也不能从眼前消失) / 视角有未读 / 留着未决 duty。
+  // 成员不单独过窗口: 成员跟着 room 走 (见 participants), 否则 room 的成员边画不出来。未读 = 与列表角标 / 图上红点同一个数, 见 unreadOf。
   var roomInScope = function (r) {
-    return !WIN || inWin(r.last && r.last.at) || (!!D.roomId && D.roomId === r.id) || unreadOf(r) > 0 || (r.openDuties > 0 && !isDirectRoom(r));
+    return !WIN || inWin(r.last && r.last.at) || (!!D.roomId && D.roomId === r.id) || unreadOf(r) > 0 || r.openDuties > 0;
   };
   var scopedRooms = function () {
     return (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); }).filter(roomInScope);
@@ -872,9 +869,14 @@
   var renderGraph = function () {
     if (S.gdrag) return;    // 正在拖: 定时刷新别来动节点
     var rooms = scopedRooms();
-    var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
+    // 谁出现在图上 (admin: 多人群的成员随群一起展示, 其他的没必要): 参与者只取自「锚」room —— 一切不是「只有 wizard 的两人 dm」的 room (群 / 单聊 / 多人 room),
+    // 外加正在看的与视角有未读的两人 dm (它们是眼前的事)。其余两人 dm 不带来任何新节点: 两端都已因别的 room 在图上才画成直连线, 否则整条丢掉
+    // (以前它们的两端被一并拖进图, 一个没加入任何群的 wizard 只因一间 dm 就出现, 图里挤满只靠 dm 连着的休眠节点)。
+    var anchors = rooms.filter(function (r) { return !isDirectRoom(r) || (!!D.roomId && D.roomId === r.id) || unreadOf(r) > 0; });
+    var people = participants(anchors).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
     var lone = povLoneNode(people);
     if (lone) people.push(lone);
+    rooms = rooms.filter(function (r) { return anchors.indexOf(r) >= 0 || !!directPair(r, people); });
     var directs = [];
     rooms = rooms.filter(function (r) {
       var pair = directPair(r, people);
@@ -928,7 +930,7 @@
   // 时间范围下拉: 列表与图共用 (main 的 .sp 小下拉), 挂在标题行右端、视图开关左边。
   var winSelect = function () {
     return dropdown('win', {
-      ic: '⏱', end: true, title: '时间范围: 只列这段时间内有动静的 room (正在看的 room、有未读的 room、留着待交代 duty 的多人 room 照常显示); 成员跟着 room 走, 只靠一间过期两人 dm 连着的 wizard 不展示',
+      ic: '⏱', end: true, title: '时间范围: 只列这段时间内有动静的 room (正在看的 room、有未读的 room、留着待交代 duty 的 room 照常显示); 图上 wizard 随多人 room 一起展示, 只靠两人 dm 连着的不展示',
       label: winLabel(),
       items: WINS.map(function (w) { return { v: String(w[0]), on: w[0] === WIN, html: '<span class="id">' + w[1] + '</span>' }; }),
     });
