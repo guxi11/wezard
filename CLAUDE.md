@@ -46,6 +46,8 @@ node scripts/shot.mjs --role <…> --click 'text=A ↔ B'         # 点进某个
 - **内存**: 本机 3.7GB, 一次截图峰值 ~300MB; 脚本带单实例锁, 并发只许 1 个, 别在多个分身里同时截。用完即关, 无常驻进程。
 - `tests/room-graph.dom.mjs` 现在能起浏览器跑了 (目前还有一处 fixture 缩放断言过期, 见 CHANGELOG): `LD_LIBRARY_PATH=$HOME/.cache/wezard-shot-libs/root/usr/lib/x86_64-linux-gnu node tests/room-graph.dom.mjs`。
 
+改动清单 (加 MCP 工具 / room 行类型 / reminder kind 各要动哪几处, 含 vm 沙箱测试的坑): [docs/dev-guide.md](docs/dev-guide.md)。
+
 ## Release / changelog
 
 Every version bump **must** update `CHANGELOG.md` — no release without a changelog entry. Follow [Keep a Changelog](https://keepachangelog.com/) + [SemVer](https://semver.org/):
