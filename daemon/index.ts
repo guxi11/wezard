@@ -3939,7 +3939,8 @@ const main = async (): Promise<void> => {
     if (min <= 0) return;
     serialReap("idle reap sweep", async () => {
       const r = await bridge.reapIdle(min * 60_000, reapVeto());
-      if (r.reaped.length) log.info({ reaped: r.reaped.length, targets: r.reaped, skipped: r.skipped, idleMin: min }, "idle reap sweep");
+      // 每轮都留一行 (收没收都记): 否则「sweep 到底跑没跑、为什么没收」只能靠猜。
+      log.info({ reaped: r.reaped.length, targets: r.reaped, skipped: r.skipped, idleMin: min }, "idle reap sweep");
     });
   };
   setInterval(idleSweep, IDLE_SWEEP_MS).unref();

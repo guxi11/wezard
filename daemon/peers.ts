@@ -669,6 +669,21 @@ const pickCacheTouch = (jsonlPath: string, raw: string): number => {
   ).touch;
 };
 
+/** 这个会话最后一次真的有动静的时刻: transcript 里最新一条带 `timestamp` 的记录。
+ *  不用文件 mtime —— 同机别的会话的 CLI / 工具会把闲置会话的 jsonl 反复碰新 (实测一个
+ *  11 小时没说话的会话 mtime 只有 28 分钟前, 空闲回收因此永远等不到 1 小时), 而
+ *  `mode` / `permission-mode` / `last-prompt` 之类元数据行本就不带 timestamp。
+ *  0 = 没有带时间戳的记录 (刚起、还没说过话) —— 调用方回落 mtime。 */
+export const lastRecordMs = (jsonlPath: string): number =>
+  readTailUntil(
+    jsonlPath,
+    (raw) => raw.split("\n").reduce((acc, line) => {
+      if (!line.includes('"timestamp"')) return acc;
+      try { return Math.max(acc, stampMs((JSON.parse(line) as { timestamp?: unknown }).timestamp)); } catch { return acc; }
+    }, 0),
+    (ms) => ms > 0,
+  );
+
 /** A row's `timestamp` as epoch ms (Claude: ISO string, CodeBuddy: number); 0 if absent / unparsable. */
 const stampMs = (ts: unknown): number => {
   const ms = typeof ts === "number" ? ts : Date.parse(String(ts ?? ""));

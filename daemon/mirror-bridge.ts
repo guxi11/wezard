@@ -70,7 +70,7 @@ import { splitMarkdown } from "../shared/md-chunk.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatNameOf, listChatNames, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, lastRecordMs, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -3199,6 +3199,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 只在内存里: reload 后空着, 回落到 mtime (那时真在跑的 pane 还有截屏判忙兜着)。
   const seenAt = new Map<string, number>();
   const touch = (target: string): void => { seenAt.set(target, Date.now()); };
+  /** transcript 里最后一条真记录的时刻; 没有 (刚起) 才回落 mtime; 0 = 认不出。mtime 不可信:
+   *  闲置会话的 jsonl 会被外部碰新, 见 `lastRecordMs`。 */
+  const transcriptActiveAt = (target: string): number => {
+    const jsonl = jsonlOf(target);
+    if (!jsonl) return 0;
+    return lastRecordMs(jsonl) || ((): number => { try { return statSync(jsonl).mtimeMs; } catch { return 0; } })();
+  };
 
   // Ring buffer of recently-injected user texts to suppress WeCom→CLI echo.
   const INJECT_TTL_MS = 60_000;
@@ -7991,8 +7998,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (!pane || !snap.watchedBy.has(pane)) continue;
         const a = byTarget.get(target);
         const sessionId = a?.sessionId || deps.store.get(target)?.sessionId || "";
-        const mtime = ((): number => { try { return statSync(jsonlOf(target)).mtimeMs; } catch { return 0; } })();
-        const lastActiveAt = Math.max(seenAt.get(target) ?? 0, mtime);
+        const lastActiveAt = Math.max(seenAt.get(target) ?? 0, transcriptActiveAt(target));
         const why = idleSkipReason({
           lastActiveAt,
           watched: !!snap.watchedBy.get(pane),
@@ -8088,9 +8094,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       let over = live.length - max;
       if (over <= 0) return { reaped, orphans, skipped };
       // 超了才 stat: 最久没动的先收。还没写过 transcript 的是刚起的 pane, 按"此刻"算。
-      const mtimeOf = (target: string): number => {
-        try { return statSync(jsonlOf(target)).mtimeMs; } catch { return now; }
-      };
+      const mtimeOf = (target: string): number => transcriptActiveAt(target) || now;
       const oldestFirst = live.map((target) => ({ target, mtime: mtimeOf(target) })).sort((x, y) => x.mtime - y.mtime);
       for (const { target, mtime } of oldestFirst) {
         if (over <= 0) break;
