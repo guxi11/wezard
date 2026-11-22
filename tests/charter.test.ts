@@ -5,7 +5,7 @@ const base: CharterArgs = {
   self: { name: "worker", address: "worker", description: "test role", cwd: "/workspace" },
   chat: "team", principal: "user:admin", inherited: false,
   siblings: [], memory: [], chatMemory: "", workspaceMemory: "", steward: false,
-  stewardBudget: 4, lead: false, tiers: [], topOnly: false, speech: "implicit",
+  stewardBudget: 4, lead: false, tiers: [],
 };
 
 const hasHeading = (text: string, heading: string) => text.split("\n").includes(heading);
@@ -43,7 +43,7 @@ for (const fragment of ["终句没有任何路由语义", "完成只认 chat_rep
   assert.ok(roomChapter.includes(fragment), `room contract must include ${fragment}`);
 
 for (const steward of [false, true]) {
-  const rendered = renderCharter({ ...base, steward, topOnly: true, speech: "strict" });
+  const rendered = renderCharter({ ...base, steward });
   assert.equal(hasHeading(rendered, "## 我是这个 room 的 host (L1)"), steward);
   assert.ok(!hasHeading(rendered, "## 本群开着顶层模式"), "顶层模式节退役");
   assert.ok(!hasHeading(rendered, "## 本群开着严格模式"), "严格模式节退役");

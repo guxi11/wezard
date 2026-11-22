@@ -96,9 +96,9 @@ try {
   bindSteward(cfg, src, "chat:wrNEW", "fix");
   assert.equal(cfg.chatPolicy?.["chat:wrNEW"]?.steward, "fix", "cfg 热改生效");
   assert.equal(JSON.parse(readFileSync(src, "utf8")).chatPolicy["chat:wrNEW"].steward, "fix", "patchJsonc 写进盘");
-  cfg.chatPolicy = { ...(cfg.chatPolicy ?? {}), "chat:wrKEEP": { topOnly: false } };
+  cfg.chatPolicy = { ...(cfg.chatPolicy ?? {}), "chat:wrKEEP": { stewardBudget: 7 } };
   bindSteward(cfg, src, "chat:wrKEEP", "zoo");
-  assert.equal(cfg.chatPolicy["chat:wrKEEP"]?.topOnly, false, "内存里的既有策略字段保留");
+  assert.equal(cfg.chatPolicy["chat:wrKEEP"]?.stewardBudget, 7, "内存里的既有策略字段保留");
   delete cfg.chatPolicy;
 
   // ── 只给 workspace 即完成绑定 + 落盘 + 状态机终结 (11-17 改口径) ──

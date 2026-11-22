@@ -40,7 +40,7 @@ export interface WorldFactWizard {
   busy: boolean;
   /** tmux pane 还在 —— false = 冷的, 要说话得先把它拉起来。 */
   alive: boolean;
-  /** 提示缓存已冷 (transcript 超过缓存 TTL 没动) —— 与 wizard_roster / tell_peer 冷门控同一口径
+  /** 提示缓存已冷 (transcript 超过缓存 TTL 没动) —— 与 wizard_roster / chat_ask 冷门控同一口径
    *  (daemon/route.ts wakeCostOf)。只对 pane 还在的有意义; 老 daemon 快照没有。 */
   cacheCold?: boolean;
   /** 轮没结束却停在本地审批框 / 弹窗上等人点 (registry idle 且悬着 tool_use) —— 不是在干活, isBusy 把它算忙。 */

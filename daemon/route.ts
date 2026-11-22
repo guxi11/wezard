@@ -370,7 +370,7 @@ export const wakeCostOf = (ctx: number, touchedAt: number, now: number, ttlMs: n
 };
 
 
-// tell_peer 派新活的门槛: 冷且这么大的, 先退回让派活的算账再说。点名、职责对口只说明
+// chat_ask 派新活的门槛: 冷且这么大的, 先退回让派活的算账再说。点名、职责对口只说明
 // 相关, 不说明划算 —— 一句「直接转给它」就把整段 ctx 重写了一遍 (.relock 526k 那次)。
 export const COLD_GATE = 100_000;
 

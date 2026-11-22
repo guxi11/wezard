@@ -907,7 +907,7 @@ const main = async (): Promise<void> => {
     };
 
     // ── 给人看的消息 ──────────────────────────────────────────────────
-    // tell_peer 把话塞进另一个 agent 的输入框 (驱动它干活); 这条把话贴进一个聊天
+    // chat_ask 把话塞进另一个 agent 的输入框 (驱动它干活); 这条把话贴进一个聊天
     // 给**人**看。收件人就是地址 —— 聊天名或裸 principal, 没有「先订阅才收得到」
     // 这一步。头沿用 relay 那一套: 本群退化成寻常的 `emoji #tag`, 外群写成带聊天
     // 名的全称, 于是那边的人一眼看得出是谁、从哪个群说过来的。
@@ -945,7 +945,7 @@ const main = async (): Promise<void> => {
       });
     });
 
-    // ── 聊天记录 (read_chat) ─────────────────────────────────────────────
+    // ── 聊天记录 (room_read) ─────────────────────────────────────────────
     // room 模型: 往来的唯一事实是 room 账本。这里读账本 (renderRoomRead), 不再从
     // transcript 现算 (chat-log.ts 已随 room-ui 退役)。chat = 绑定 room; with/role =
     // 只看那个人说的; 缺省 = 调用方所在全部 room 的 W-1 视图。
@@ -1018,8 +1018,8 @@ const main = async (): Promise<void> => {
       json(res, r.ok ? 200 : 400, r);
     });
 
-    // 跟另一个 wizard 说一句话。`tell_peer` 是它现在的名字 —— 「说」而不是「发送并
-    // 等待」: 调用方注入完就返回, 对方干完那一轮的结论由守护进程自动送回来 (receipts)。
+    // 跟另一个 wizard 说一句话 (chat_ask): 「说」而不是「发送并等待」, 调用方写进 room 账本就返回,
+    // 对方干完用 chat_reply 交代 (room 账本上的 duty 关账)。
     // 冷与否 = 缓存最近一次被碰 (最近一次真实请求的开始; 读不到退回 mtime) 距今多久 vs 它实际按多长 TTL 写的
     // (与 route_candidates 同一口径)。transcript 里没有分层写入记录时按 5min 兜底。
     const CACHE_TTL_FALLBACK_SEC = 300;
@@ -2176,7 +2176,7 @@ const main = async (): Promise<void> => {
             const i = m.sessionInfo(x);
             const state = ((v) => (v === undefined ? "-" : v ? "idle" : m.parkedNow(x) ? "parked" : "busy"))(m.idleVerdict(x));
             const touch = i?.jsonlPath ? touchOf(i.jsonlPath) : 0;
-            // 冷热与 route_candidates / tell_peer 冷门控同一口径 (touchOf / ttlOf)。
+            // 冷热与 route_candidates / chat_ask 冷门控同一口径 (touchOf / ttlOf)。
             const warmth = i?.jsonlPath ? { ctx: i.contextTokens, cold: !!coldGateOf(displayName(x), i.contextTokens, touch, now, ttlOf(i.jsonlPath)) } : {};
             return { name: displayName(x), state, ...warmth, job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward"), touch };
           }), now);
@@ -2837,7 +2837,7 @@ const main = async (): Promise<void> => {
     });
 
     // 派活收成一步 (见 route.decide): 查候选 → 过成本门控 → 转给已有的或按档白板 spawn →
-    // tell_peer 投出去, 回决定与理由。默认决定由守护进程算; 管家不同意就 `to` 点名、
+    // chat_ask 投出去, 回决定与理由。默认决定由守护进程算; 管家不同意就 `to` 点名、
     // `force` 越过冷门控、`spawn:true` 硬要新的 —— 推翻要显式说。
     /** dispatch 回包的 reason: 投成了是选人理由; 投递 / 起 wizard 失败时 reason 必须是真实错误,
      *  选人理由降到 why —— 否则「你要了新的」会盖掉 bearAs / tell 的失败原因。 */
@@ -3105,7 +3105,7 @@ const main = async (): Promise<void> => {
       const charter = charterFor(target, { parent: self, forkOf, inherited: inherit, cli: pick.cli });
       const task = (b.task ?? "").toString().trim();
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
-      // wait_peer 才不会把它们当成分身对这件活的答复。
+      // room 的交代才不会把它们当成分身对这件活的答复。
       const birthGuard = (): boolean => ownsSlot(slotR);
       if (!birthGuard()) { releaseBirth(); return { status: 409, body: { ok: false, reason: "wizard identity or caller turn changed before spawn" } }; }
       const r = await m.cloneSession({

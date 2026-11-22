@@ -159,7 +159,7 @@ assert.equal(handoffLineOf(store2, "user:home", "claude-sonnet-4-5"), handoffAt(
 const charter = renderCharter({
   self: { name: "学徒", address: "学徒", description: "", cwd: "~", kind: "apprentice" },
   chat: "home", principal: "user:home", inherited: false, siblings: [], memory: [],
-  chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4, lead: false, tiers: [], topOnly: true,
+  chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4, lead: false, tiers: [],
 });
 assert.ok(charter.includes("你是学徒 (连续身份)"), "宪章带学徒章");
 assert.ok(charter.includes("chat="), "宪章写明多群信封纪律");
@@ -167,7 +167,7 @@ assert.ok(charter.includes("wizard_remember"), "交接前先记忆");
 const charterPlain = renderCharter({
   self: { name: "x", address: "x", description: "", cwd: "~" },
   chat: "c", principal: "chat:c", inherited: false, siblings: [], memory: [],
-  chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4, lead: false, tiers: [], topOnly: true,
+  chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4, lead: false, tiers: [],
 });
 assert.ok(!charterPlain.includes("学徒"), "普通身份不带学徒章");
 

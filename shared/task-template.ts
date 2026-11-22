@@ -1,4 +1,4 @@
-// 派活正文的「模板文件 + 参数」展开 —— dispatch / tell_peer 的 `taskFile`+`params`。
+// 派活正文的「模板文件 + 参数」展开 —— dispatch / chat_ask 的 `taskFile`+`params`。
 //
 // 为什么由 daemon 在入口展开而不是让调用方自己读文件: 协议卡这类长正文此前由
 // 管家 LLM 逐字手抄进 task —— output 单价约为 input 的 5 倍, 而且手抄没有任何

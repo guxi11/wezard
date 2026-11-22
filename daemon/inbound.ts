@@ -1055,7 +1055,7 @@ export const installInboundRouter = (
 
   // 路由用掉的那个 `.name` 已被 parseTag 摘走,正文里剩下的每个 `.x` 都可能是
   // 用户在指另一个 wizard。解析走 bridge 自己的 resolvePeerTag —— peer 工具用的
-  // 同一套(全局名册),所以标注出来的地址一定是 peek_peer/send_peer 打得中的;
+  // 同一套(全局名册),所以标注出来的地址一定是 peek_peer/chat_ask 打得中的;
   // 解析不到的 `.foo` 与自指静默略过。
   const peerMentions = (who: string, text: string): PeerMention[] => {
     const mb = bridge;
@@ -1252,7 +1252,7 @@ export const installInboundRouter = (
     // 斜杠命令按行解析,尾巴上多挂一段会让它不再被识别成命令 —— 只标注普通消息。
     const slash = text.trimStart().startsWith("/");
     const hint = slash ? [] : [peerMentionPart(peerMentions(who, text), ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(who)))];
-    // 谁、在哪个群说的 —— transcript 里只有这一段记着它 (read_chat 从那里读回来)。
+    // 谁、在哪个群说的 —— transcript 里只有这一段记着它 (room_read 从那里读回来)。
     // 私信也带真实 userid 与稳定 chat key, 不能从 wizard home/defaultChat 猜。
     const channel = chatPrincipal(msg);
     const chat = chatNameOf(cfg, channel);

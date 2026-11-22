@@ -49,7 +49,7 @@ export const chatVendor = (): Asset => {
 };
 
 /** 发言头的原子 (session-label 的 SPEAKER_KIT) 原样拼成浏览器里的全局 `WZ` —— rolepage 与群里、
- *  read_chat 走同一份实现, 不在 chat.js 里另抄一份。函数源码就是数据: toString 即可送达。 */
+ *  room_read 走同一份实现, 不在 chat.js 里另抄一份。函数源码就是数据: toString 即可送达。 */
 const KIT: Asset = ((body) => ({ body, type: "text/javascript", etag: `W/"${createHash("sha1").update(body).digest("hex").slice(0, 12)}"` }))(
   `var WZ = (function () {\n${Object.entries(SPEAKER_KIT).map(([k, f]) => `  var ${k} = ${f.toString()};`).join("\n")}\n` +
     `  return { ${Object.keys(SPEAKER_KIT).map((k) => `${k}: ${k}`).join(", ")} };\n})();\n`,

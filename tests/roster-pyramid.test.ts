@@ -125,7 +125,7 @@ const lines = (s: string): string[] => s.split(String.fromCharCode(10));
     self: { name: "me", address: "me", description: "", cwd: "/w" },
     chat: "群A", principal: "chat:A", inherited: false, siblings, memory: [],
     chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4,
-    lead: false, tiers: [], topOnly: false,
+    lead: false, tiers: [],
   } satisfies CharterArgs);
   const shown = siblings.filter((s) => charter.includes(s.name));
   assert.ok(shown.length <= 8, "出生名册 ≤8 个 (v3 L0 快照), 实际 " + shown.length);

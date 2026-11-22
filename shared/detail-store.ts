@@ -92,7 +92,7 @@ export type CtxCut = "clear" | "new" | "switch";
 
 // 出处 —— 这一轮是**谁开的口**。undefined = 人直接说的 (群里发言 / CLI 敲字)。
 //
-// 同伴 send_peer 派活、定时任务到点放枪。这些边只存在于发生的那一刻, 所以跟着
+// 同伴 chat_ask 派活、定时任务到点放枪。这些边只存在于发生的那一刻, 所以跟着
 // turn 记录一起过夜 (append-only JSONL), 供关系视图和回执回读。
 export interface TurnFrom {
   /** peer = 另一个 wizard 派的; task = 定时任务放的枪。 */
@@ -111,7 +111,7 @@ export interface TurnFrom {
   receipt?: boolean;
   /** kind=peer: 发话方把它欠人的那一笔 transfer 了过来 —— 不是私聊派活, 这一轮的终句直接答进群。 */
   transferred?: boolean;
-  /** 这一轮对应的路由行 id (T10 起取代件号, 见 reminder.TurnTag): 派活那句、续问与回执
+  /** 这一轮对应的路由行 id (T10 起取代件号): 派活那句、续问与回执
    *  带同一个 —— rolepage 凭它从回执跳回派活那句。老记录里叫 turn。 */
   event?: string;
   /** 回执: 定论 (见 ReceiptStatus)。 */
@@ -169,7 +169,7 @@ export interface TurnDetailRecord {
   channel?: string;
   speaker?: string;    // 人说的那一轮: 发话人 `user:<userid>` (群里可能不止一个人)
   agent?: TurnAgentMeta; // 本轮是 subagent 跑的; undefined = 主会话自身的 turn
-  injects?: TurnInject[]; // 这一轮跑着时被插进来的话 (tell_peer priority now 等); 没有 = 没人插话
+  injects?: TurnInject[]; // 这一轮跑着时被插进来的话 (chat_ask interrupt 等); 没有 = 没人插话
   items: TurnItem[];
   initialModel?: string; // 创建 session 的档位, 仅作展示兜底, 不参与计价
   initialEffort?: string;
@@ -183,7 +183,7 @@ export interface TurnDetailRecord {
   usageMsgIds?: string[];
 }
 
-// 插话 —— 一轮跑着时贴进来的一句 (同伴 tell_peer priority:now、忙时排队后被这一轮中途吃进去的)。
+// 插话 —— 一轮跑着时贴进来的一句 (同伴 chat_ask interrupt:true、忙时排队后被这一轮中途吃进去的)。
 // Claude Code 不为它写 user 行, 只落一行 `attachment.queued_command`, 它不开新的一轮, 由正在跑的这一轮接着答。
 // 它仍是一条独立的话 —— 谁说的、在哪个频道、哪件活 —— 所以挂在被插的那一轮上, 自带出处与频道,
 // rolepage 把每条展成一条入消息。不借 items: 那是这一轮自己的产出, 用量与过程都按它算。

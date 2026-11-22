@@ -687,7 +687,7 @@ ${renderJsonSection(use.toolInput)}`;
   return `${primary}${inputSection}${outputSection}`;
 };
 
-// ── 移交: tell_peer 把一件活交给了谁 ──
+// ── 移交: chat_ask 把一件活交给了谁 ──
 // 它不是一次普通的工具调用 —— 这一刻起活在对方手里, 结论会作为回执回来。所以在调用框下面
 // 另起一行系统提示, 事实全从这次调用自己的 input / result 读: 回包有就信回包 (落地的名字、
 // 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。delegate 与带活的 clone / spawn

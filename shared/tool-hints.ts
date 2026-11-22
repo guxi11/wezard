@@ -40,7 +40,7 @@ export const toolReplies = (value: unknown, depth = 0): Facts[] => {
 type Syntax = { type: string; [key: string]: any };
 const UNKNOWN = Symbol("not static");
 
-/** 静态成员链: `mcp.wezard.tell_peer` / `mcp["wezard"].tell_peer` / `tools.mcp__wezard__x`。
+/** 静态成员链: `mcp.wezard.chat_ask` / `mcp["wezard"].chat_ask` / `tools.mcp__wezard__x`。
  *  调用结果、下标变量这些算不出名字的段一律返回 undefined —— 认不出就不猜。 */
 const memberPath = (n: Syntax | undefined): string | undefined => {
   if (!n) return undefined;
@@ -93,7 +93,7 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
     // allowReturnOutsideFunction: REPL 的 code 是函数体, 顶层 return 是常态 —— 不放开整个解析直接失败。
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as Syntax;
     const bindings = new Map<string, unknown>();
-    // 名字 → 它绑的成员链 (`const ns = mcp.wezard` / `const {tell_peer: tp} = mcp.wezard`)：
+    // 名字 → 它绑的成员链 (`const ns = mcp.wezard` / `const {chat_ask: tp} = mcp.wezard`)：
     // 只是换个写法, 不改变调用的身份, 和入参事实分开记。
     const aliases = new Map<string, string>();
     const calls: HintCall[] = [];
@@ -126,7 +126,7 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
               bindings.set(d.id.name, v !== null && typeof v === "object" ? UNKNOWN : v);
             }
           } else if (d.id.type === "ObjectPattern" && binding !== undefined) {
-            // const { tell_peer: tp } = mcp.wezard —— 同一个工具换个名字。
+            // const { chat_ask: tp } = mcp.wezard —— 同一个工具换个名字。
             for (const p of d.id.properties) {
               if (p.type !== "Property" || p.computed || p.kind !== "init" || p.value.type !== "Identifier") continue;
               aliases.set(p.value.name, expand(binding + "." + String(p.key.name ?? p.key.value)));
@@ -135,8 +135,8 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
         }
       }
       if (n.type === "CallExpression") {
-        // 被调用者先还原成静态成员链, 再归一成一种拼写: `mcp.wezard.tell_peer(…)` 这种两段
-        // 命名空间、`const tp = mcp.wezard.tell_peer; tp(…)` 这种先存名字再调, 都落在这一处。
+        // 被调用者先还原成静态成员链, 再归一成一种拼写: `mcp.wezard.chat_ask(…)` 这种两段
+        // 命名空间、`const tp = mcp.wezard.chat_ask; tp(…)` 这种先存名字再调, 都落在这一处。
         const path = memberPath(n.callee);
         const name = path === undefined ? undefined : toolNameOf(expand(path));
         const input = n.arguments.length === 0 ? {} : literal(n.arguments[0], bindings);

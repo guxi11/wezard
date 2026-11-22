@@ -30,7 +30,7 @@ export const NEVER_RULE_ALLOW = new Set(["AskUserQuestion", "ExitPlanMode", "Ent
 import { replBashCallCount, replBashCommands, replToolNames } from "./repl-script.js";
 
 // wezard 自家 MCP server 的内置豁免。wizard 经 mcp wezard 发的都是对守护进程的回环
-// 指令 (tell_peer / read_chat / spawn_wizard …), 没有执行面 —— 每条都发审批卡是纯噪
+// 指令 (chat_ask / room_read / spawn_wizard …), 没有执行面 —— 每条都发审批卡是纯噪
 // 声 (实战: 「审核 mcp_wezard.delegate 未在白名单」)。默认 allowRules 会被用户一写
 // 整份覆盖, 光靠默认项会丢, 所以豁免内置在判定层短路, 不依赖任何规则。
 // 两种命名形态都认: Claude 式 mcp__wezard__tool 与 CodeBuddy 式 mcp_wezard.tool;

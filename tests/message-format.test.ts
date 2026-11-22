@@ -15,14 +15,14 @@ assert.equal(responsePrincipal(cfg, { chatid: "wrOther~bot" }), b);
 assert.equal(responsePrincipal(cfg, { chatid: "unknown~bot", frame: {} as any, body: { chattype: "group", chatid: "unknown" } }), "chat:unknown~bot");
 assert.equal(responseFormatPolicy(cfg, { chatid: "wx_123" }, urlOf), undefined);
 assert.equal(responseFormatPolicy(cfg, { chatid: "" }, urlOf), undefined);
-for (const topOnly of [true, false]) for (const destination of [a, b]) {
-  cfg.chatPolicy[destination] = { topOnly, stewardBudget: 4 };
+for (const destination of [a, b]) {
+  cfg.chatPolicy[destination] = { stewardBudget: 4 };
   const policy = responseFormatPolicy(cfg, { chatid: destination.split(":")[1]! }, urlOf)!;
   for (const sender of known) {
     const input = `[.${names[sender]}](${urlOf(sender)}): answer`;
     // 署名一律裸 `🧙‍♂️ name：` (名字外不包反引号), default / 非 default 同形。
     const expected = `🧙‍♂️ ${names[sender]}： answer [✦](${urlOf(sender)})`;
-    assert.equal(withMessageFooter(input, policy), expected, `${topOnly}/${destination}/${sender}`);
+    assert.equal(withMessageFooter(input, policy), expected, `${destination}/${sender}`);
     assert.equal(withMessageFooter(expected, policy), expected);
     assert.equal(parseTagHeader(expected).tag, names[sender]);
   }

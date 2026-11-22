@@ -34,7 +34,7 @@ export const CARD_LINE_MARK = "[卡片]";
 const isCardSystem = (l: ChatLine): boolean =>
   l.kind === "system" && (l.text.startsWith(CARD_LINE_MARK) || !l.text.trim());
 
-/** 溢出行的一行指针: 正文不进批, 留 id 供详情页 / read_chat 追全文。 */
+/** 溢出行的一行指针: 正文不进批, 留 id 供详情页 / room_read 追全文。 */
 const pointerOf = (l: ChatLine): string => `‹长文 ${l.id} · ${l.text.length} 字›`;
 
 /** 一行渲染成一行文本 (换行压平 —— 批里一行就是一句)。`full` = 触发消息全文。 */

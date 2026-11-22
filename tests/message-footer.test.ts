@@ -57,8 +57,8 @@ const senders = [
   (c: string) => client.replyStreamWithCard(frame, "s", c, true),
   (c: string) => client.sendMessage("admin", { msgtype: "markdown", markdown: { content: c } }),
 ];
-for (const topOnly of [true, false]) {
-  cfg.chatPolicy[home] = { topOnly, stewardBudget: 4 };
+{
+  cfg.chatPolicy[home] = { stewardBudget: 4 };
   for (const send of senders) {
     await send(`${head(home)}hello`); assert.equal(calls.at(-1), bare(home, "hello"));
     await send(`${head(worker)}hello`); assert.equal(calls.at(-1), signed(worker, "hello"));

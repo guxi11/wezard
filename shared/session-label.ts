@@ -30,7 +30,7 @@ export const labelFor = (sessionId: string): string => {
 
 // ── wizard name lexicon ────────────────────────────────────────────────
 // 面 × 表示 (设计稿 §1.5 矩阵): 人面 (企微气泡头/审批卡) 写 `🧙‍♂️ name`; 系统面
-// (roster/read_chat/charter/notices/rolepage) 只写裸 name; 人点名单写作 `.name`。
+// (roster/room_read/charter/notices/rolepage) 只写裸 name; 人点名单写作 `.name`。
 // 读入侧长期双态 —— `.name` 与 `🧙‍♂️ name` 都认, 存量 transcript / 引用气泡全带着旧表示。
 // One rule for
 // what counts as a name token, shared by everything that reads them out of
@@ -63,7 +63,7 @@ export const allNames = (text: string): string[] => [
 
 const MAGE_LEAD = new RegExp(`^${MAGE_SRC}[ \\t]?`, "u");
 /** `@.fix` / `.fix` / `@🧙‍♂️ fix` / `🧙‍♂️ fix` → `fix`; 其余原样 trim。
- *  工具参数 (tell_peer / delegate 的 name/to) 传进带记号的写法在这里剥成裸名 —— 单一收口。 */
+ *  工具参数 (chat_ask / delegate 的 name/to) 传进带记号的写法在这里剥成裸名 —— 单一收口。 */
 export const stripSigil = (raw: string | undefined): string =>
   (raw ?? "").trim().replace(/^[.@]+/u, "").replace(MAGE_LEAD, "");
 
@@ -110,7 +110,7 @@ export const splitBot = (bare: string): { id: string; bot: string } => {
   return i >= 0 ? { id: bare.slice(0, i), bot: bare.slice(i + 1) } : { id: bare, bot: "" };
 };
 // 内部会话 (记忆整理者) 读全机的收件箱与 md, 多机器人时它不归任何一个机器人: 与任何非内部 key 都不 sameBot,
-// 否则主机器人的 wizard 能 peek / read_chat / rolepage 到别的机器人的记忆提议。单机器人时保持原状 (它算主机器人)。
+// 否则主机器人的 wizard 能 peek / room_read / rolepage 到别的机器人的记忆提议。单机器人时保持原状 (它算主机器人)。
 // 机器人数是进程启动时的配置 (bots 改了要重启), daemon 与 svr 各自在启动时 bindMultiBot。
 let multiBot = false;
 export const bindMultiBot = (on: boolean): void => { multiBot = on; };
@@ -227,7 +227,7 @@ export const tagUrlOf = (target: string): string | undefined => linker?.urlOf(ta
 export const targetOfTagUrl = (url: string): string | undefined => linker?.targetOfUrl?.(url);
 
 /** target 的对外名字: 名册里的全局名, 名册没绑定时退回 slot id。
- *  系统面 (roster/read_chat/charter/notices/rolepage) 的称呼一律从这里取 —— 裸名,
+ *  系统面 (roster/room_read/charter/notices/rolepage) 的称呼一律从这里取 —— 裸名,
  *  不带任何记号; 记号只在人面原子 (tagHead 一族) 里出现, 调用方不许自己拼。 */
 export const displayName = (target: string | undefined): string =>
   target ? linker?.nameOf(target) || tagOfKey(target) : "";
@@ -284,10 +284,10 @@ export const linkTags = (target: string | undefined, text: string): string => {
 export const unlinkTags = (text: string): string => text.replace(LINKED_RE, "$1");
 
 // ── 发言头 ─────────────────────────────────────────────────────────────
-// 谁说的、说给谁, 群气泡 (markdown 链接)、read_chat (纯文本)、rolepage (HTML) 写成同一个结构:
+// 谁说的、说给谁, 群气泡 (markdown 链接)、room_read (纯文本)、rolepage (HTML) 写成同一个结构:
 // 企微群气泡 (人面) 是 `🧙‍♂️ a：` / `🧙‍♂️ a： 🧙‍♂️ b` —— 发话方后跟冒号, 对象紧跟其后
 // (名字前的 🧙‍♂️ 是 wizard 记号, 不再加 @; 旧 `.a:` 形态在读入侧并存)。人名 (无记号) 同一结构。
-// read_chat 与 rolepage 把同一结构里的名字画成裸名 (§1.5) —— 差异只在两边名字怎么画,
+// room_read 与 rolepage 把同一结构里的名字画成裸名 (§1.5) —— 差异只在两边名字怎么画,
 // 结构本身不变。下面三个原子就是这份结构的全部; 它们原样送进
 // 浏览器 (SPEAKER_KIT, 由 chat-render 拼进 /chat/app.js), 所以只许是不引用模块里任何别的东西的纯函数。
 // **两种输出**: 以下 tagHead → withTagHeader 一族只给人面 (企微气泡头/审批卡) 用, 一律带记号;
