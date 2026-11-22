@@ -599,10 +599,10 @@
     var a = (rr + 5).toFixed(1), b = (rr + 10).toFixed(1);
     return '<g class="rv-pov"><title>当前视角</title><path d="M-' + a + ' -5L-' + b + ' 0L-' + a + ' 5M' + a + ' -5L' + b + ' 0L' + a + ' 5"/></g>';
   };
-  // lead: 金色皇冠 (不再用 ★, 免得和 host 的 ⭐ 混) 画在节点圆的正中间, 大小随圆 (占直径约 80%); 深色描边, 在绿 / 红 / 灰 / 白各种状态底色上都看得清。
+  // lead: 金色皇冠 (不再用 ★, 免得和 host 的 ⭐ 混) 戴在节点圆的头顶: 圆上沿 + 选中环 (r+3.5) 之外、水平居中, 固定像素 (不随圆大小); 画在 .rv-body 外面, 不跟呼吸动画缩放。
   var leadCrown = function (rr) {
-    var k = (rr * 0.8 / 4.8).toFixed(2);
-    return '<path class="rv-lead" transform="scale(' + k + ')" d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/>';
+    var k = 1.15, y = -(rr + 4.5 + 3.6 * k);
+    return '<path class="rv-lead" transform="translate(0 ' + y.toFixed(1) + ') scale(' + k + ')" d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/>';
   };
   var nodeHtml = function (n) {
     if (n.isRoom) {
@@ -623,7 +623,7 @@
       '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
     var tip = [p.name, ST_WORD[st], p.lead ? '👑 lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
     return '<title>' + esc(tip) + '</title>' +
-      shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + (p.lead ? leadCrown(rr) : '') + '</g>' +
+      shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + '</g>' + (p.lead ? leadCrown(rr) : '') +
       '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
   };
   // 选中 room 时只有「当前 role → 该 room」那条 (直连线则是它自己) 是 .on.sel; 该 room 的其余成员边保持普通灰, 不抢「哪条是选中的 edge」。
