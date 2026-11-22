@@ -131,6 +131,8 @@ const server = createServer((req, res) => {
     }
     // 用例想让某些成员「窗口外才发过言」: globalThis.__staleMembers = [成员 id …] (lastAt 改成 3 天前)
     if (globalThis.__staleMembers) return send("application/json", JSON.stringify({ ...ROOM, members: ROOM.members.map((m) => globalThis.__staleMembers.includes(m.id) ? { ...m, lastAt: T0 - 3 * 86400000 } : m) }));
+    // 用例要群公告: globalThis.__notice = 文字 (服务端把它放在 room 快照里)。
+    if (globalThis.__notice) return send("application/json", JSON.stringify({ ...ROOM, room: { ...ROOM.room, notice: globalThis.__notice } }));
     return send("application/json", JSON.stringify(ROOM));
   }
   if (u.pathname === "/api/wizard" && u.searchParams.get("card") === "1" && globalThis.__cardDelay) { globalThis.__cardReqs = (globalThis.__cardReqs || 0) + 1; return setTimeout(() => send0("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "", true))), globalThis.__cardDelay); }
@@ -266,24 +268,29 @@ try {
   await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });   // 回到 G 接后面的成员栏验收
   await page.waitForSelector(".rv-msg", { timeout: 5000 });
 
-  // 成员栏: 角色 / 状态 / 聪明度·最近发言 / 待交代 (可展开) / 栏头 (成员数 · host · 建于 · 待交代总数)。
+  // 成员栏: 每成员一行 (状态点 · 名字 · host / lead / 视角图标 · 待交代 · 最近发言); 人在前, wizard 按 host → 忙 → 最近发言; 头一行 = 成员 N · 待交代 M。
   const gs = await page.evaluate(() => {
     const items = [...document.querySelectorAll("#gside .gs-item")].map((it) => ({
-      nm: it.querySelector(".nm").textContent, role: (it.querySelector(".gs-host, .gs-lead, .gs-role") || {}).textContent || "",
-      st: (it.querySelector(".gs-st") || {}).textContent || "", sub: it.querySelector(".gs-sub").textContent, due: (it.querySelector(".gs-due") || {}).textContent || "",
+      nm: it.querySelector(".nm").textContent, hostTip: (it.querySelector(".gs-host") || {}).title || "", hostTxt: (it.querySelector(".gs-host") || {}).textContent || "",
+      human: !!it.querySelector(".gs-mem.human"), roleTxt: (it.querySelector(".gs-role") || {}).textContent || "",
+      st: (it.querySelector(".gs-st") || {}).title || "", stCls: (it.querySelector(".gs-st") || {}).className || "", ago: (it.querySelector(".gs-ago") || {}).textContent || "",
+      due: (it.querySelector(".gs-due") || {}).textContent || "", oneLine: it.querySelector(".gs-row").getBoundingClientRect().height < 40, grp: it.classList.contains("grp"),
     }));
-    return { items, head: document.querySelector("#gside .gs-head").textContent, meta: document.querySelector("#gside .gs-meta").textContent,
-      stCls: [...document.querySelectorAll("#gside .gs-st")].map((e) => e.className.replace(/\s+/g, " ")), openBtn: getComputedStyle(document.querySelector("#gs-open")).display };
+    return { items, head: document.querySelector("#gside .gs-head").textContent, headTip: document.querySelector("#gside .gs-hl").title,
+      noMeta: !document.querySelector("#gside .gs-meta"), openBtn: getComputedStyle(document.querySelector("#gs-open")).display, noNotice: !document.querySelector("#gs-notice") };
   });
   const by = (n) => gs.items.find((x) => x.nm === n);
-  assert.match(by("alice").role, /host/, "alice 是 host: " + JSON.stringify(gs.items));
-  assert.equal(by("bob").role, "成员"); assert.equal(by("张三").role, "人");
-  assert.equal(by("alice").st, "闲", "alice 活着没在跑 = 闲"); assert.equal(by("bob").st, "闲 · 冷", "bob 空闲且缓存冷 = 闲 · 冷"); assert.equal(by("张三").st, "", "人没有状态");
-  assert.match(gs.stCls.join("|"), /st-idle/); assert.match(gs.stCls.join("|"), /st-idle cold/, "冷是叠加在 idle 上的 class, 不再是独立的 st-stale");
-  assert.match(by("bob").sub, /分钟前发言|刚刚发言/, "最近发言: " + by("bob").sub);
-  assert.equal(by("bob").due, "待交代 1", "待交代数挂在处理人 bob 名下"); assert.equal(by("alice").due, "");
-  assert.match(gs.head, /成员\s*3/); assert.match(gs.head, /alice/, "栏头写 host");
-  assert.match(gs.meta, /建于/); assert.match(gs.meta, /待交代 1/, "栏头有待交代总数");
+  assert.deepEqual(gs.items.map((x) => x.nm), ["张三", "alice", "bob"], "排序: 人在前, wizard 里 host 在前: " + JSON.stringify(gs.items));
+  assert.ok(gs.items.every((x) => x.oneLine), "每成员默认一行: " + JSON.stringify(gs.items));
+  assert.deepEqual(gs.items.map((x) => x.grp), [false, true, false], "人与 wizard 之间一条分组线");
+  assert.equal(by("alice").hostTxt, "⭐", "host 用图标, 不写字"); assert.match(by("alice").hostTip, /host/); assert.equal(by("bob").hostTxt, "");
+  assert.ok(by("张三").human && by("张三").st === "", "人没有状态点"); assert.ok(!gs.items.some((x) => x.roleTxt === "成员"), "不再写「成员」这种默认值");
+  assert.match(by("alice").st, /空闲/, "alice 活着没在跑 = 空闲"); assert.match(by("bob").st, /空闲.*缓存已冷/, "bob 空闲且缓存冷");
+  assert.match(by("alice").stCls, /st-idle/); assert.match(by("bob").stCls, /st-idle cold/, "冷是叠加在 idle 上的 class, 不再是独立的 st-stale");
+  assert.match(by("bob").ago, /分钟前|刚刚/, "最近发言在行尾: " + by("bob").ago);
+  assert.equal(by("bob").due, "待交代 1", "待交代数挂在处理人 bob 的同一行"); assert.equal(by("alice").due, "");
+  assert.match(gs.head, /成员\s*3/); assert.match(gs.head, /待交代 1/, "栏头一行: 成员 N · 待交代 M: " + gs.head); assert.match(gs.headTip, /建于/, "建于时间进 tooltip");
+  assert.ok(gs.noMeta, "没有离开成员的 duty 时不另起 meta 行"); assert.ok(gs.noNotice, "没有群公告就不显示");
   assert.equal(gs.openBtn, "none", "宽屏不显示「成员」抽屉入口");
   assert.equal(await page.evaluate(() => !!document.querySelector("#gside .gs-duties")), false, "默认不展开");
   await page.click('#gside .gs-due');
@@ -291,6 +298,23 @@ try {
   assert.match(dt, /#3/); assert.match(dt, /alice/); assert.match(dt, /问/); assert.match(dt, /查一下配置/, "展开 = #seq · 提问者 · kind · 摘要: " + dt);
   await page.click('#gside .gs-due');
   assert.equal(await page.evaluate(() => !!document.querySelector("#gside .gs-duties")), false, "再点收起");
+
+  // 群公告: 成员栏顶部 📌 一段字, 默认最多两行 (超出省略), 点开展开全文, 再点收起; 空的不显示 (上面已断言)。
+  globalThis.__notice = "本周重点: 把成员栏重做成一行一人。".repeat(8);
+  await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });
+  await page.waitForSelector("#gside .gs-notice", { timeout: 5000 });
+  const nh = () => page.evaluate(() => { const e = document.querySelector("#gs-notice"), t = e.querySelector(".gs-nt"); return { h: e.getBoundingClientRect().height, lh: parseFloat(getComputedStyle(t).lineHeight), top: e === document.querySelector("#gside").firstElementChild, txt: e.textContent, on: e.getAttribute("aria-expanded") }; });
+  const n0 = await nh();
+  assert.ok(n0.top && n0.txt.startsWith("📌"), "公告在成员栏最上面, 以 📌 开头: " + JSON.stringify(n0));
+  assert.ok(n0.h < n0.lh * 2 + 20, "默认最多两行: " + JSON.stringify(n0));
+  await page.click("#gs-notice");
+  const n1 = await nh();
+  assert.ok(n1.h > n0.h + n0.lh && n1.on === "true", "点开展开全文: " + JSON.stringify([n0.h, n1.h]));
+  await page.click("#gs-notice");
+  assert.ok((await nh()).h <= n0.h + 1, "再点收起");
+  delete globalThis.__notice;
+  await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });
+  await page.waitForSelector("#gside .gs-item", { timeout: 5000 });
 
   // quote: 答的那条画成引用块 (发话人 + 摘要), 头部不再有「答」和裸 id; 多个 re 只画第一条, 其余收成 +N; 点击落到原消息并高亮。
   const qt = await page.evaluate(() => {
