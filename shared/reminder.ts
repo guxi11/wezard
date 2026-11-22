@@ -34,12 +34,12 @@ type Use = "M" | "C";
  *  = 在这里加一行并说清谁读它。读者在行尾。 */
 export const REMINDER_KINDS = {
   envelope: {
-    kind: "M", from: "M", scope: "M", chat: "M",      // 出处: parseEnvelope → read_chat / rolepage / mirror
+    kind: "M", from: "M", scope: "M", chat: "M",      // 出处: parseEnvelope → room_read / rolepage / mirror
     "chat-key": "M",                                  // 人话: 改名不变的群 key (mirror 恢复频道)
-    "asker-user": "M", "asker-chat": "M",              // 链头那句人话 (askerOf: 卡片落哪个群)
+    "asker-user": "M", "asker-chat": "M",              // 只读: 老转录里 peer 信封带的链头人话 (openingOf); 已无写入方
     msg: "M",                                         // 注入事件 id: 提交见证 / 轮次↔事件绑定 / serves 反查
-    event: "C",                                       // 路由行 id (仅回执 / 定时): `tell_peer({re})` 抄它
-    receipt: "M", status: "M", audience: "M",          // 回执: mirror / chat-log / regress
+    event: "M",                                       // 定时任务信封的群根行 id (老回执也带, 只读)
+    receipt: "M", status: "M",                        // 只读: 老转录里的回执信封 (mirror openingOf / rolepage 折叠标签); 已无写入方
   },
   /** 当前无信封注入承载事件 id 的标记 (见 withMsg / carriesMsg)。 */
   "message-event": { event: "M" },
@@ -159,39 +159,7 @@ export interface Envelope {
   status?: ReceiptStatus;
   /** 回执 = 刚落定的那一笔; 定时任务 = 为它开的群根行。普通 peer 通过注入事件的 durable `serves` 归属。 */
   event?: string;
-  /** 回执: 这一轮在群里的终句答给的那个人 (userid, 见 role-view.audienceOf); 认不出 = 没有。 */
-  audience?: string;
 }
-
-/** Human identity comes from inbound metadata; a private hop keeps that origin. */
-export const askerFromEnvelope = (env: Envelope): Asker | undefined => {
-  if (env.asker) return env.asker;
-  if (env.kind !== "human" || !env.from || !env.chatKey) return undefined;
-  const chat = env.chatKey;
-  return chat ? { who: `user:${env.from}`, chat } : undefined;
-};
-
-/** 回执那一轮的去向, 已渲染成给人 / 模型看的称呼 (§9.5: 去向由路由行的 receiver 边决定)。
- *  `up` = 这一轮的终句会落到另一笔同伴的欠账上 (结论回给上游 wizard); 缺省 = 只进 rolepage
- *  或落回那个群 (看 chat)。只用于信封正文措辞, 不写成属性。 */
-export interface ReceiptRoute {
-  up?: boolean; audience?: string; asker?: Asker; via?: string; pending?: number;
-  /** 收方这一轮服务的那一笔已收口 (孤儿, §4.3)。 */
-  late?: boolean;
-  /** 迟到时, 收方带 `RESULT:` 的终句作为那一笔的追述沿原路投给谁 (上游 wizard / 群的称呼); 缺省 = 无处可冒。 */
-  retellTo?: string;
-  /** 这份回执本身是追述 (对方之前已交过一份)。 */
-  retold?: boolean;
-}
-
-/** 这句话怎么接 —— 只影响派活信封的正文措辞 (挂在哪一笔上由注入事件的 `serves` 定, 不进信封)。
- *  `act`: 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
- *  `re`: 续问 (接着那一笔说)。
- *  `quiet`: 发话方不收回执 (fyi 一定是; task 带 receipt:false 也是)。 */
-export interface TurnTag { re?: boolean; legs?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
-
-const askerAttrs = (asker?: Asker): Attrs => asker
-  ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};
 
 /** 回执落成什么。done = 答了; need = 它收口成 `NEED:` 反问发话方, 不是定论; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
  *  progress = 终句带 `PROGRESS:` 的中间进展, 行不落定; timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了;
@@ -201,27 +169,11 @@ export type ReceiptStatus = "done" | "need" | "error" | "progress" | "timeout" |
 type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {
   human: (user: string, chat: string, chatKey?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
-  /** `chat` 不给 = 私聊。`chatKey` = 公开轮所在聊天的稳定 key —— 名字会被 rename 换主,
-   *  read_chat / 无参视图按它归档 (chat 只做显示); 与人话信封同一个属性。 */
-  peer: (from: string, chat?: string, asker?: Asker, chatKey?: string): EnvelopeAttrs => ({
-    wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
-    ...(chatKey ? { "chat-key": chatKey } : {}),
-    ...askerAttrs(asker),
-  }),
   /** `channel` = 实际注入频道 key: 空串表示私聊, 非空公开信封按稳定 key 归属; `event` = 定时任务对应的群根行。 */
   task: (taskId: string, channel: string, event?: string): EnvelopeAttrs => ({
     wezard: "envelope", kind: "task", from: taskId,
     ...(channel ? { scope: "public", "chat-key": channel } : { scope: "private" }),
     ...(event ? { event } : {}),
-  }),
-  /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
-   *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute, chatKey?: string): EnvelopeAttrs => ({
-    ...envelopeAttrs.peer(from, chat, route?.asker, chatKey),
-    ...(event ? { event } : {}),
-    receipt: "1",
-    status,
-    ...(route?.audience ? { audience: route.audience } : {}),
   }),
 };
 
@@ -239,7 +191,6 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
         ...(a.event && (a.receipt === "1" || a.kind === "task") ? { event: a.event } : {}),
         ...(a.msg ? { eventId: a.msg } : {}),
-        ...(a.audience ? { audience: a.audience } : {}),
       }
     : undefined;
 
