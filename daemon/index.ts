@@ -28,7 +28,7 @@ import { parsePath } from "../shared/config-meta.js";
 import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
-import { humanWakeTail, wakeTailPorts } from "./wake-tail.js";
+import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -1243,7 +1243,7 @@ const main = async (): Promise<void> => {
       replyHintWindow: () => cfg.rooms?.replyHint?.window ?? 10,
       tailOf: (target, triggers) => humanWakeTail(wakeTailPorts(cfg, m), target, triggers),
       paste: async (target, text, tail) => {
-        const r = await m.injectText(target, text, { requireIdle: true, ...(tail ? { tail } : {}) });
+        const r = await m.injectText(target, text, wakeInjectOpts(tail));
         if (r.ok) roomActivityTouch(target); // 注入成功 = 该 wizard 有新事件, 看门狗的 stale 窗口重置
         return r.ok ? "ok" : r.uncertain ? "uncertain" : r.gone ? "gone" : "failed";
       },

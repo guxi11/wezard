@@ -125,7 +125,7 @@ spawn / clone / delegate 增 `room?` (子 wizard 以 via:"spawn" 免审入群); 
 
 **一行 op:"msg" 镜像进企微 ⇔ room 绑定了传输 ∧ origin ∉ {inbound, migrate} ∧ kind ≠ trigger。**
 - 也就是说 wizard 的 say / ask / task / reply / file / join-req、daemon 的 system 行 (未交代升级、离开 canceled、额度 / 预算拒绝说明) **全部**进群, 没有受众开关、没有按作者或轮次的例外。
-- **提醒尾巴在唤醒时才挂, 不进账本**: 人话触发的唤醒, 渲染时 (room-hub `deliver` → `tailOf` → `injectText({tail})`, 实现见 `daemon/wake-tail.ts`) 才按「被唤醒的 wizard + 触发它的人话行」算管家自查 (steward hint) 与点名提示 (mention), 与名册增量 (notice) 同一道边界、pane 放行后才渲染。触发行里没有人话 (同伴 / 回执 / 定时) 不挂这两种。人话**不再带信封**: 「谁说的」= 行作者, 「在哪个群」= 唤醒头 `【label】(roomId)`; 重载后接回这一轮的出处 (mirror `openingOf`) 也读这两处 —— 人话行的 room 是绑定 room → channel = 群, dm / adhoc → 私下 (`""`); 老转录里的人话信封 (`wezard="envelope" kind="human"`) 读侧仍认。
+- **提醒尾巴在唤醒时才挂, 不进账本**: 人话触发的唤醒, 渲染时 (room-hub `deliver` → `tailOf` → `injectText({tail})`, 实现见 `daemon/wake-tail.ts`) 才按「被唤醒的 wizard + 触发它的人话行」算管家自查 (steward hint) 与点名提示 (mention), 与名册增量 (notice) 同一道边界: pane 闸放行后才渲染并记去重 (放行后贴失败 / uncertain 同名册增量, 这次的提示算用掉)。同一次渲染还给出这一轮的出处 (最后一条人话触发行: 绑定 room → channel = 群, dm / adhoc → `""`; speaker = `user:<id>`), room-hub 贴进 pane 时作 `injectText` 的 channel / speaker, 与 reload 后 `openingOf` 同规则 (后者在有「你要交代」行时只认交代点到的行)。触发行里没有人话 (同伴 / 回执 / 定时) 不挂这两种。人话**不再带信封**: 「谁说的」= 行作者, 「在哪个群」= 唤醒头 `【label】(roomId)`; 重载后接回这一轮的出处 (mirror `openingOf`) 也读这两处 —— 人话行的 room 是绑定 room → channel = 群, dm / adhoc → 私下 (`""`); 老转录里的人话信封 (`wezard="envelope" kind="human"`) 读侧仍认。
 - inbound 不回镜 (它本来就来自企微); migrate 是历史; trigger 是定时任务唤醒, 不是对人说的话。
 - 非 msg 的 op (join / leave / seen / move / name / notice) 不镜像 (公告变动由上面那条 daemon system 行镜像)。无绑定的 dm / adhoc room 一律不镜像, 只在 rolepage 可见。
 - 形态: 气泡头署作者名; 人话行带 bubble 时, **第一条 re 它的 reply** 覆盖占位气泡, 之后的作为新消息。file 行走媒体消息。

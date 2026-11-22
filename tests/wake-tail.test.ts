@@ -14,10 +14,11 @@ import { bindWizardStore, loadWizardStore } from "../daemon/wizard.js";
 import { installInboundRouter } from "../daemon/inbound.js";
 import { openRoomStore } from "../daemon/rooms.js";
 import { createRoomHub } from "../daemon/room-hub.js";
-import { humanWakeTail } from "../daemon/wake-tail.js";
+import { humanWakeTail, wakeInjectOpts } from "../daemon/wake-tail.js";
 import { noticeSuffixFor, type WakeTail } from "../daemon/notices.js";
 import { lastUserTurn, type PeerMention } from "../daemon/peers.js";
 import { turnOpening } from "../daemon/turn-opening.js";
+import { humanOpening } from "../shared/inject-view.js";
 import { DAEMON, renderMsgLine, rowText, type MsgRow, type Who } from "../shared/room.js";
 import { renderReminder, renderTail, stripLegacyTail } from "../shared/reminder.js";
 import { buildRoomFact, toRoomMsg } from "../shared/room-view.js";
@@ -126,6 +127,38 @@ assert.deepEqual(pasted[0]!.tail?.via, { human: { channel: room } }, "(b) via = 
 {
   const t = humanWakeTail({ isSteward: () => true, mentionsOf: () => [], cwdOf: () => "" }, "chat:wrG", [store.get(room)!.msgs[0]!]);
   assert.equal(t!.lead.map((p) => p(() => false).text).join("").includes('wezard="mention"'), false);
+}
+
+// ── live 路径: 人话触发的唤醒带 channel / speaker (与 reload 后 turnOpening 同规则) ──────
+{
+  const ports = { isSteward: () => false, mentionsOf: () => [], cwdOf: () => "" };
+  const row = (r: string, author: Who, id: string) => ({ ...store.get(room)!.msgs[0]!, id, room: r, author, text: "hi" }) as MsgRow;
+  // 非 home 群的人话 → channel = 该群, speaker = user:<id>
+  const grp = wakeInjectOpts(humanWakeTail(ports, "chat:wrG", [row("chat:wrOther", { kind: "human", id: "carol" }, "o.1")]));
+  assert.deepEqual([grp.requireIdle, grp.channel, grp.speaker], [true, "chat:wrOther", "user:carol"], "非 home 群人话: live 也记成那个群 + 发话人");
+  // adhoc / dm 里的人话 → 私下 ""
+  const adhoc = wakeInjectOpts(humanWakeTail(ports, "chat:wrG", [row("adhoc:abc", { kind: "human", id: "admin" }, "a.1")]));
+  assert.deepEqual([adhoc.channel, adhoc.speaker], ["", "user:admin"], "adhoc 人话: channel 空串 (私下), 不是 home");
+  // 多条触发: 取最后一条人话 (与 humanOpening 同), 夹着的同伴行不算
+  const multi = wakeInjectOpts(humanWakeTail(ports, "chat:wrG", [
+    row("chat:wrG", { kind: "human", id: "a" }, "g.1"), row("chat:wrG", { kind: "wizard", id: B }, "g.2"), row("chat:wrH", { kind: "human", id: "c" }, "h.1"),
+  ]));
+  assert.deepEqual([multi.channel, multi.speaker], ["chat:wrH", "user:c"]);
+  // 同伴触发 (无人话) → 不传 channel / speaker / tail
+  const peer = wakeInjectOpts(humanWakeTail(ports, "chat:wrG", [row("chat:wrG", { kind: "wizard", id: B }, "g.3")]));
+  assert.deepEqual(peer, { requireIdle: true }, "无人话触发: 保持现状, 什么都不传");
+  // 与 reload 读回一致: 同一段 (单人话) 唤醒文本, humanOpening 给出同样的 room / speaker
+  assert.deepEqual(humanOpening("【g】(chat:wrOther)\n[o.1] carol: hi\n你要交代: o.1 (human, 来自 carol) —— x"), { room: "chat:wrOther", speaker: "carol" });
+}
+// R2: 有「你要交代」行时只认交代点到的人话行; 点到的都不是人话 → 读不出 (同伴派活, 未读上下文里的人话不是发话人)
+{
+  const wake = "【g】(chat:wrG)\n[g.1] admin: 帮我看下\n[g.2] .b: 你也看下 .x\n你要交代: g.2 (ask, 来自 .b) —— 用 chat_reply({re, text, status}) 交代。";
+  assert.equal(humanOpening(wake), undefined, "R2: 交代的是同伴派的活, 未读上下文里的人话不算发话人");
+  // 人话行也被交代点到 (多条里取交代点到的最后一条人话)
+  const both = "【g】(chat:wrG)\n[g.1] admin: 一\n[g.2] carol: 二\n[g.3] .b: 三\n你要交代: g.1 (human, 来自 admin); g.3 (ask, 来自 .b) —— x";
+  assert.equal(humanOpening(both)?.speaker, "admin", "R2: 交代点到 g.1 (人) 与 g.3 (同伴): 取点到的人话, 不取未点到的 carol");
+  // 没有交代行 (room_watch 订阅者): 回落最后一条人话
+  assert.equal(humanOpening("【g】(chat:wrG)\n[g.1] admin: 一\n[g.2] carol: 二")?.speaker, "carol");
 }
 
 // ── (c) / (d) openingOf: 新形态读回 channel / speaker; 老信封照读 ───────────────

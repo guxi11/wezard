@@ -112,10 +112,17 @@ export const parseInjection = (raw: string): InjectBlock[] | undefined => {
   return blocks;
 };
 
-/** 一次唤醒里**最后一条人话行**: 它在哪个 room、谁说的 (userid)。没有人话行 = undefined。
+const isHumanAuthor = (author: string): boolean => !!author && !author.startsWith(".") && author !== "wezard";
+
+/** 一次唤醒里这一轮是谁在哪开的口: 取「你要交代」点到的行里**最后一条人话行** (live 路径只看触发行, 同口径);
+ *  有交代行、但点到的都不是人话 (如同伴 chat_ask 唤醒, 未读上下文里恰好有人对别人说的话) = undefined;
+ *  根本没有交代行 (room_watch 订阅者没有 duty) 才回落到全部行里最后一条人话。没有人话行 = undefined。
  *  作者认形状: 行里 wizard 写作 `.名字`、daemon 写作 `wezard`, 其余就是人 (nameOf 对人渲染 userid)。
- *  人话信封删了之后, 重载接回「这一轮是谁在哪说的」只剩这一处 —— 与 parseInjection 读同一个唤醒头 / 行头。 */
-export const humanOpening = (raw: string): { room: string; speaker: string } | undefined =>
-  (parseInjection(raw) ?? [])
-    .flatMap((b) => b.lines.filter((l) => l.author && !l.author.startsWith(".") && l.author !== "wezard").map((l) => ({ room: b.room, speaker: l.author })))
-    .at(-1);
+ *  人话信封删了之后, 重载接回这一轮的出处只剩这一处 —— 与 parseInjection 读同一个唤醒头 / 行头。 */
+export const humanOpening = (raw: string): { room: string; speaker: string } | undefined => {
+  const blocks = parseInjection(raw) ?? [];
+  const lines = blocks.flatMap((b) => b.lines.map((l) => ({ room: b.room, line: l, owed: b.owe.includes(l.id) })));
+  const pool = lines.some((x) => x.owed) ? lines.filter((x) => x.owed) : lines;
+  const hit = pool.filter((x) => isHumanAuthor(x.line.author)).at(-1);
+  return hit ? { room: hit.room, speaker: hit.line.author } : undefined;
+};

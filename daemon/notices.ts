@@ -52,7 +52,11 @@ export interface Via { human?: { channel: string } }
 
 /** 一次唤醒注入要额外挂的尾巴 (room-hub 按触发行算, injectText 在 pane 放行之后交给 noticeSuffixFor):
  *  `lead` 排在名册增量前面 (点名提示 / 管家自查), `via` 说明这次注入是从哪来的。 */
-export interface WakeTail { lead: readonly Part[]; via: Via }
+export interface WakeTail {
+  lead: readonly Part[]; via: Via;
+  /** 这一轮的出处 (最后一条人话触发行): paste 时作 injectText 的 channel / speaker, 与 reload 后 turnOpening 读回的同一条规则。 */
+  channel: string; speaker: string;
+}
 
 export interface NoticeBox {
   /** 把一条变动投给一批 wizard。自己做的事自己知道, 所以调用方负责把当事人排除在外。

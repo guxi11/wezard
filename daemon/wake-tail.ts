@@ -4,11 +4,11 @@
 // room_read / rolepage 的人话气泡里出现 `<hint>` `<roster>`, 行文本还要和 500 字预算抢位。
 // 现在账本行只存人的原话; 尾巴在**唤醒渲染** (room-hub deliver) 那一刻按「被唤醒的 wizard
 // + 触发它的人话行」现算, 经 injectText 的 `lead` 挂在这次注入末尾 (与名册增量同一道边界:
-// pane 放行之后才渲染, 点名提示的「近几次注入已给过」去重只在真贴进去时才记)。
+// pane 闸放行之后才渲染并记去重; 放行后贴失败 / uncertain 同名册增量, 这次的提示算用掉)。
 //
 // 只在**触发行里有人话**时才挂: 同伴 / 回执 / 定时那几轮不是新来的活, 也没有 `.x` 可点名。
 import type { Config } from "../shared/config.js";
-import { rowText, type MsgRow } from "../shared/room.js";
+import { isBoundRoom, rowText, type MsgRow } from "../shared/room.js";
 import { allNames } from "../shared/session-label.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
 import { chatNameOf, stewardTierOf } from "./chat-name.js";
@@ -56,12 +56,21 @@ export const humanWakeTail = (ports: WakeTailPorts, target: string, triggers: re
   const steward: Part = () => ({ text: renderStewardHint(), keys: [] });
   // rowText: 还没投递的老行 text 末尾可能带着旧尾巴 (名册 / hint 里有 `.name`), 不能当成人在点名。
   const mentions = byTarget(human.flatMap((r) => ports.mentionsOf(target, rowText(r))));
+  const last = human.at(-1)!;
   return {
     lead: [...(ports.isSteward(target) ? [steward] : []), peerMentionPart(mentions, ports.cwdOf(target))],
     // 人在哪个群说的 (账本行所在 room, 绑定 room 的 id 就是群的 base principal)。
-    via: { human: { channel: human.at(-1)!.room } },
+    via: { human: { channel: last.room } },
+    // 这一轮的出处: 与 turn-opening 读回的同一条「最后一条人话」, dm / adhoc 是私下 ""。live 路径靠它 (reload 才读 transcript)。
+    channel: isBoundRoom(last.room) ? last.room : "",
+    speaker: "user:" + last.author.id,
   };
 };
+
+/** room-hub 唤醒贴进 pane 时的 injectText 选项: 一律 requireIdle; 有人话触发行时再带上尾巴与这一轮的出处
+ *  (channel / speaker, 与 reload 后 turnOpening 同规则) —— 没有人话触发的唤醒保持缺省 (不传)。 */
+export const wakeInjectOpts = (tail: WakeTail | undefined): { requireIdle: true; tail?: WakeTail; channel?: string; speaker?: string } =>
+  ({ requireIdle: true, ...(tail ? { tail, channel: tail.channel, speaker: tail.speaker } : {}) });
 
 /** 生产接线: steward 判定 / 点名解析 / 工作区都取自守护进程的真实依赖。 */
 export const wakeTailPorts = (cfg: Config, bridge: Pick<MirrorBridge, "resolvePeerTag" | "getCwd">): WakeTailPorts => ({
