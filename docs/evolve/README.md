@@ -1,5 +1,7 @@
 # wezard 演进总纲
 
+> ⚠️ **历史文档 (2026-10, room 账本之前)**。本页描述的 `tell_peer` / `read_chat` / 回执 (receipts) / 工单 (jobs) / graph runner / `daemon/router.ts` 都已退役 (fd4715b 起, 无兼容回退)。现行沟通模型是 room 账本: 契约见 [docs/room/contract.md](../room/contract.md), 架构见仓库根 `CLAUDE.md`; 平台在做的事见 [platform-progress.md](platform-progress.md)。本页只作决策史参考, 别据此改代码或写 charter。
+
 > 牵头 `.evolve` · 2026-10-02 · 依据 `research/` 下 6 份调研 (每份的出处与证据都在原文里, 这里只留结论与取舍)
 > 路线图与批次进度见 [roadmap.md](roadmap.md)
 > 本页保留历史调研与处置建议。当前 Teams/owner plan 契约见[技术说明](../../技术说明.md#编排控制流留在发起方)，receiver 协议见 [receipt-router.md](receipt-router.md)。旧工单预算、自动回收、detached 与 graph runner 的设想已退役，不构成现行接口或兼容承诺。

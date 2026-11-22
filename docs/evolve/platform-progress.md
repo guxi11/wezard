@@ -43,7 +43,7 @@
 - [ ] 源码注释里还有 ~40 处 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` (daemon/index.ts、mirror-bridge.ts、peers.ts、shared/session-label.ts、tool-hints.ts 等), 只是注释, 不进模型; 碰到哪个文件顺手改。运行时文案里只剩 charter 两处 (待拍板 #1)。
 
 ### P2 — 模型 / 文档 / 体验
-- [ ] `docs/evolve/README.md` 与 `roadmap.md` 大段描述已退役的 receipts / jobs / tell_peer, 与现行 room 模型冲突: 加醒目的「历史文档」头, 或重写成现行路线图。
+- [x] `docs/evolve/README.md` 与 `roadmap.md` 加醒目的「历史文档」头: 列出已退役的名词, 指向 `docs/room/contract.md` / `CLAUDE.md` / 本文。没有重写 —— 它们留作决策史。
 - [ ] 开发者指南: 新加一个 MCP 工具 / 一个 room 行类型 / 一个 reminder kind 要动哪几处 (现在只能读 CLAUDE.md 长段落)。
 - [ ] 上下文成本: charter 体积、handoff 可靠性 (daemon.log: `handoff: 放弃` 15 次 / `打断后仍未静下来` 21 次, 24h 内)。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。

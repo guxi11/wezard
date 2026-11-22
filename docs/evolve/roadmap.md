@@ -1,5 +1,7 @@
 # 路线图
 
+> ⚠️ **历史文档 (2026-10, room 账本之前)**。本页描述的 `tell_peer` / `read_chat` / 回执 (receipts) / 工单 (jobs) / graph runner / `daemon/router.ts` 都已退役 (fd4715b 起, 无兼容回退)。现行沟通模型是 room 账本: 契约见 [docs/room/contract.md](../room/contract.md), 架构见仓库根 `CLAUDE.md`; 平台在做的事见 [platform-progress.md](platform-progress.md)。本页只作决策史参考, 别据此改代码或写 charter。
+
 > 牵头 `.evolve` · 总纲见 [README.md](README.md)
 > 排序原则: 先堵安全洞, 再补原语语义, 再修记忆通路, 最后收工具面; 同一批内各路改**不相交的文件**, 避免并行冲突。
 > 状态: ⬜ 未开始 · 🟡 进行中 · ✅ 已落地 (附 commit)
