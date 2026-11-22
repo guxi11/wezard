@@ -825,6 +825,22 @@ try {
   assert.equal(cold.sleepCold.dashed, true, "休眠且冷 = 白底虚线");
   assert.equal(cold.workCold.fill, "rgb(45, 164, 78)", "工作中不受冷影响 (仍是绿): " + JSON.stringify(cold.workCold));
 
+  // 聪明程度 = 多边形边数: 1 级三角 · 2 级四边 · 3 级五边 · 4 级六边 · 5 级圆; 没有 smarts = 五边形; 大小统一。
+  const polyNodes = [1, 2, 3, 4, 5, 0].map((lv, i) => mk(10 + i, "poly" + lv, lv ? { smarts: { level: lv, basis: "model", label: "x" } } : {}));
+  const polyRoom = roomFact("adhoc:poly1", "adhoc", polyNodes.map((n, i) => ({ who: who("wizard", n.uid), name: n.name, via: "invite", since: 50 + i, ord: i + 1, host: i === 0 })), who("wizard", polyNodes[0].uid));
+  globalThis.__extraRooms = [polyRoom]; globalThis.__extraNodes = polyNodes;
+  const polyPg = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+  await polyPg.addInitScript(() => localStorage.setItem("wezard.role.side", "graph"));
+  await polyPg.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+  await polyPg.waitForSelector(".rv-person", { timeout: 5000 });
+  await polyPg.waitForTimeout(300);
+  const polys = await polyPg.evaluate(() => Object.fromEntries([...document.querySelectorAll(".rv-person.wizard")].map((e) => {
+    const sh = e.querySelector(".sh");
+    return [e.querySelector(".rv-nm").textContent.trim(), sh.tagName.toLowerCase() === "polygon" ? sh.getAttribute("points").trim().split(/\s+/).length : sh.tagName.toLowerCase() === "circle" ? "circle:" + sh.getAttribute("r") : "?"];
+  })));
+  await polyPg.close(); globalThis.__extraRooms = []; globalThis.__extraNodes = [];
+  assert.deepEqual([polys.poly1, polys.poly2, polys.poly3, polys.poly4, polys.poly5, polys.poly0], [3, 4, 5, 6, "circle:10", 5], "边数 3/4/5/6/圆, 无档位 = 五边形: " + JSON.stringify(polys));
+
   // 4) 时间范围 A: 成员栏里窗口外才发过言的成员整行淡灰, 窗口内的不灰; 选「全部」后都不灰; 图不动 (同样的节点数)。
   globalThis.__staleMembers = [B];
   const pgA = await browser.newPage({ viewport: { width: 1100, height: 800 } });
