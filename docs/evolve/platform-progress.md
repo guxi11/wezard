@@ -18,7 +18,7 @@
 5. 更新本文并提交; 交差的分身 `stop_wizard`; 做成了就在群里报一句 (commit + 测试 + 遗留)。没值得做的事就回 QUIET。
 6. 仍须先问 admin 的只有: push / 发布、改 `~/.wezard/config.jsonc` / 权限 / secrets、删状态、改服务定义、群发 —— 直接在群里问。改语义的大改 (数据模型、落盘格式、删 MCP 工具、改 charter 文案) 先在 `docs/evolve/` 写方案, 再在群里讨论。charter 改动攒成一次发出 (每次都会让在跑的 wizard 用旧 charter)。
 
-## 测试基线 (2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
+## 测试基线 (2026-11-23: 123/126 —— codex-hooks / codex-session 本机无 codex, graph-layout 自 ea07e52 回归已转 wezard-1; 2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
 **117 / 119 通过** (2026-11-22 晚, PaulOwen 全量)。只剩 `codex-hooks` / `codex-session` 失败: 本机没装 `codex`, spawn ENOENT, 属环境问题。`codex-backend` 与 `wizard-stream` 已修: 两处都是断言跟不上有意的退役 (`043219c` 删 bin / claudeBin 覆盖; `762482b` 删「全部消息」all=1), 不是回归。每次改动后对照, 通过数不能减少。
 
@@ -53,7 +53,7 @@
 - [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
-- [ ] **进行中 (PaulNash, standard, ff5b6489.1)**: idle 回收 ↔ 唤醒重生死循环。实据: BobZane (lisct-remote) 自 11-23 00 点起每 5 分钟 reap → 29s 后唤醒泵重生 → 注入没落地 (输入框空, 游标停在 1, 待投 c087ad9f.2/.4) → 下轮 sweep 又 reap; 每小时白起 12 次 claude。疑 `e89db20` 改按 transcript 最后记录判活跃, 重生不写记录 → 立刻判闲。要: 查注入为何没落地; reap 并入本进程 spawn/attach 时刻 (或跳过有待投唤醒的 pane); 单测; 线上观察 ≥10 分钟。
+- [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `20764ff`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
 
 ## 待 admin 拍板
@@ -98,6 +98,7 @@
 | 2026-11-23 | `for` 血缘缺省由 daemon 填 (hub `defaultFor`: 本轮唤醒且仍持有的唯一 duty; `/room/ask`、delegate、spawn/clone 出生派活三处) + 逾期计入跨 room 子孙件活动 (`buildDescendantActivity`, 深度 ≤5, 子件 done 重新计时)。修 wezard-1 派 lead 做 .399 后被误催 (.413) / 给 admin 误报 (.414)。LeoJones (standard); 我核 diff、重跑 9 个相关测试 + typecheck | `1e9aef0` |
 | 2026-11-23 | plan 闲时提醒抑制: owner 作为 asker 派出、带该 planId 未关的 duty 也算欠账 (`planHasOpenDuty` 纯函数 + `tests/plan-debt.test.ts`)。起因 FrankDavis 等交代时每改一次 revision 被提醒一次 (5 次), wezard-1 报。MayaKing (light); 我核 diff、重跑 plan-debt / room-overdue / room-hub + typecheck | `8f8e8ae` |
 | 2026-11-23 | 反问后原 duty 易被遗忘: hub `render` 的「你要交代」追加「我持有、last=need、提问人就是本批触发行作者」的 duty, 带「你反问过, 对方的答复可能就在上面」标注; `inject-view` 的 owe id 抽取对标注兼容 (按 `;` / ` (` 切)。OliveMiller (light); 我核 diff、重跑 7 个相关测试 + typecheck | `fdf3f96` |
+| 2026-11-23 | idle 回收 ↔ 唤醒重生死循环: BobZane 自 00 点起每 5 分钟 reap → 重生 → 注入没落地 → 再 reap (每小时白起 12 次 claude)。两个缺陷叠加: ① `e89db20` 后 reap 只信 transcript 末条记录, resume 的 pane 不写记录 → 刚生即判闲; ② 上个进程被杀时遗留的悬空 tool_use 被 `idleVerdict` 当成「停在审批卡」, requireIdle 永不过。修: `lastActiveOf` 并入 pane 出生时刻 (ps etime); reap veto「wake owed」; `openToolUses(jsonl, sinceMs)` 只数本 CLI 进程启动后的调用。线上 12 分钟 reaped:0, 积压 4.8h 的唤醒投进去。PaulNash (standard); 我核 diff、全量测试 123/126 (codex 两个本机无 codex; graph-layout 是 `ea07e52` 的回归, 已二分并转 wezard-1 d6977146.23) | `20764ff` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
