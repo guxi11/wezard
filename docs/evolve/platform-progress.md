@@ -61,8 +61,6 @@
 
 ## 进行中
 
-- **人也有 duty** (admin 7aeb85fc.300) → `HenryGreen` (standard), 11937e21.1, `after` 13cc3d30.1: wizard 对人 need / chat_ask 点名人 → 人名下开 duty; 人下一句话关账 (有引用只关被引用的) 并唤醒提问的 wizard (修: 现在没点名的人话只叫醒 host); 人名下 duty 只做 group 级逾期; wizard 在等人时不计逾期。
-- admin 的 7aeb85fc.300 回了 progress, HenryGreen 交差后 done。
 - 常驻 duty d6977146.1 已 passed 关掉 (admin 授权直接在群里汇报; 否则逾期提醒会每 2h 误报它)。
 
 ## 已完成
@@ -82,6 +80,7 @@
 | 2026-11-22 | duty 逾期提醒 (AliceZane `cc80495`), 白板 DavidClark 审出 3 一般 + 若干小, 修于 `f80c80c`: group 等 remind 被读到才报、remind 不受唤醒预算、每 duty 失败隔离、按 holder 计时去重、move 算活动、跳过无主 duty。遗留: 失败隔离断言偏弱; host 换人后行为无专测; 首轮旧 `sys:"overdue-group"` 行不再算已给 (重启后实测未重报) | `cc80495` `f80c80c` |
 | 2026-11-22 | 群公告后端 (FrankEvans): 账本 `NoticeOp` + `judgeNotice` (≤500 字, host / 人可改)、`room_name({notice})`、人用 `/notice` (设/看/clear)、改动发「📌 群公告」系统行 + notices.ts 提示、charter「本群公告」节、/api 带 `notice`、room_read 头部。遗留: 同文本 10 分钟内设→清→再设第二条系统行被去重吞; 无账本的新群 `/notice` 回「没有这个 room」; 企微镜像 / `/notice` / 在跑 wizard 提示未在线上实测 | `ca5dbe4` |
 | 2026-11-22 | 成员栏一人一行 + 栏顶群公告 (BobAdams): 状态点·名字·👁/⭐/👑·待交代·最近发言, 次要信息进 tooltip, 人在前, 头一行。admin 7aeb85fc.291 / .299 已 done。遗留: 长名与待交代挤; 公告未线上实测 | `b40388d` |
+| 2026-11-22 | 人也有 duty (HenryGreen): wizard 对人 need / chat_ask 点名人 → 人名下开 duty (kind `need` / ask / task); 人下一句话关账 (引用对回账本行, 对不上则全关) 并把提问 wizard 补进 `to` 唤醒; 人名下只做 group 级逾期, wizard 等人时不计逾期; 成员栏「反问」。admin 7aeb85fc.300 done。遗留: 同一条连 need 两次开两条; 提问 wizard 离开后它开在人名下的账不取消 | `6dc15c5` `00a3961` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
