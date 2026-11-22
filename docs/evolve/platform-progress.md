@@ -38,7 +38,8 @@
 - [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
 - [ ] svr 重启后名册缺席 30~70s: daemon 应在 svr 上线时立即补推 `WorldFacts`。
 - [ ] lead 标记 (`WizardRecord.lead`) 写入后从不清除。
-- [ ] `/help` 文案陈旧。
+- [x] `/help` 文案陈旧: 协作一节去掉回执 / 工单 / 循环流水线, 改成 room 口径; 改名权限 lead→parent (与 `wizard_identity` 描述一致)。(本轮)
+- [ ] 源码注释里还有 ~40 处 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` (daemon/index.ts、mirror-bridge.ts、peers.ts、shared/session-label.ts、tool-hints.ts 等), 只是注释, 不进模型; 碰到哪个文件顺手改。运行时文案里只剩 charter 两处 (待拍板 #1)。
 
 ### P2 — 模型 / 文档 / 体验
 - [ ] `docs/evolve/README.md` 与 `roadmap.md` 大段描述已退役的 receipts / jobs / tell_peer, 与现行 room 模型冲突: 加醒目的「历史文档」头, 或重写成现行路线图。
@@ -65,6 +66,7 @@
 | 2026-11-22 | room_invite/room_approve `history` 参数 (none/N/from:id/all); dm 显示统一 (多人列全员); ensureDmRoom 补回 / 混入第三人改落 {A,B} adhoc。coder QuinnQuincy, 白板 reviewer RoseReed 通过。遗留: join-req 路径不校验 history; rejoin 不写 seen 未细查; 多个 {A,B} adhoc 取最近活动会合流 | `d986e7a` |
 | 2026-11-22 | `daemon/peers.ts` 删回执时代死代码 ~260 行 (我自己做: 活着的 wizard 已 4 个, 不起新人) | 见 git log |
 | 2026-11-22 | room hub: 投给已结束 wizard 的 duty 不再静默丢失 (`gone` → `undelivered` 系统行给提问者; 其他失败打 warn)。起因: IrisIrwin 被 /kill 后两次派活都没投进去 | 见 git log |
+| 2026-11-22 | `/help` 协作一节改成 room 口径; `wizard.ts` 身份注释去 `tell_peer` | 见 git log |
 | 2026-11-22 | 删 `shared/turn-state.ts` 与恒空的 `WorldFacts.inflight` / `routeReceiptDutiesOf` / `WizardBrief.turns` (-64 行); 顺带发现 delegate 的占用 veto 恒空 (登记 P1) | 见 git log |
 | 2026-11-22 | 测试基线 109→111 / 113: `codex-backend` (bin 覆盖已退役) 与 `wizard-stream` W-2 (all=1 已退役) 改断言现行行为 | 见 git log |
 

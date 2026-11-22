@@ -606,7 +606,7 @@ export const backfillBorn = (store: WizardStore, bornOf: BornOf): WizardRecord[]
 export const BOOT_ID = randomUUID();
 
 /** 收掉生到一半就断了的身份: `spawning` 留着别的进程的代号 —— 已经绑上会话的只清
- *  标记, 没绑上的 (名字被占、tell_peer / stop_wizard 都够不着) 整条删掉。返回删掉的。 */
+ *  标记, 没绑上的 (名字被占、chat_ask / stop_wizard 都够不着) 整条删掉。返回删掉的。 */
 export const sweepUnborn = (
   store: WizardStore,
   isBound: (target: string) => boolean,
@@ -633,9 +633,9 @@ export const ancestorsOf = (all: readonly WizardRecord[], target: string): strin
 const bullet = (xs: readonly string[]): string => xs.map((x) => `- ${x}`).join("\n");
 
 export interface WizardBrief {
-  /** 全局唯一的名字 —— 同时就是地址 (tell_peer 的 name 入参; wizard 之间与 rolepage 显示就是它, 人面气泡头带 🧙‍♂️)。 */
+  /** 全局唯一的名字 —— 同时就是地址 (chat_ask 的 to / 各工具的 name 入参; wizard 之间与 rolepage 显示就是它, 人面气泡头带 🧙‍♂️)。 */
   name: string;
-  /** 别人叫得到它的字符串 (tell_peer 的 `name` 入参), 即名字本身。 */
+  /** 别人叫得到它的字符串 (chat_ask 的 `to` 等入参), 即名字本身。 */
   address: string;
   description: string;
   /** 专长 (WizardRecord.expertise); 缺省 = 没写。 */
