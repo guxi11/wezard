@@ -365,7 +365,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Ask a wizard in a room (opens a duty)",
       description:
-        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它; 也可点名本 room 的人 (`human:<userid>`) 向人提问 —— 人名下的 duty 不用 chat_reply, 人在本 room 的下一句话就关账 (带企微引用只关被引用的那条) 并唤醒你, 不需要了就对那条 id chat_reply canceled / passed。对方 wizard 只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 → 400, 先 room_open。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答。",
+        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它; 也可点名本 room 的人 (`human:<userid>`) 向人提问 —— 人名下的 duty 不用 chat_reply, 人在本 room 的下一句话就关账 (带企微引用只关被引用的那条) 并唤醒你, 不需要了就对那条 id chat_reply canceled / passed。对方 wizard 只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 wizard → 按成员集合 {你 + 它们} 复用或新开一个 adhoc (你是 host, 不会把它们拉进缺省群; 这条分支里 `interrupt` 只给被点名者的直属 parent); `to` 里含人且不全在缺省 room → 400, 要先在同一个 room。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答。",
       inputSchema: currentAddressSchema({
         room: z.string().optional().describe(ROOM_DOC),
         to: z.union([z.string(), z.array(z.string())]).describe(TO_DOC),

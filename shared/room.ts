@@ -700,10 +700,17 @@ export const planDm = (s: RoomState | undefined, a: string, b: string): DmPlan =
   return missing.length ? { kind: "rejoin", missing } : { kind: "use" };
 };
 
-/** 在 adhoc room 里找当前成员恰好是 {a, b} 的那个; 多个取最近活动 (最后一条消息, 无则 open) 的。 */
-export const findPairAdhoc = (states: readonly RoomState[], a: string, b: string): string | undefined =>
-  states
-    .filter((s) => s.id.startsWith("adhoc:") && s.members.size === 2
-      && s.members.has(whoKey({ kind: "wizard", id: a })) && s.members.has(whoKey({ kind: "wizard", id: b })))
+/** 在 adhoc room 里找当前成员恰好等于 uids (wizard uid 集合, 顺序无关) 的那个; 多个取最近活动 (最后一条消息, 无则 open) 的。 */
+export const findSetAdhoc = (states: readonly RoomState[], uids: readonly string[]): string | undefined => {
+  const want = new Set(uids.map((u) => whoKey({ kind: "wizard", id: u })));
+  return states
+    .filter((s) => s.id.startsWith("adhoc:") && s.members.size === want.size && [...want].every((k) => s.members.has(k)))
     .map((s) => ({ id: s.id, at: s.msgs.length ? s.msgs[s.msgs.length - 1]!.at : s.openedAt ?? 0 }))
     .sort((x, y) => y.at - x.at)[0]?.id;
+};
+/** 两人的特例。 */
+export const findPairAdhoc = (states: readonly RoomState[], a: string, b: string): string | undefined => findSetAdhoc(states, [a, b]);
+
+/** parent 是不是 child 的直属 parent (judge ⑥ interrupt 限权的判据; hub 与自动 adhoc 落点共用)。 */
+export const isDirectParent = (parentUidOf: (childUid: string) => string | undefined, parent: Who, child: Who): boolean =>
+  parent.kind === "wizard" && child.kind === "wizard" && parentUidOf(child.id) === parent.id;

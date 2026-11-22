@@ -52,6 +52,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
+import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
   DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeNotice, leaveOps, dutiesHeldBy, planDm, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
@@ -1389,7 +1390,7 @@ const main = async (): Promise<void> => {
       return id;
     };
     /** 缺省 room + to 落点 (brief D-1): to 全在缺省 room → 它; 单个非成员 → dm; 多个有非成员 → 400。 */
-    const roomTargetOf = (me: Who, to: Who[] | undefined, ref: string | undefined): { room?: string; error?: string; status?: number; reason?: string } => {
+    const roomTargetOf = (me: Who, to: Who[] | undefined, ref: string | undefined, opts: { autoAdhoc?: { interrupt: boolean } } = {}): { room?: string; error?: string; status?: number; reason?: string } => {
       if (ref?.trim()) return roomResolve(ref);
       const d = hub.defaultRoom(me.id);
       if (to?.length) {
@@ -1398,6 +1399,15 @@ const main = async (): Promise<void> => {
           if (s && to.every((t) => s.members.has(whoKey(t)))) return { room: d.room };
         }
         if (to.length === 1 && to[0]!.kind === "wizard") return { room: ensureDmRoom(me.id, to[0]!.id) };
+        // 仅 chat_ask: 多个群外 wizard → 按成员集合复用 / 新开 adhoc (不 invite 进缺省群; interrupt 限权见 room-auto-adhoc.ts)。
+        if (opts.autoAdhoc && to.length >= 2) {
+          const r = autoAdhocTarget({
+            states: () => roomStore.ids().map(roomState).filter((x): x is RoomState => !!x),
+            open: (m0, others) => openAdhoc(m0, others),
+            parentUidOf: (u) => roomWizardOf(u)?.parentUid,
+          }, me, to, opts.autoAdhoc.interrupt);
+          return "room" in r ? { room: r.room } : r;
+        }
         return { status: 400, reason: "多个 to 里有缺省 room 之外的人 — 先 room_open / room_invite, 或显式给 room" };
       }
       if (d.room) return { room: d.room };
@@ -1451,7 +1461,7 @@ const main = async (): Promise<void> => {
       const to = whosOf(b.to ?? []);
       if (to.error) { json(res, 400, { ok: false, reason: to.error }); return; }
       if (!to.who?.length) { json(res, 400, { ok: false, reason: "to required: 至少点名一个 wizard (或本 room 的人 human:<userid>)" }); return; }
-      const target = roomTargetOf(me, to.who, b.room);
+      const target = roomTargetOf(me, to.who, b.room, { autoAdhoc: { interrupt: !!b.interrupt } });
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       const after = idList(b.after);
       roomReply(res, hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,

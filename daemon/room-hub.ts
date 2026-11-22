@@ -16,6 +16,7 @@ import type { Logger } from "pino";
 import {
   DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
   renderMsgLine, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
+  isDirectParent,
 } from "../shared/room.js";
 import type { RoomStore } from "./rooms.js";
 import { sleep } from "../shared/std.js";
@@ -81,7 +82,7 @@ export const createRoomHub = (p: HubPorts) => {
     if (!s) return { ok: false, status: 400, reason: "没有这个 room: " + room };
     const v = judge(s, d, {
       now: now(),
-      isParent: (parent, child) => parent.kind === "wizard" && child.kind === "wizard" && p.wizardOf(child.id)?.parentUid === parent.id,
+      isParent: (parent, child) => isDirectParent((u) => p.wizardOf(u)?.parentUid, parent, child),
       closedDone: (msg) => closedDoneAnywhere(msg),
       ...extra,
     });

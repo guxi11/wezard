@@ -1015,7 +1015,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
       '保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light。真正依赖原排障证据的纠正才交回原 lead',
       '范围清楚、低风险的 coding → `delegate({tier:"light", task, description})`; 机械一步用 mini。你负责写计划与验收标准并验收交付; task 写人的原话 + 你知道的背景。守护进程选人并把它投成一条 chat_ask —— 选中的 wizard 收到 duty, 只能用 chat_reply 交代',
       '难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: 指明具体代码对象的普通低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 `tier:"hard"`; 多轮统筹才 lead:true (lead 那档就是 hard)。常规 coding 不默认增加 hard reviewer',
-      '**多步的活默认开一个跟进 room** (`room_open({with:[…]})`, 或对单个非成员 `chat_ask` 时自动落的 dm): 过程、中间产物、返修都关在里面, 主 room 只留结论。只有需要人和执行者直接对话时, 才把人拉进主 room',
+      '**多步的活默认开一个跟进 room** (`room_open({with:[…]})`, 或对一个 / 多个非成员 wizard `chat_ask` 时自动落的 dm / adhoc): 过程、中间产物、返修都关在里面, 主 room 只留结论。只有需要人和执行者直接对话时, 才把人拉进主 room',
       '复杂活 (多处改动、多轮、有先后或要共享材料) → `delegate({…, lead:true})`; lead 建 plan 并逐阶段推进, 简单问题不建 plan。',
       'delegate 选的人默认照办, 只在看得出它错时推翻: 人明确指定执行者或你能说明必需的上下文连续性 → `to`; 同一任务续篇用 `chat_ask` 的 `for` 指回原活; 只是字面沾边 → `spawn:true`; 真要依赖冷的大 ctx wizard → `to` + `force:true`; 档位不对 → `tier`; 想看证据 → `route_candidates`。to/force 不是给已有 lead 追加独立小活的捷径',
       'lead 接手后你只和它在一个 room 里说话, 实施期间不插手、不越级; 复杂任务的进度由它维护 plan',
@@ -1117,7 +1117,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "标签外另有发话人自己的话时, 才按「他的话 + 他贴来的资料」读。",
     "",
     "## room 是唯一的沟通对象",
-    "企微群 / 单聊 / topic 帖是绑定了传输的 room; 你和某个 wizard 的两人对话是不绑定的 dm room; 3 人以上临时起的是 adhoc (只能 room_open 开)。人和 wizard 说进同一份账本, 你的话也写进去 —— 没有第二条通道。",
+    "企微群 / 单聊 / topic 帖是绑定了传输的 room; 你和某个 wizard 的两人对话是不绑定的 dm room; 3 人以上临时起的是 adhoc (`room_open` 开, 或对多个非成员 wizard `chat_ask` 时自动落)。人和 wizard 说进同一份账本, 你的话也写进去 —— 没有第二条通道。",
     bullet([
       "**终句没有任何路由语义**: 它只进你这一轮的记录与 rolepage, 不进任何 room、不关任何 duty、谁也不会收到。要谁看见, 就写成一行",
       "**完成只认 chat_reply 的 status**: done / passed / canceled 关账, need / progress 不关; 只有这条 duty 的处理人 (或人) 能写",
@@ -1133,7 +1133,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "**控制流在你手里** —— 没有别的调度器替你跑: 你自己分路、派活、收交代、汇总。一组「共享同一批材料」的任务:",
     bullet([
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",
-      "**多步的活默认开一个跟进 room** (`room_open({with:[…]})`, 或对单个非成员 `chat_ask` 时自动落的 dm): 过程、中间产物、返修都关在里面, 主 room 只留结论。只有需要人和执行者直接对话时, 才把人拉进主 room",
+      "**多步的活默认开一个跟进 room** (`room_open({with:[…]})`, 或对一个 / 多个非成员 wizard `chat_ask` 时自动落的 dm / adhoc): 过程、中间产物、返修都关在里面, 主 room 只留结论。只有需要人和执行者直接对话时, 才把人拉进主 room",
       "复杂任务先 `plan_create`，只创建当前阶段需要的 wizard；owner 收到交代、思考并验收后显式更新 plan，再推进下一阶段",
       "**派完就放手**: 不守着、不轮询 `peek_peer`, 不提前合并或宣告完成; 它的 chat_reply 会唤醒你。长等待或阻塞可按已知实据 `notify` / `chat_say` 报一句进展",
       "按对方 chat_reply 的 `status` 处理: `need` = 它在反问 (把要的信息补给它, 或另开一条 chat_ask) · `progress` = 中间进展, 账还开着 · `done` / `passed` / `canceled` = 这笔关了: 该换人的换人, 或在汇总里如实写缺了它",

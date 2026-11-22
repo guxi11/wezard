@@ -9,7 +9,7 @@
 |---|---|---|
 | 绑定传输 (企微群 / 企微单聊 / topic 帖 / 微信) | **= 现有 base principal 原样** (含 `~bot` 后缀) | `chat:wrkSF…` · `user:T0388…` · `chat:wrkSF…~b2` |
 | wizard 两人 (无绑定) | `dm:` + 两个实例的**稳定身份 uid** 字典序 `|` 拼接 —— 同一对唯一、复用 | `dm:w3f9a0c12e4b7|w8d21be07aa95` |
-| 3 人以上临时 (无绑定) | `adhoc:` + 8 位随机 hex, 只能 room_open 显式开, 不复用 | `adhoc:9f3c01ab` |
+| 3 人以上临时 (无绑定) | `adhoc:` + 8 位随机 hex, room_open 显式开, 或 chat_ask 点名多个群外 wizard 时按成员集合复用 / 新开 | `adhoc:9f3c01ab` |
 
 - 绑定 room 沿用 base principal: 与 chatPolicy / chat-name / members.json / chat-records 同一键空间, 迁移零换键; 聊天名照样能当 room 参数。
 - **room id 与显示名彻底解耦 (硬约束)**: 现有 target / identity 键都带名字 tag (`chat:wr…#LeoAdams`), 不能进 room id。新增实例字段 `uid` (wizards.json, 不含名字, 一旦写入永不改):
