@@ -95,6 +95,7 @@
 | 2026-11-22 | 测试: 默认 MCP 工具 ⊆ charter 名册, 带防腐烂豁免表 (WendyVance, light)。探出缺口 `wecom_doc_*` 两个, 留给下次 charter 攒批 | `c226798` |
 | 2026-11-22 | admin 7aeb85fc.378: 删企微文档 MCP 桥 (两工具 / `/wedoc/*` / `daemon/wedoc.ts`, -487 行, CHANGELOG BREAKING; YaraXu); 关系图「缓存冷」图例改名 + 冷节点淡灰细描边, 成员栏同源 (AliceYoung, 截图核对) | `d6b831b` `b38ab70` |
 | 2026-11-23 | `for` 血缘缺省由 daemon 填 (hub `defaultFor`: 本轮唤醒且仍持有的唯一 duty; `/room/ask`、delegate、spawn/clone 出生派活三处) + 逾期计入跨 room 子孙件活动 (`buildDescendantActivity`, 深度 ≤5, 子件 done 重新计时)。修 wezard-1 派 lead 做 .399 后被误催 (.413) / 给 admin 误报 (.414)。LeoJones (standard); 我核 diff、重跑 9 个相关测试 + typecheck | `1e9aef0` |
+| 2026-11-23 | plan 闲时提醒抑制: owner 作为 asker 派出、带该 planId 未关的 duty 也算欠账 (`planHasOpenDuty` 纯函数 + `tests/plan-debt.test.ts`)。起因 FrankDavis 等交代时每改一次 revision 被提醒一次 (5 次), wezard-1 报。MayaKing (light); 我核 diff、重跑 plan-debt / room-overdue / room-hub + typecheck | `8f8e8ae` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
