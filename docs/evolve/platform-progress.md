@@ -53,6 +53,7 @@
 - [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
+- [ ] **进行中 (PaulNash, standard, ff5b6489.1)**: idle 回收 ↔ 唤醒重生死循环。实据: BobZane (lisct-remote) 自 11-23 00 点起每 5 分钟 reap → 29s 后唤醒泵重生 → 注入没落地 (输入框空, 游标停在 1, 待投 c087ad9f.2/.4) → 下轮 sweep 又 reap; 每小时白起 12 次 claude。疑 `e89db20` 改按 transcript 最后记录判活跃, 重生不写记录 → 立刻判闲。要: 查注入为何没落地; reap 并入本进程 spawn/attach 时刻 (或跳过有待投唤醒的 pane); 单测; 线上观察 ≥10 分钟。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
 
 ## 待 admin 拍板
