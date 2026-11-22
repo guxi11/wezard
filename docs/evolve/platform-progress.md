@@ -47,7 +47,7 @@
 - [x] 开发者指南 [`docs/dev-guide.md`](../dev-guide.md) (RoseQuincy `afb1743` `06bd575`): 加 MCP 工具 / room 行类型 / reminder kind 各动哪几处 + vm 沙箱截取锚点表。顺带对齐 CLAUDE.md (reminder kind 现状、room 唤醒不挂信封而是 `【label】(roomId)` 头、`daemonPost` 每个 POST 都带 selfRef)、contract.md §2/§6、过时注释。
 - [x] `tests/charter.test.ts` 断言默认注册的 MCP 工具都在 charter 名册里 (`c226798`, WendyVance): 合写 `plan_create/get/list/update` 展开比对; 豁免表 `charterExempt` 名字失效也报错。
 - [x] ~~下次 charter 攒批: `wecom_doc_*` 要不要进 charter~~ admin 定直接删 (企微文档走官方 skill, admin 另外跟进 skill 安装): `d6b831b` (YaraXu)。
-- [ ] **进行中 (OliveMiller, light, 63e4980b.1)**: **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): wizard 对人话 `need` → 人另发一条新消息作答 (不引用) → 唤醒头的「你要交代」只列新那条, 原 duty 仍开在 wizard 名下, 60 分钟后被逾期提醒。可考虑: 人答 need 唤醒时, 「你要交代」把该 wizard 对这个人仍开着、回过 need 的 duty 一并列出。改的是唤醒文案, 不动账本。 FrankDavis plan 已收尾 (.421), 2026-11-23 派出: hub `render` 的 owe 追加「我持有、last=need、asker 是本批触发行作者」的 duty, 带标注。
+- [x] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): 人另发新话作答时「你要交代」一并列出原 duty 并标注 (OliveMiller, `fdf3f96`, 见已完成表)。遗留: 只是提示, 仍要模型自己关; `defaultFor` 有意不认它 (否则 for 变多条而留空)。
 - [x] `for` 血缘缺省 + 逾期计入子件活动 (LeoJones, `1e9aef0`, 见已完成表)。遗留: 同轮被多条 duty 唤醒时 `for` 留空不猜 (仍可能误报, 要治得派活工具显式传); 老账本无 `for` 的子件不回溯。
 - [x] 小清理: `daemon/room-overdue.ts` 未用的 `holderOf` import 已删。
 - [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
@@ -96,6 +96,7 @@
 | 2026-11-22 | admin 7aeb85fc.378: 删企微文档 MCP 桥 (两工具 / `/wedoc/*` / `daemon/wedoc.ts`, -487 行, CHANGELOG BREAKING; YaraXu); 关系图「缓存冷」图例改名 + 冷节点淡灰细描边, 成员栏同源 (AliceYoung, 截图核对) | `d6b831b` `b38ab70` |
 | 2026-11-23 | `for` 血缘缺省由 daemon 填 (hub `defaultFor`: 本轮唤醒且仍持有的唯一 duty; `/room/ask`、delegate、spawn/clone 出生派活三处) + 逾期计入跨 room 子孙件活动 (`buildDescendantActivity`, 深度 ≤5, 子件 done 重新计时)。修 wezard-1 派 lead 做 .399 后被误催 (.413) / 给 admin 误报 (.414)。LeoJones (standard); 我核 diff、重跑 9 个相关测试 + typecheck | `1e9aef0` |
 | 2026-11-23 | plan 闲时提醒抑制: owner 作为 asker 派出、带该 planId 未关的 duty 也算欠账 (`planHasOpenDuty` 纯函数 + `tests/plan-debt.test.ts`)。起因 FrankDavis 等交代时每改一次 revision 被提醒一次 (5 次), wezard-1 报。MayaKing (light); 我核 diff、重跑 plan-debt / room-overdue / room-hub + typecheck | `8f8e8ae` |
+| 2026-11-23 | 反问后原 duty 易被遗忘: hub `render` 的「你要交代」追加「我持有、last=need、提问人就是本批触发行作者」的 duty, 带「你反问过, 对方的答复可能就在上面」标注; `inject-view` 的 owe id 抽取对标注兼容 (按 `;` / ` (` 切)。OliveMiller (light); 我核 diff、重跑 7 个相关测试 + typecheck | `fdf3f96` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
