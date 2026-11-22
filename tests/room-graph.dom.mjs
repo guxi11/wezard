@@ -726,6 +726,7 @@ try {
     await pg.waitForTimeout(300);
     const read = await pg.evaluate(() => ({
       rooms: [...document.querySelectorAll(".rv-room")].map((n) => n.querySelector("text").textContent.trim()),
+      roomIds: [...document.querySelectorAll(".rv-room")].map((n) => n.getAttribute("data-room")),
       people: [...document.querySelectorAll(".rv-person .rv-nm")].map((t) => t.textContent.trim()).sort(),
       direct: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
       // 每个 wizard 节点的实际填充 / 描边虚线 (computed): 冷 = 白底, 休眠且冷 = 白底虚线
@@ -799,6 +800,16 @@ try {
   await pgA.waitForFunction(() => document.querySelectorAll("#gside .gs-item.out").length === 0, null, { timeout: 5000 });
   await pgA.close();
   globalThis.__staleMembers = undefined;
+
+  // 5) 时间范围 B: 窗口外但视角 (alice) 有未读的 room 算在范围内; 视角不是成员的 room 即使服务端数出了「未读」也不算。
+  const mem3 = (ids) => ids.map((id, i) => ({ who: who("wizard", id), name: "m" + i, via: "invite", since: 50 + i, ord: i + 1, host: i === 0 }));
+  const unreadMine = { ...roomFact("adhoc:unmine", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), unread: 2 };
+  const unreadNot = { ...roomFact("adhoc:unnot", "adhoc", mem3([B, C, LEO]), who("wizard", B), oldAt), unread: 5 };
+  const quietOld = { ...roomFact("adhoc:quiet", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), unread: 0 };
+  const unr = await graphOf({ rooms: [unreadMine, unreadNot, quietOld], nodes: [leoNode] });
+  assert.ok(unr.roomIds.includes("adhoc:unmine"), "窗口外、视角 alice 是成员且有未读 → 在范围内: " + JSON.stringify(unr));
+  assert.ok(!unr.roomIds.includes("adhoc:unnot"), "视角不是成员 (服务端把整本账数成未读) → 不算: " + JSON.stringify(unr));
+  assert.ok(!unr.roomIds.includes("adhoc:quiet"), "窗口外、没未读 → 仍不在范围内: " + JSON.stringify(unr));
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
