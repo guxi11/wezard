@@ -317,3 +317,12 @@ export const lastSaidAt = (s: RoomState): Map<string, number> =>
 
 /** room 的创建时刻: open 行的时刻, 老账本没有就取第一行 msg。 */
 export const roomCreatedAt = (s: RoomState): number => s.openedAt ?? s.msgs[0]?.at ?? 0;
+/** plan 闲时提醒的抑制判据: 该 wizard 在任一 room 里「持有」或「作为 asker 派出」一条带此 planId 的未关 duty (join-req 不算)。
+ *  只看持有会让 lead 派完活等交代时每次 plan 改 revision 都被提醒。 */
+export const planHasOpenDuty = (states: Iterable<RoomState>, planId: string, uid: string): boolean => {
+  const me: Who = { kind: "wizard", id: uid };
+  for (const s of states) {
+    if (openDuties(s).some((d) => d.kind !== "join-req" && d.planId === planId && (sameWho(holderOf(s, d), me) || sameWho(d.asker, me)))) return true;
+  }
+  return false;
+};

@@ -127,7 +127,7 @@ import { registerPlanRoutes } from "./plan-http.js";
 import { renderReminder } from "../shared/reminder.js";
 import { busyOf, createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, wakeCostOf, decide, occupies, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
-import { parseWhen, renderRoomRead } from "../shared/room-view.js";
+import { parseWhen, planHasOpenDuty, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle } from "./wait-idle.js";
 import { applyOnboarding, bindSteward, guideHandoffOps, guideOf, guideRefusal, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
@@ -972,10 +972,7 @@ const main = async (): Promise<void> => {
     const planHasOutstandingDebt = (planId: string, owner: string): boolean => {
       const uid = wizards.get(owner)?.uid;
       if (!uid) return false;
-      return roomStore.ids().some((id) => {
-        const s = roomState(id);
-        return !!s && openDuties(s).some((d) => d.planId === planId && sameWho(holderOf(s, d), { kind: "wizard", id: uid }));
-      });
+      return planHasOpenDuty(roomStore.ids().flatMap((id) => roomState(id) ?? []), planId, uid);
     };
     void m.restored.then(() => {
       stopPlanReminders = startPlanReminders({
