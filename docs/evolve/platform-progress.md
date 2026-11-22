@@ -82,6 +82,7 @@
 | 2026-11-22 | 成员栏一人一行 + 栏顶群公告 (BobAdams): 状态点·名字·👁/⭐/👑·待交代·最近发言, 次要信息进 tooltip, 人在前, 头一行。admin 7aeb85fc.291 / .299 已 done。遗留: 长名与待交代挤; 公告未线上实测 | `b40388d` |
 | 2026-11-22 | 人也有 duty (HenryGreen): wizard 对人 need / chat_ask 点名人 → 人名下开 duty (kind `need` / ask / task); 人下一句话关账 (引用对回账本行, 对不上则全关) 并把提问 wizard 补进 `to` 唤醒; 人名下只做 group 级逾期, wizard 等人时不计逾期; 成员栏「反问」。admin 7aeb85fc.300 done。遗留: 同一条连 need 两次开两条; 提问 wizard 离开后它开在人名下的账不取消 | `6dc15c5` `00a3961` |
 | 2026-11-22 | svr 冷启动名册不再缺席: 快照落盘 + 按 TTL 读回 (不改推送协议) | `f0fc2f8` |
+| 2026-11-22 | handoff 简报回贴不再永远判失败 (LeoKing): fd4715b 删旧沟通层时连 `withMsg` 调用一起删了, 无信封注入不带 message-event 标记, 提交确认永远找不到 → 每次 `handoff: 放弃` (简报其实送到了)。新增 `envelopeFor`, `injectText` 对有 eventId 无信封的注入补标记。核对: handoff 后的「继续 <event>」续答 (`owed: () => []` / `resume` 空桩) 是有意退役 —— room hub 按 seen 游标重投欠账, 不需要它。待验: 下一次真实自我 handoff 时 daemon.log 不再出现「框空了且转录里始终没有这一笔」 | `c6f3c31` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
