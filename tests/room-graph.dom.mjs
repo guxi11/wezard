@@ -276,8 +276,8 @@ try {
   const by = (n) => gs.items.find((x) => x.nm === n);
   assert.match(by("alice").role, /host/, "alice 是 host: " + JSON.stringify(gs.items));
   assert.equal(by("bob").role, "成员"); assert.equal(by("张三").role, "人");
-  assert.equal(by("alice").st, "闲", "alice 活着没在跑 = 闲"); assert.equal(by("bob").st, "冷", "bob 缓存冷 = 冷"); assert.equal(by("张三").st, "", "人没有状态");
-  assert.match(gs.stCls.join("|"), /st-idle/); assert.match(gs.stCls.join("|"), /st-stale/);
+  assert.equal(by("alice").st, "闲", "alice 活着没在跑 = 闲"); assert.equal(by("bob").st, "闲 · 冷", "bob 空闲且缓存冷 = 闲 · 冷"); assert.equal(by("张三").st, "", "人没有状态");
+  assert.match(gs.stCls.join("|"), /st-idle/); assert.match(gs.stCls.join("|"), /st-idle cold/, "冷是叠加在 idle 上的 class, 不再是独立的 st-stale");
   assert.match(by("bob").sub, /分钟前发言|刚刚发言/, "最近发言: " + by("bob").sub);
   assert.equal(by("bob").due, "待交代 1", "待交代数挂在处理人 bob 名下"); assert.equal(by("alice").due, "");
   assert.match(gs.head, /成员\s*3/); assert.match(gs.head, /alice/, "栏头写 host");
@@ -566,7 +566,7 @@ try {
   assert.ok(g2.links.includes(DM2), "两 wizard 的 dm 画成直连线: " + JSON.stringify(g2));
   assert.ok(!g2.roomNodes.includes(DM2), "两 wizard 的 dm 没有 room 节点");
 
-  // 节点样式: 人 = 👤 + 名字 / wizard = 圆点; 状态 idle (alice, 缓存热) / stale = 缓存冷 (bob, cacheCold) / asleep = 休眠 (carol, 注册表里没有); host → room 是特殊边。
+  // 节点样式: 人 = 👤 + 名字 / wizard = 圆点; 状态 idle (alice, 缓存热) / idle + cold = 空闲且缓存冷 (bob, cacheCold) / asleep = 休眠 (carol, 注册表里没有, 无动静记录 = 冷); host → room 是特殊边。
   const look = await page.evaluate(() => ({
     human: (document.querySelector('.rv-person.human text.rv-emo') || {}).textContent,
     humanName: (document.querySelector('.rv-person.human text.rv-nm') || {}).textContent,
@@ -581,8 +581,10 @@ try {
   assert.equal(look.humanName, "张三", "emoji 下写着用户名字 (多位用户靠名字分辨)");
   assert.equal(look.humanShape, false, "用户不再是方块 / 圆");
   assert.match(look.alice, /st-idle/, "alice: pane 在、缓存热 = idle");
-  assert.match(look.bob, /st-stale/, "bob: pane 在、缓存已冷 = stale");
-  assert.match(look.carol, /st-asleep/, "carol: pane 不在 = asleep (休眠, 不同于缓存冷)");
+  assert.match(look.alice, /^(?!.*\bcold\b)/, "alice: 缓存热不带 cold");
+  assert.match(look.bob, /st-idle/, "bob: pane 在 = idle");
+  assert.match(look.bob, /\bcold\b/, "bob: 缓存已冷 = 叠加 cold (不再是独立的 st-stale)");
+  assert.match(look.carol, /st-asleep/, "carol: pane 不在 = asleep");
   assert.ok(look.hostEdges >= 1, "host → room 是特殊边 (.rv-edge.host)");
   assert.ok(look.plainEdges >= 1, "普通成员边仍在");
   // 增量更新: 数据变了 (bob 开始干活) 只改样式, 节点元素与坐标原样保留, 不整图重画。
@@ -724,6 +726,11 @@ try {
       rooms: [...document.querySelectorAll(".rv-room")].map((n) => n.querySelector("text").textContent.trim()),
       people: [...document.querySelectorAll(".rv-person .rv-nm")].map((t) => t.textContent.trim()).sort(),
       direct: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
+      // 每个 wizard 节点的实际填充 / 描边虚线 (computed): 冷 = 白底, 休眠且冷 = 白底虚线
+      fills: Object.fromEntries([...document.querySelectorAll(".rv-person.wizard")].map((e) => {
+        const cs = getComputedStyle(e.querySelector(".sh"));
+        return [e.querySelector(".rv-nm").textContent.trim(), { fill: cs.fill, dashed: cs.strokeDasharray !== "none", cls: e.getAttribute("class") }];
+      })),
     }));
     await pg.close();
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
@@ -739,6 +746,24 @@ try {
   const nodeC = { target: "uid:" + C, kind: "wizard", uid: C, name: "carol", label: "carol", base: "", tag: "", chat: "", busy: false, alive: true, lastTs: T0, rels: [] };
   const icoG = await graphOf({ rooms: [solo, adhoc], nodes: [nodeC] });
   assert.deepEqual(icoG.rooms.map((t) => t.split(" ")[0]).sort(), ["👥", "💬", "🧙‍♂️"].sort(), "三种图标各一间 (群 G / 单聊 / 三 wizard adhoc): " + JSON.stringify(icoG));
+
+  // 2) 缓存冷 = 节点填充变白, 叠加在空闲 / 休眠上; 工作中不受影响。
+  const WHITE = "rgb(255, 255, 255)";
+  const mk = (i, name, over) => ({ target: "uid:" + "w" + String(40 + i).padStart(12, "0"), kind: "wizard", uid: "w" + String(40 + i).padStart(12, "0"), name, label: name, base: "", tag: "", chat: "", busy: false, alive: true, lastTs: Date.now() - 60_000, rels: [], ...over });
+  const coldNodes = [
+    mk(1, "idleWarm", { cacheCold: false }), mk(2, "idleCold", { cacheCold: true }),
+    mk(3, "sleepWarm", { alive: false, lastTs: Date.now() - 30_000 }), mk(4, "sleepCold", { alive: false, lastTs: Date.now() - 3600_000 }),
+    mk(5, "workCold", { busy: true, known: true, cacheCold: true }),
+  ];
+  const coldRoom = roomFact("adhoc:cold1", "adhoc", coldNodes.map((n, i) => ({ who: who("wizard", n.uid), name: n.name, via: "invite", since: 20 + i, ord: i + 1, host: i === 0 })), who("wizard", coldNodes[0].uid));
+  const cold = (await graphOf({ rooms: [coldRoom], nodes: coldNodes })).fills;
+  assert.equal(cold.idleWarm.fill, "rgb(228, 231, 236)", "空闲且缓存热 = 灰: " + JSON.stringify(cold.idleWarm));
+  assert.equal(cold.idleCold.fill, WHITE, "空闲且冷 = 白底: " + JSON.stringify(cold.idleCold));
+  assert.equal(cold.idleCold.dashed, false, "空闲且冷的描边仍是实线");
+  assert.equal(cold.sleepWarm.fill, "rgb(246, 247, 249)", "休眠且 (估计) 缓存热 = 休眠灰: " + JSON.stringify(cold.sleepWarm));
+  assert.equal(cold.sleepCold.fill, WHITE, "休眠且冷 = 白底: " + JSON.stringify(cold.sleepCold));
+  assert.equal(cold.sleepCold.dashed, true, "休眠且冷 = 白底虚线");
+  assert.equal(cold.workCold.fill, "rgb(45, 164, 78)", "工作中不受冷影响 (仍是绿): " + JSON.stringify(cold.workCold));
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
