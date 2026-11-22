@@ -9,7 +9,10 @@
 // 人名下的 duty (wizard 的 need / 点名人的 ask) 叫不醒人: 不发 remind, 只到 groupMs 在群里让人看见一行;
 // 提问的 wizard 已不在 room 里就不催了。反过来, wizard 名下那条若它最后一句是 need、而它那句 need
 // 在人名下开的账还开着 —— 球在人那边, 不对这个 wizard 计逾期。
-import { HOST_SLOT, holderOf, openDuties, sameWho, whoKey, type Duty, type MsgRow, type RoomState, type Who } from "./room.js";
+// 派出去的子件也算 holder 的活动: duty 的 msg id 被别的 task / ask 行当作 `for` (血缘) 时, 那些子行自身的时刻、
+// 它们 room 里非 daemon 行对它们的回应 (含子件 done 关账那一刻) 以及孙辈的同类活动, 都并入 lastActivity
+// (`descendantActivityOf`, 跨 room 由调用方建一次索引传进来); 子件也静止超时才照常提醒。
+import { DAEMON, HOST_SLOT, holderOf, openDuties, sameWho, whoKey, type Duty, type MsgRow, type RoomState, type Who } from "./room.js";
 
 export type OverdueLevel = "remind" | "group";
 export interface OverdueThresholds { remindMs: number; groupMs: number }
@@ -22,9 +25,35 @@ export const groupSysOf = (holderUid: string): string => SYS_OVERDUE_GROUP + "@"
 
 const touches = (r: MsgRow, d: Duty): boolean => r.id === d.msg || (r.re ?? []).includes(d.msg);
 
-const lastActivity = (s: RoomState, d: Duty, holder: Who): number =>
+/** 子件活动查询: msg id → 它名下派出去的子件 (含孙辈) 最近一次活动的时刻, 没有 = 0。 */
+export type DescendantActivity = (msgId: string) => number;
+
+const MAX_LINEAGE_DEPTH = 5;
+
+/** 跨 room 建 `for` 血缘索引: 每条带 `for` 的 msg 行挂到 children[for]; 子件活动 = 子行自身 at 与其 room 里
+ *  `re` 含子行 id 的非 daemon 行的最大 at, 递归并入孙辈 (visited 防环, 深度 ≤ 5)。
+ *  `for` 写的是名字而非消息 id 时, 没有任何 msg id 会命中它 —— 自然被忽略。 */
+export const buildDescendantActivity = (states: Iterable<RoomState>): DescendantActivity => {
+  const children = new Map<string, MsgRow[]>();
+  const touched = new Map<string, number>(); // msg id → 非 daemon 行对它的最近一次回应
+  for (const s of states) for (const r of s.msgs) {
+    if (r.for) children.set(r.for, [...(children.get(r.for) ?? []), r]);
+    if (r.author.kind !== DAEMON.kind) for (const id of r.re ?? []) touched.set(id, Math.max(touched.get(id) ?? 0, r.at));
+  }
+  const walk = (id: string, depth: number, seen: Set<string>): number =>
+    (children.get(id) ?? []).reduce((acc, c) => {
+      if (seen.has(c.id)) return acc;
+      seen.add(c.id);
+      const own = Math.max(c.at, touched.get(c.id) ?? 0);
+      return Math.max(acc, own, depth < MAX_LINEAGE_DEPTH ? walk(c.id, depth + 1, seen) : 0);
+    }, 0);
+  return (id) => walk(id, 1, new Set([id]));
+};
+
+const lastActivity = (s: RoomState, d: Duty, holder: Who, descendant: DescendantActivity): number =>
   Math.max(
     d.at,
+    descendant(d.msg),
     d.movedAt ?? 0,
     d.slot === HOST_SLOT ? (s.members.get(whoKey(holder))?.since ?? 0) : 0,
     ...s.msgs.filter((r) => touches(r, d) && (sameWho(r.author, holder) || sameWho(r.author, d.asker))).map((r) => r.at),
@@ -43,18 +72,21 @@ const remindsTo = (s: RoomState, d: Duty, holder: Who, since: number): MsgRow[] 
 const groupGiven = (s: RoomState, d: Duty, holder: Who, since: number): boolean =>
   s.msgs.some((r) => r.sys === groupSysOf(holder.id) && (r.re ?? []).includes(d.msg) && r.at > since);
 
-export const overdueDue = (s: RoomState, now: number, o: OverdueThresholds, known: (uid: string) => boolean = () => true): OverdueHit[] =>
+export const overdueDue = (
+  s: RoomState, now: number, o: OverdueThresholds, known: (uid: string) => boolean = () => true,
+  descendantActivity: DescendantActivity = () => 0,
+): OverdueHit[] =>
   openDuties(s).flatMap((duty): OverdueHit[] => {
     const holder = holderOf(s, duty);
     if (duty.kind === "join-req" || !holder || !s.members.has(whoKey(holder))) return [];
     if (holder.kind === "human") {
       if (duty.asker.kind === "wizard" && !s.members.has(whoKey(duty.asker))) return [];
-      const last = lastActivity(s, duty, holder);
+      const last = lastActivity(s, duty, holder, descendantActivity);
       return o.groupMs > 0 && now - last >= o.groupMs && !groupGiven(s, duty, holder, last)
         ? [{ duty, holder, level: "group", idleMs: now - last }] : [];
     }
     if (holder.kind !== "wizard" || !known(holder.id) || ballWithHuman(s, duty)) return [];
-    const last = lastActivity(s, duty, holder);
+    const last = lastActivity(s, duty, holder, descendantActivity);
     const idleMs = now - last;
     const reminds = remindsTo(s, duty, holder, last);
     const hits: OverdueHit[] = [];

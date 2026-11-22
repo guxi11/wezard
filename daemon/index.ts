@@ -1467,8 +1467,10 @@ const main = async (): Promise<void> => {
       const target = roomTargetOf(me, to.who, b.room, { autoAdhoc: { interrupt: !!b.interrupt } });
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       const after = idList(b.after);
+      // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。
+      const forOf = (b.for ?? "").toString().trim() || hub.defaultFor(me.id);
       roomReply(res, hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
-        ...(after.length ? { after } : {}), ...((b.for ?? "").toString().trim() ? { for: (b.for ?? "").toString().trim() } : {}),
+        ...(after.length ? { after } : {}), ...(forOf ? { for: forOf } : {}),
         ...((b.planId ?? "").toString().trim() ? { planId: (b.planId ?? "").toString().trim() } : {}),
         ...(b.interrupt ? { interrupt: true } : {}) }));
     });
@@ -2909,8 +2911,9 @@ const main = async (): Promise<void> => {
         if (target.error || !target.room) return { status: target.status ?? 400, body: { ok: false, reason: target.error ?? target.reason ?? "" } };
         // lead 的层级规矩随正文带 (宪章是出生快照, 打法只这一件活用得上)。
         const body2 = lead ? text + "\n\n" + renderReminder({ wezard: "lead" }, wizards.byUid(who.id)?.lead ? renderLeadPlaybook() : renderLead()) : text;
+        const forOf = ((b.for ?? "").toString().trim()) || hub.defaultFor(me.id);
         const draft = { author: me, kind: "task" as const, text: body2, to: [who], origin: "tool" as const,
-          ...((b.for ?? "").toString().trim() ? { for: (b.for ?? "").toString().trim() } : {}),
+          ...(forOf ? { for: forOf } : {}),
           ...(planId ? { planId } : {}) };
         // room? 给了: 先入座再 append (judge 要求 to 是成员); 没给: 落点本来就接得住 (dm / 缺省 room)。
         const placed = roomArg
@@ -3167,9 +3170,11 @@ const main = async (): Promise<void> => {
           const dest = roomTargetOf(me, [{ kind: "wizard", id: who }], roomArg || undefined);
           if (!dest.room) dispatchError = dest.error ?? dest.reason ?? "没有落点 room";
           else {
+            const forOf = (((b as { for?: unknown }).for ?? "").toString().trim()) || hub.defaultFor(me.id);
             const draft = { author: me, kind: "task" as const,
               text: task + (b.lead === true ? "\n\n" + renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
-              to: [{ kind: "wizard" as const, id: who }], origin: "tool" as const, ...(requestedPlanId ? { planId: requestedPlanId } : {}) };
+              to: [{ kind: "wizard" as const, id: who }], origin: "tool" as const, ...(requestedPlanId ? { planId: requestedPlanId } : {}),
+              ...((forOf) ? { for: forOf } : {}) };
             // room? 给了: 先入座再 append (judge 要求 to 是成员); append 被拒如实回 dispatched:false。
             const placed = roomArg
               ? seatThenAppend(dest.room, () => joinRoomSpawn(self, roomArg, name), (r) => hub.append(r, draft))

@@ -396,7 +396,30 @@ export const createRoomHub = (p: HubPorts) => {
     return rooms.length === 1 ? { room: rooms[0], many: rooms } : { many: rooms };
   };
 
-  return { append, write, pump, kick, onIdle, onStop, defaultRoom, pending, isBoundRoom, reconcileAfter };
+  /** 派活工具缺省的 `for` (血缘): 本轮唤醒它、且仍由它持有未关的那一条 duty 的 msg id。
+   *  「唤醒」= 本轮贴进来的行里有这条 duty 的 msg, 或有一条 re 指向它的 trigger (overdue-remind / after 补唤醒);
+   *  恰好一条才返回, 零条 / 多条 → undefined —— 多条有歧义, 不猜。 */
+  const defaultFor = (uid: string): string | undefined => {
+    const t = turns.get(uid);
+    if (!t?.msgs.size) return undefined;
+    const who: Who = { kind: "wizard", id: uid };
+    const ids = new Set<string>();
+    for (const room of t.rooms) {
+      let s: RoomState | undefined;
+      try { s = state(room); } catch { continue; }
+      if (!s) continue;
+      const woke = (msg: string): boolean => t.msgs.has(msg) || [...t.msgs].some((id) => {
+        const r = s!.byId.get(id);
+        return r?.kind === "trigger" && (r.re ?? []).includes(msg);
+      });
+      openDuties(s)
+        .filter((d) => d.kind !== "join-req" && sameWho(holderOf(s!, d), who) && woke(d.msg))
+        .forEach((d) => ids.add(d.msg));
+    }
+    return ids.size === 1 ? [...ids][0] : undefined;
+  };
+
+  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, pending, isBoundRoom, reconcileAfter };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

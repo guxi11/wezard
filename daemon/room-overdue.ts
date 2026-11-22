@@ -7,7 +7,7 @@
 import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
 import { DAEMON, holderOf, isBoundRoom, type Draft, type JudgeCtx, type RoomState, type Verdict, type Who } from "../shared/room.js";
-import { groupSysOf, overdueDue, type OverdueHit, SYS_OVERDUE_GROUP, SYS_OVERDUE_REMIND } from "../shared/room-overdue.js";
+import { buildDescendantActivity, groupSysOf, overdueDue, type OverdueHit, SYS_OVERDUE_GROUP, SYS_OVERDUE_REMIND } from "../shared/room-overdue.js";
 
 export interface OverdueDeps {
   log?: Logger;
@@ -74,11 +74,13 @@ export const createOverdueScan = (p: OverdueDeps): { scan: () => { remind: numbe
     const out = { remind: 0, group: 0, mirrored: 0 };
     if (o.remindMs <= 0 && o.groupMs <= 0) return out;
     const now = p.now();
-    for (const room of p.rooms()) {
-      let s: RoomState | undefined;
-      try { s = p.stateOf(room); } catch { continue; } // 坏 room 跳过
-      if (!s) continue;
-      for (const hit of overdueDue(s, now, o, (uid) => !!p.wizardOf(uid))) {
+    const states = p.rooms().flatMap((room): Array<[string, RoomState]> => {
+      try { const s = p.stateOf(room); return s ? [[room, s]] : []; } catch { return []; } // 坏 room 跳过
+    });
+    // 血缘索引每轮跨所有 room 建一次: 子件常在另一个 room (dm / adhoc) 里干活。
+    const descendant = buildDescendantActivity(states.map(([, s]) => s));
+    for (const [room, s] of states) {
+      for (const hit of overdueDue(s, now, o, (uid) => !!p.wizardOf(uid), descendant)) {
         // 一条 duty 一个 try: hub.append 遇损坏 room 的 state() 会直接抛, 一条坏的不饿死后面的。
         try { act(room, s, hit, out); } catch (e) { p.log?.warn({ room, msg: hit.duty.msg, err: (e as Error).message }, "overdue: 单条处理失败, 跳过"); }
       }

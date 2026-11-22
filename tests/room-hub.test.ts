@@ -56,11 +56,14 @@ const settle = () => hub.pump();
   await settle();
   assert.equal(pasted.length, 1, "游标推进后不重投");
   assert.equal(hub.defaultRoom(A).room, room);
+  assert.equal(hub.defaultFor(A), (v.ok && v.row.id)!, "defaultFor: 本轮唤醒它、仍持有未关的唯一一条 → 它的 msg id");
   // 交代: 第一条 reply 覆盖占位气泡并镜像
   const hm = (v.ok && v.row.id)!;
   const r = hub.append(room, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [hm], text: "在的" });
   assert.ok(r.ok && r.row.status === "done");
   assert.equal(mirrored.at(-1)!.cover, hm);
+  assert.equal(hub.defaultFor(A), undefined, "defaultFor: 唯一那条已交代关账 → 零条 → undefined");
+  assert.equal(hub.defaultFor(B), undefined, "defaultFor: 没被唤醒过的人 → undefined");
 }
 // 不确定投递 → 不推游标, 重投标「可能已读过」
 {
@@ -182,6 +185,31 @@ const settle = () => hub.pump();
   const done = hub.append(room3, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [ask.row.id], text: "8 件都完了" });
   assert.ok(done.ok && done.row.status === "done");
   assert.equal(openDuties(store.get(room3)!).filter((d) => d.msg === ask.row.id).length, 0);
+}
+// defaultFor: 一轮里同时被两条 duty 唤醒 → 有歧义 → undefined; overdue-remind 的 trigger (re 指向 duty) 算唤醒
+{
+  await hub.onIdle(A); // 清掉上一轮
+  const roomF = "chat:wrF";
+  store.ensure(roomF, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(roomF, [
+    { op: "join", at: 1, room: roomF, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: roomF, who: { kind: "wizard", id: B }, ord: 2, via: "spawn", by: { kind: "wizard", id: A } },
+  ]);
+  const ask1 = hub.append(roomF, { author: { kind: "wizard", id: B }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: A }], text: "一" });
+  await settle();
+  const ask2 = hub.append(roomF, { author: { kind: "wizard", id: B }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: A }], text: "二" });
+  assert.ok(ask1.ok && ask2.ok);
+  await settle();
+  assert.equal(hub.defaultFor(A), undefined, "同一轮两条 duty → 多条有歧义, 不猜");
+  hub.append(roomF, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [ask2.ok ? ask2.row.id : ""], text: "二好了" });
+  assert.equal(hub.defaultFor(A), ask1.ok ? ask1.row.id : "", "关掉一条后剩唯一一条");
+  // 轮终清空; 之后 overdue-remind 的 trigger (re 指向 ask1) 再唤醒它 → 仍归到 ask1
+  await hub.onIdle(A);
+  assert.equal(hub.defaultFor(A), undefined, "轮终后没有「本轮」");
+  hub.append(roomF, { author: DAEMON, kind: "trigger", origin: "daemon", sys: "overdue-remind", to: [{ kind: "wizard", id: A }], re: [ask1.ok ? ask1.row.id : ""], text: "[wezard] 逾期" }, { budget: Number.MAX_SAFE_INTEGER });
+  await settle();
+  assert.equal(hub.defaultFor(A), ask1.ok ? ask1.row.id : "", "trigger 行的 re 指向 duty 也算唤醒它的那一条");
+  await hub.onIdle(A);
 }
 // 重开 store (模拟 reload): 账本状态一致
 {

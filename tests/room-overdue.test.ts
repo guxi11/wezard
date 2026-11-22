@@ -8,7 +8,7 @@ import { openRoomStore } from "../daemon/rooms.js";
 import { createRoomHub } from "../daemon/room-hub.js";
 import { createOverdueScan } from "../daemon/room-overdue.js";
 import { applyOp, DAEMON, type MsgRow, type Who } from "../shared/room.js";
-import { groupSysOf, overdueDue } from "../shared/room-overdue.js";
+import { buildDescendantActivity, groupSysOf, overdueDue } from "../shared/room-overdue.js";
 import { room as mkRoom, say, uid, W } from "./room-fixture.js";
 
 const MIN = 60_000;
@@ -206,5 +206,53 @@ assert.deepEqual(mkScan().scan(), Z, "新实例不重复");
   assert.deepEqual(sc.scan(), { ...Z, group: 1 });
   assert.equal(store.get(bound)!.msgs.filter((m) => m.sys?.startsWith("overdue-group")).length, 1);
   assert.equal(store.get("chat:wrG")!.msgs.length, homeBefore, "绑定 room 不走 home 群");
+}
+// ⑥ 派出去的子件 (for 血缘, 可跨 room) 的活动也算 holder 的活动
+{
+  const dm = (name: string, ms: Who[]) => mkRoom("dm:" + name, ms);
+  const { s, ask } = mk(); // A 问 B (room adhoc:x)
+  const child = dm("c1", [B, C]);
+  const task = say(child, { author: B, kind: "task", to: [C], for: ask.id, text: "子件" }, { now: 10 * MIN });
+  const lv = (now: number, states: S[] = [s, child]) => overdueDue(s, now, O, undefined, buildDescendantActivity(states)).map((h) => h.holder.id.slice(-1) + ":" + h.level);
+  assert.deepEqual(lv(69 * MIN), [], "派出子件那一刻起算 (子行 at = 10min)");
+  assert.deepEqual(lv(70 * MIN), ["2:remind"], "子件也静止满 60 分钟 → 照常提醒");
+  assert.deepEqual(levels(s, 70 * MIN), ["2:remind"], "不传索引 = 旧行为");
+  say(child, { author: C, kind: "reply", re: [task.id], status: "progress", statusGiven: true, text: "在做" }, { now: 50 * MIN });
+  assert.deepEqual(lv(109 * MIN), [], "子件 progress (非 daemon 行) 是活动");
+  assert.deepEqual(lv(110 * MIN), ["2:remind"], "子件静止超时后照常");
+  daemonRow(child, "overdue-remind", 100 * MIN, task.id, [C]);
+  assert.deepEqual(lv(110 * MIN), ["2:remind"], "子件 room 里 daemon 的提醒不算活动");
+  say(child, { author: C, kind: "reply", re: [task.id], status: "done", text: "好了" }, { now: 130 * MIN });
+  assert.deepEqual(lv(189 * MIN), [], "子件 done 关账那一刻也算活动, 计时从这里重来");
+  assert.deepEqual(lv(190 * MIN), ["2:remind"], "轮到 holder 收口: 60 分钟后再提醒");
+}
+{
+  // 孙辈传递: B → C (for ask) → D (for C 的 task)
+  const D = W(uid(4));
+  const { s, ask } = mk();
+  const r1 = mkRoom("dm:c", [B, C]), r2 = mkRoom("dm:d", [C, D]);
+  const t1 = say(r1, { author: B, kind: "task", to: [C], for: ask.id, text: "子" }, { now: 5 * MIN });
+  const t2 = say(r2, { author: C, kind: "task", to: [D], for: t1.id, text: "孙" }, { now: 6 * MIN });
+  const at = (states: S[], now: number) => overdueDue(s, now, O, undefined, buildDescendantActivity(states)).length;
+  assert.equal(at([s, r1, r2], 67 * MIN), 1, "孙辈静止 → 提醒");
+  say(r2, { author: D, kind: "reply", re: [t2.id], status: "progress", statusGiven: true, text: "孙在做" }, { now: 60 * MIN });
+  assert.equal(at([s, r1, r2], 67 * MIN), 0, "孙辈的活动沿血缘传到最上面的 duty");
+  assert.equal(at([s, r1], 67 * MIN), 1, "索引里没有孙辈所在 room → 看不到");
+  // 深度上限: 链长 7 的最深一环不再向上传
+  const rooms = Array.from({ length: 7 }, (_, i) => mkRoom("dm:deep" + i, [B, C]));
+  const rows: MsgRow[] = [];
+  rooms.forEach((r, i) => rows.push(say(r, { author: B, kind: "task", to: [C], for: i === 0 ? ask.id : rows[i - 1]!.id, text: "链" + i }, { now: 1 * MIN })));
+  say(rooms[6]!, { author: C, kind: "reply", re: [rows[6]!.id], status: "progress", statusGiven: true, text: "最深" }, { now: 100 * MIN });
+  assert.equal(at([s, ...rooms], 67 * MIN), 1, "超过深度上限 (5) 的远孙辈不再算");
+}
+{
+  // for 写的是名字: 没有任何 msg id 命中它, 忽略; for 成环不死循环
+  const { s, ask } = mk();
+  const r1 = mkRoom("dm:n", [B, C]);
+  say(r1, { author: B, kind: "task", to: [C], for: ".OliveOwen", text: "名字" }, { now: 50 * MIN });
+  assert.equal(overdueDue(s, 65 * MIN, O, undefined, buildDescendantActivity([s, r1])).length, 1, "for 是名字 → 不影响");
+  const act = buildDescendantActivity([s, r1]);
+  assert.equal(act("没有这条"), 0);
+  assert.equal(act(ask.id), 0, "没人派出子件 → 0");
 }
 console.log("room-overdue ok");
