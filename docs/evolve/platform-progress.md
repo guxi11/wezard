@@ -18,7 +18,7 @@
 5. 更新本文并提交; 交差的分身 `stop_wizard`; 做成了就在群里报一句 (commit + 测试 + 遗留)。没值得做的事就回 QUIET。
 6. 仍须先问 admin 的只有: push / 发布、改 `~/.wezard/config.jsonc` / 权限 / secrets、删状态、改服务定义、群发 —— 直接在群里问。改语义的大改 (数据模型、落盘格式、删 MCP 工具、改 charter 文案) 先在 `docs/evolve/` 写方案, 再在群里讨论。charter 改动攒成一次发出 (每次都会让在跑的 wizard 用旧 charter)。
 
-## 测试基线 (2026-11-23: 123/126 —— codex-hooks / codex-session 本机无 codex, graph-layout 自 ea07e52 回归已转 wezard-1; 2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
+## 测试基线 (2026-11-23: 124/126 —— 只剩 codex-hooks / codex-session, 本机无 codex; graph-layout 回归已由 wezard-1 修于 e22d40f (测试字高 16→11; 遗留: 估宽按拉丁 0.55·fs, CJK 名会低估); 2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
 **117 / 119 通过** (2026-11-22 晚, PaulOwen 全量)。只剩 `codex-hooks` / `codex-session` 失败: 本机没装 `codex`, spawn ENOENT, 属环境问题。`codex-backend` 与 `wizard-stream` 已修: 两处都是断言跟不上有意的退役 (`043219c` 删 bin / claudeBin 覆盖; `762482b` 删「全部消息」all=1), 不是回归。每次改动后对照, 通过数不能减少。
 
