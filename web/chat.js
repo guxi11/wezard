@@ -666,7 +666,7 @@
       var r = n.ref;
       var un = unreadOf(r);
       var dot = un ? '<g class="rv-un"><circle cx="' + (n.w / 2 - 2).toFixed(1) + '" cy="-13" r="' + (un > 9 ? 8 : 7) + '"/><text x="' + (n.w / 2 - 2).toFixed(1) + '" y="-10" text-anchor="middle">' + (un > 99 ? '99+' : un) + '</text></g>' : '';
-      return '<title>' + esc(roomLabelOf(r) + ' · ' + roomKindWord(r)) + '</title><rect x="' + (-n.w / 2).toFixed(1) + '" y="-13" width="' + n.w.toFixed(1) + '" height="26" rx="9"/>' +
+      return '<title>' + esc(roomLabelOf(r) + ' · ' + roomKindWord(r) + (un ? ' · 未读 ' + un + ' 条' : '') + (r.openDuties ? ' · 未决 duty ' + r.openDuties + ' 件' : '')) + '</title><rect x="' + (-n.w / 2).toFixed(1) + '" y="-13" width="' + n.w.toFixed(1) + '" height="26" rx="9"/>' +
         '<text x="' + (-n.w / 2 + 8).toFixed(1) + '" y="5.5">' + esc(roomIcon(r) + ' ' + clipName(roomLabelOf(r), gNameMax())) + '</text>' + dot;
     }
     var p = n.ref, human = p.kind === 'human', st = stateOfNode(p), rr = n.r;
@@ -860,10 +860,21 @@
     '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/></svg>lead</span>' +
     '<span title="聪明程度 (🧒小学生 🎒初中生 🎓大学生 🔬研究生 👨‍🏫专家教授) = 实际在跑的模型 + effort (haiku 1 · sonnet 2, high 起 3 · opus 4, xhigh/max 5); 认不出模型时按出生档位 mini..ultra; 都没有 = 中号"><i class="lg wz sz1"></i><i class="lg wz sz5"></i>大小 = 聪明程度 (小学生→专家教授)</span>' +
     '<span title="当前视角: 左上名片是它, room 里靠右的气泡是它说的"><svg class="lgpov" viewBox="-13 -7 26 14" width="24" height="13" aria-hidden="true"><circle r="4.5"/><path d="M-8 -4L-12 0L-8 4M8 -4L12 0L8 4"/></svg>视角</span></div>';
+  // 选中的 role 不在任何可见 room 里 (时间范围把它所有 room 都筛掉了, 或点进了一个只在隐藏 room 里的人 / 只剩一间过期两人 dm 的 wizard) 时,
+  // 图里仍要有它 —— 视角总得在图上看得见 (👁 标记照常按 isRoleId 画): 作为没有任何边的孤立节点补进 people。
+  // 只补名册里有的 (W.nodes) 或 human: / uid: 形态的 id; 认不出的 id 不凭空造节点。
+  var povLoneNode = function (people) {
+    if (!D.role || people.some(function (p) { return isRoleId(p.target); })) return null;
+    var hit = (W.nodes || []).filter(function (n) { return isRoleId(n.target); })[0];
+    if (hit) return hit;
+    return /^(human|uid):/.test(D.role) ? nodeOf(D.role) : null;
+  };
   var renderGraph = function () {
     if (S.gdrag) return;    // 正在拖: 定时刷新别来动节点
     var rooms = scopedRooms();
     var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
+    var lone = povLoneNode(people);
+    if (lone) people.push(lone);
     var directs = [];
     rooms = rooms.filter(function (r) {
       var pair = directPair(r, people);
@@ -958,12 +969,14 @@
     // 选中态不进 HTML (切 room 时整张列表因此重建 ~25-80ms): 由 syncListSel 单独切 class。
     var pv = r.last ? (r.last.authorName ? r.last.authorName + ': ' : '') + r.last.preview : '';
     var nm = r.kind === 'dm' || r.kind === 'adhoc' ? 'wizard' : 'chat';
-    return '<button class="ci" data-room="' + esc(r.id) + '" title="' + esc(roomTitle(r) + ' · ' + roomKindWord(r) + ' · ' + (r.members || []).length + ' 人') + '">' +
+    // 角标 = 未读数 (与图上红点同一个数, 见 unreadOf); 原来角标上的「未决 duty 数」挪进悬停提示, 成员栏的「待交代」仍在。
+    var un = unreadOf(r);
+    return '<button class="ci" data-room="' + esc(r.id) + '" title="' + esc(roomTitle(r) + ' · ' + roomKindWord(r) + ' · ' + (r.members || []).length + ' 人' + (un ? ' · 未读 ' + un + ' 条' : '') + (r.openDuties ? ' · 未决 duty ' + r.openDuties + ' 件' : '')) + '">' +
       roomAvatar(r) + '<span class="b">' +
       '<span class="l1"><span class="t"><span class="nm ' + nm + '">' + esc(roomTitle(r)) + '</span></span>' +
         '<span class="ts">' + esc(r.last ? fmtAgo(r.last.at) : '') + '</span></span>' +
       '<span class="l2"><span class="pv">' + esc(pv) + '</span>' +
-        (r.openDuties ? '<b class="ub" title="未决 duty ' + r.openDuties + ' 件">' + (r.openDuties > 99 ? '99+' : r.openDuties) + '</b>' : '') + '</span>' +
+        (un ? '<b class="ub" title="' + esc('未读 ' + un + ' 条' + (r.openDuties ? ' · 未决 duty ' + r.openDuties + ' 件' : '')) + '">' + (un > 99 ? '99+' : un) + '</b>' : '') + '</span>' +
       '</span></button>';
   };
   var renderList = function () {

@@ -717,16 +717,18 @@ try {
   assert.equal(await gsVis(), false, "✕ 收回抽屉");
 
   // ── 图的单页用例: 全新页面 (没有 localStorage), 加几间 fixture 之外的 room, 直接看图 ─────────────
-  const graphOf = async (extra, win) => {
+  const graphOf = async (extra, win, role) => {
     globalThis.__extraRooms = extra.rooms || []; globalThis.__extraNodes = extra.nodes || [];
     const pg = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     await pg.addInitScript((w) => { localStorage.setItem("wezard.role.side", "graph"); if (w !== undefined) localStorage.setItem("wezard.role.winMin", String(w)); }, win);
-    await pg.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+    await pg.goto(base + "/role?id=t-ticket" + (role ? "&role=" + encodeURIComponent(role) : "") + "&room=", { waitUntil: "load" });
     await pg.waitForSelector(".rv-person", { timeout: 5000 });
     await pg.waitForTimeout(300);
     const read = await pg.evaluate(() => ({
       rooms: [...document.querySelectorAll(".rv-room")].map((n) => n.querySelector("text").textContent.trim()),
       roomIds: [...document.querySelectorAll(".rv-room")].map((n) => n.getAttribute("data-room")),
+      // 视角节点 (👁 标记所在) 的名字 / 它有几条边
+      pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.querySelector(".rv-pov")).map((e) => e.querySelector(".rv-nm").textContent.trim()),
       people: [...document.querySelectorAll(".rv-person .rv-nm")].map((t) => t.textContent.trim()).sort(),
       direct: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
       // 每个 wizard 节点的实际填充 / 描边虚线 (computed): 冷 = 白底, 休眠且冷 = 白底虚线
@@ -803,13 +805,47 @@ try {
 
   // 5) 时间范围 B: 窗口外但视角 (alice) 有未读的 room 算在范围内; 视角不是成员的 room 即使服务端数出了「未读」也不算。
   const mem3 = (ids) => ids.map((id, i) => ({ who: who("wizard", id), name: "m" + i, via: "invite", since: 50 + i, ord: i + 1, host: i === 0 }));
-  const unreadMine = { ...roomFact("adhoc:unmine", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), unread: 2 };
+  const unreadMine = { ...roomFact("adhoc:unmine", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), last: { seq: 9, at: oldAt }, unread: 2 };   // unreadOf 会按 last.seq 封顶, 所以 seq 要 ≥ 未读数
   const unreadNot = { ...roomFact("adhoc:unnot", "adhoc", mem3([B, C, LEO]), who("wizard", B), oldAt), unread: 5 };
   const quietOld = { ...roomFact("adhoc:quiet", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), unread: 0 };
   const unr = await graphOf({ rooms: [unreadMine, unreadNot, quietOld], nodes: [leoNode] });
   assert.ok(unr.roomIds.includes("adhoc:unmine"), "窗口外、视角 alice 是成员且有未读 → 在范围内: " + JSON.stringify(unr));
   assert.ok(!unr.roomIds.includes("adhoc:unnot"), "视角不是成员 (服务端把整本账数成未读) → 不算: " + JSON.stringify(unr));
   assert.ok(!unr.roomIds.includes("adhoc:quiet"), "窗口外、没未读 → 仍不在范围内: " + JSON.stringify(unr));
+
+  // 6C) 选中的 role 不在任何可见 room 里: 图里仍画它, 作为带 👁 的孤立节点。(李四只在 3 天前的 OLD 群里, 默认 2d 看不见那个群)
+  const lone = await graphOf({ rooms: [], nodes: [] }, undefined, "human:U2");
+  assert.ok(lone.people.includes("李四"), "视角 (李四) 的所有 room 都在窗口外: 仍画成节点 " + JSON.stringify(lone));
+  assert.deepEqual(lone.pov, ["李四"], "且 👁 标记在它身上: " + JSON.stringify(lone));
+  assert.ok(!lone.roomIds.includes(OLD), "它那间窗口外的群照旧不画: " + JSON.stringify(lone));
+  const notLone = await graphOf({ rooms: [], nodes: [] });   // 默认视角 alice 本来就在图里: 不重复补节点
+  assert.equal(notLone.people.filter((n) => n === "alice").length, 1, "视角已在图里不重复画: " + JSON.stringify(notLone));
+  assert.deepEqual(notLone.pov, ["alice"]);
+  // 6D) 列表角标与图上红点是同一个未读数; 原来角标上的未决 duty 数挪进悬停提示。
+  const dutyRoom = { ...roomFact("adhoc:duty3", "adhoc", mem3([A, B, C]), who("wizard", A)), openDuties: 3, unread: 0 };
+  globalThis.__extraRooms = [unreadMine, dutyRoom]; globalThis.__extraNodes = [];
+  const pgD = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+  await pgD.addInitScript(() => localStorage.setItem("wezard.role.side", "graph"));
+  await pgD.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+  await pgD.waitForSelector(".rv-room", { timeout: 5000 });
+  await pgD.waitForTimeout(300);
+  const dotsOf = () => pgD.evaluate(() => Object.fromEntries([...document.querySelectorAll(".rv-room")].map((n) => [n.getAttribute("data-room"), (n.querySelector(".rv-un text") || {}).textContent || ""])));
+  const dots = await dotsOf();
+  await pgD.click('[data-side="list"]');
+  await pgD.waitForSelector(".rv-list .ci", { timeout: 5000 });
+  const badges = await pgD.evaluate(() => ({
+    nums: Object.fromEntries([...document.querySelectorAll(".rv-list .ci")].map((b) => [b.getAttribute("data-room"), (b.querySelector(".ub") || {}).textContent || ""])),
+    tip: document.querySelector('.rv-list .ci[data-room="adhoc:duty3"]').getAttribute("title"),
+    unTip: (document.querySelector('.rv-list .ci[data-room="adhoc:unmine"] .ub') || {}).title,
+  }));
+  assert.equal(badges.nums["adhoc:unmine"], "2", "列表角标 = 未读数: " + JSON.stringify(badges));
+  assert.equal(dots["adhoc:unmine"], "2", "图上红点同一个数: " + JSON.stringify(dots));
+  assert.equal(badges.nums[HM], dots[HM], "两处一致 (HM): " + JSON.stringify([badges.nums, dots]));
+  assert.equal(badges.nums["adhoc:duty3"], "", "只有未决 duty、没有未读 → 列表不再画角标");
+  assert.match(badges.tip, /未决 duty 3 件/, "duty 数在悬停提示里: " + badges.tip);
+  assert.match(badges.unTip, /未读 2 条/, "角标悬停: " + badges.unTip);
+  await pgD.close();
+  globalThis.__extraRooms = []; globalThis.__extraNodes = [];
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
