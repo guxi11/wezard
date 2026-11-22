@@ -6,6 +6,9 @@
 // group 去重: 最后活动之后已有 `sys:overdue-group@<holderUid>` 的行; 且必须等 remind 真的送到
 // (holder 的 seen 游标越过那条 trigger) —— 否则处理人在跑长 turn、提醒还没投递, 群里就先说「没有动静」了。
 // 无主的 duty (holder 已不是成员 / 名册上查无此人) 直接跳过: 它归 watchdog 的 canceled 路径收尾。
+// 人名下的 duty (wizard 的 need / 点名人的 ask) 叫不醒人: 不发 remind, 只到 groupMs 在群里让人看见一行;
+// 提问的 wizard 已不在 room 里就不催了。反过来, wizard 名下那条若它最后一句是 need、而它那句 need
+// 在人名下开的账还开着 —— 球在人那边, 不对这个 wizard 计逾期。
 import { HOST_SLOT, holderOf, openDuties, sameWho, whoKey, type Duty, type MsgRow, type RoomState, type Who } from "./room.js";
 
 export type OverdueLevel = "remind" | "group";
@@ -27,6 +30,13 @@ const lastActivity = (s: RoomState, d: Duty, holder: Who): number =>
     ...s.msgs.filter((r) => touches(r, d) && (sameWho(r.author, holder) || sameWho(r.author, d.asker))).map((r) => r.at),
   );
 
+/** 球在人那边: holder 最近一句非终态是 need, 且那句 need 在人名下开的 duty 还没关。 */
+const ballWithHuman = (s: RoomState, d: Duty): boolean => {
+  if (d.last?.status !== "need") return false;
+  const row = s.msgs.find((r) => r.seq === d.last!.seq);
+  return !!row && openDuties(s).some((x) => x.msg === row.id && x.kind === "need");
+};
+
 const remindsTo = (s: RoomState, d: Duty, holder: Who, since: number): MsgRow[] =>
   s.msgs.filter((r) => r.sys === SYS_OVERDUE_REMIND && (r.re ?? []).includes(d.msg) && r.at > since && (r.to ?? []).some((t) => sameWho(t, holder)));
 
@@ -36,7 +46,14 @@ const groupGiven = (s: RoomState, d: Duty, holder: Who, since: number): boolean 
 export const overdueDue = (s: RoomState, now: number, o: OverdueThresholds, known: (uid: string) => boolean = () => true): OverdueHit[] =>
   openDuties(s).flatMap((duty): OverdueHit[] => {
     const holder = holderOf(s, duty);
-    if (duty.kind === "join-req" || holder?.kind !== "wizard" || !s.members.has(whoKey(holder)) || !known(holder.id)) return [];
+    if (duty.kind === "join-req" || !holder || !s.members.has(whoKey(holder))) return [];
+    if (holder.kind === "human") {
+      if (duty.asker.kind === "wizard" && !s.members.has(whoKey(duty.asker))) return [];
+      const last = lastActivity(s, duty, holder);
+      return o.groupMs > 0 && now - last >= o.groupMs && !groupGiven(s, duty, holder, last)
+        ? [{ duty, holder, level: "group", idleMs: now - last }] : [];
+    }
+    if (holder.kind !== "wizard" || !known(holder.id) || ballWithHuman(s, duty)) return [];
     const last = lastActivity(s, duty, holder);
     const idleMs = now - last;
     const reminds = remindsTo(s, duty, holder, last);

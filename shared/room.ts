@@ -155,7 +155,8 @@ export interface Duty {
   seq: number;
   slot: Slot;
   asker: Who;
-  kind: "ask" | "task" | "human" | "join-req";
+  /** need = wizard 向人反问 (chat_reply status need) 在人名下开的账: asker = 那个 wizard, msg = 那条 reply 的 id。 */
+  kind: "ask" | "task" | "human" | "join-req" | "need";
   at: number;
   after?: string[];
   planId?: string;
@@ -197,7 +198,11 @@ export const dutiesOpenedBy = (row: MsgRow): Array<Omit<Duty, "key">> => {
   const base = { msg: row.id, seq: row.seq, asker: row.author, at: row.at,
     ...(row.after?.length ? { after: row.after } : {}), ...(row.planId ? { planId: row.planId } : {}), ...(row.for ? { for: row.for } : {}) };
   if (row.kind === "ask" || row.kind === "task")
-    return (row.to ?? []).filter((t) => t.kind === "wizard").map((t) => ({ ...base, slot: slotOfWho(t), kind: row.kind as "ask" | "task" }));
+    // 点名的 wizard 与人 (人名下开的 ask / task 靠人的下一句话关账, 见 judge 的 humanCloses)。
+    return (row.to ?? []).filter((t) => t.kind === "wizard" || t.kind === "human").map((t) => ({ ...base, slot: slotOfWho(t), kind: row.kind as "ask" | "task" }));
+  // wizard 的 need 回复: judge 把 re 里 duty 的人提问者补进 to —— 球传到人那边, 人名下开一条 need。
+  if (row.kind === "reply" && row.status === "need" && row.author.kind === "wizard")
+    return (row.to ?? []).filter((t) => t.kind === "human").map((t) => ({ ...base, slot: slotOfWho(t), kind: "need" as const }));
   if (row.kind === "join-req") return [{ ...base, slot: HOST_SLOT, kind: "join-req" }];
   // 绑定 room 里的人话: 点名开给被点名者, 没点名开给 host。
   if (row.author.kind === "human" && row.kind === "say" && isBoundRoom(row.room) && row.origin !== "migrate") {
@@ -303,6 +308,39 @@ const holderMatches = (s: RoomState, d: Duty, who: Who): boolean => sameWho(hold
 export const openDuties = (s: RoomState): Duty[] => [...s.duties.values()].filter((d) => !d.closed);
 /** who 在这个 room 手上未关的 duty。 */
 export const dutiesHeldBy = (s: RoomState, who: Who): Duty[] => openDuties(s).filter((d) => holderMatches(s, d, who));
+/** 人 who 的下一句话关哪些 duty (key): 它在本 room 名下全部未关的; `re` (企微引用) 命中其中几条就只关那几条 ——
+ *  引用的不是它名下的账 (引了别的消息 / 引用没对上行) 不算「指定了哪一条」, 照全关, 免得一句答话挂着账不落。 */
+export const humanCloses = (s: RoomState, who: Who, re: readonly string[]): string[] => {
+  const mine = dutiesHeldBy(s, who);
+  const quoted = mine.filter((x) => re.includes(x.msg));
+  return (quoted.length ? quoted : mine).map((x) => x.key);
+};
+
+const uniqWho = (ws: readonly Who[]): Who[] => ws.filter((w, i) => ws.findIndex((x) => sameWho(x, w)) === i);
+
+/** 企微的引用只带文字、不带消息 id: 把引用正文对回本 room 里的一行 (别人 / daemon 说的、正文互相包含、取最近一条)。
+ *  只比字母数字 (镜像出去的气泡带名字头、markdown 会被企微改样), 太短 (< 4 字) 不认 —— 对不上就是没引用,
+ *  人话关账按「没指定哪一条」处理 (全关)。 */
+export const quotedRowIds = (s: RoomState, quoted: string, author?: Who): string[] => {
+  const canon = (t: string): string => t.replace(/[^\p{L}\p{N}]/gu, "");
+  const q = canon(quoted);
+  if (q.length < 4) return [];
+  const hit = [...s.msgs].reverse().find((m) => !sameWho(m.author, author) && m.kind !== "trigger" && ((c) => c.length >= 4 && (c.includes(q) || q.includes(c)))(canon(m.text)));
+  return hit ? [hit.id] : [];
+};
+
+/** judge 替这一行补的收话人 (进行里的 `to`, 重放不再推断):
+ *  wizard 的 need 回复 → re 里它所持 duty 的**人**提问者 (fold 据此在人名下开 need);
+ *  人的话关了谁的账 → 那些账的 wizard 提问者 (仍在 room 里的): 这句就是答给它们的, 与点名同义 —— 唤醒它们、
+ *  且不再当「没点名的人话」落给 host。 */
+const judgeAddressees = (s: RoomState, d: Draft, re: readonly string[], status: ReplyStatus | undefined, closes: readonly string[]): Who[] => {
+  if (d.kind === "reply" && status === "need" && d.author.kind === "wizard")
+    return uniqWho(openDuties(s).filter((x) => re.includes(x.msg) && holderMatches(s, x, d.author)).map((x) => x.asker).filter((a) => a.kind === "human"));
+  if (d.kind === "say" && d.author.kind === "human")
+    return uniqWho(closes.flatMap((k) => { const a = s.duties.get(k)?.asker; return a?.kind === "wizard" && s.members.has(whoKey(a)) ? [a] : []; }));
+  return [];
+};
+
 /** holder 在最近一次被这条 duty 唤醒之后, 是否已用 chat_reply 交代过 —— 任何 status 都算
  *  (progress / need 不关账, 但已经「交代过这一轮」, 不该再被提醒、更不该给提问者写系统行)。
  *  按唤醒算而不按「曾经回过」: need 之后提问者补了信息再唤醒它, 那一轮仍要重新交代。 */
@@ -458,7 +496,10 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   let status: ReplyStatus | undefined;
   if (d.kind === "reply") {
     if (d.statusGiven && d.status === "error" && !isDaemon) return fail(403, "error 只有 daemon 能写");
-    const mine = (id: string): Duty[] => openDuties(s).filter((x) => x.msg === id && (isHuman || isDaemon ? true : holderMatches(s, x, d.author)));
+    // 提问方可以撤回自己开在人名下的账 (不再需要了): 只认显式的 canceled / passed, done 仍只有人 (或人话关账) 能写。
+    const retire = !!d.statusGiven && (d.status === "canceled" || d.status === "passed");
+    const retirable = (x: Duty): boolean => retire && holderOf(s, x)?.kind === "human" && sameWho(x.asker, d.author);
+    const mine = (id: string): Duty[] => openDuties(s).filter((x) => x.msg === id && (isHuman || isDaemon ? true : holderMatches(s, x, d.author) || retirable(x)));
     const holds = re.map((id) => ({ id, duties: mine(id) }));
     const holdsAny = holds.some((h) => h.duties.length);
     status = resolveStatus(d, holdsAny);
@@ -470,20 +511,28 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
       // ④ 覆盖检查: 提问者在线程里有 holder 还没读到的补充 → 先读
       const holderSeen = member?.seen ?? Number.MAX_SAFE_INTEGER;
       for (const h of holds) for (const duty of h.duties) {
-        const newer = s.msgs.filter((m) => sameWho(m.author, duty.asker) && m.seq > holderSeen && (m.re ?? []).includes(duty.msg));
+        // 提问者自己撤回: 没有「提问者的补充」要先读。
+        const newer = sameWho(duty.asker, d.author) ? [] : s.msgs.filter((m) => sameWho(m.author, duty.asker) && m.seq > holderSeen && (m.re ?? []).includes(duty.msg));
         if (newer.length && !isHuman && !isDaemon) return fail(409, "先读 seq " + newer[newer.length - 1]!.seq + ": 提问者对 " + duty.msg + " 有你还没读到的补充");
         closes.push(duty.key);
       }
     }
   } else if (d.statusGiven) return fail(400, "status 只用于 reply");
 
+  // 人话关账: 人的下一句话关掉它名下 (本 room) 未关的 duty —— 带 re 且 re 命中其中几条就只关被引用的,
+  // 否则 (没引用 / 引用的不是它的账) 全关。被关账的提问 wizard 就是这句话的收话人 (judge 补进 to, 下面)。
+  if (isHuman && d.kind === "say") closes = humanCloses(s, d.author, re);
+
   // ⑤ to 只认成员 (人话的 .name 点名由调用方先拉进来)
-  const to = (d.to ?? []).filter((t, i, a) => a.findIndex((x) => sameWho(x, t)) === i);
+  const given = (d.to ?? []).filter((t, i, a) => a.findIndex((x) => sameWho(x, t)) === i);
   if (!isDaemon) {
-    const outsiders = to.filter((t) => !s.members.has(whoKey(t)));
+    const outsiders = given.filter((t) => !s.members.has(whoKey(t)));
     if (outsiders.length) return fail(409, "这些不是本 room 成员: " + outsiders.map((t) => t.id).join(", ") + " — 先邀请, 或改去 dm room");
   }
-  if ((d.kind === "ask" || d.kind === "task") && !to.some((t) => t.kind === "wizard")) return fail(400, d.kind + " 至少点名一个 wizard 成员");
+  if ((d.kind === "ask" || d.kind === "task") && !given.some((t) => t.kind === "wizard" || t.kind === "human")) return fail(400, d.kind + " 至少点名一个 wizard 或人成员");
+  // judge 自己补的收话人 (落进行里, 重放不再推断): need → 被反问的人 (开 need duty); 人话关账 → 提问的 wizard。
+  const addressees = judgeAddressees(s, d, re, status, closes);
+  const to = [...given, ...addressees.filter((a) => !given.some((t) => sameWho(t, a)))];
 
   // ⑥ interrupt 限权: 直属 parent / host / 人
   if (d.interrupt) {
@@ -521,7 +570,8 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   return { ok: true, row: { ...draftRow, wake }, degraded };
 };
 
-/** 这一行该唤醒谁 (wizard uid, 不含作者自己)。B-3: 点名 + host 兜底 + 订阅, 其余只推游标。 */
+/** 这一行该唤醒谁 (wizard uid, 不含作者自己)。B-3: 点名 + host 兜底 + 订阅, 其余只推游标。
+ *  人话关了谁名下的账, 谁 (提问者) 就在 `to` 里 (judge 补的, 见 judgeAddressees) —— 走 named, 与 host 兜底天然去重。 */
 export const wakeTargets = (s: RoomState, row: MsgRow, ctx: Pick<JudgeCtx, "closedDone"> = {}): string[] => {
   const out: string[] = [];
   const add = (w: Who | undefined): void => {

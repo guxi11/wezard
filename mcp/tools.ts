@@ -128,7 +128,7 @@ const ROOM_DOC =
   "本轮由多个 room 一起唤醒时必须显式给 (否则 400)。绑定 room 里每条消息都真的进企微, dm / adhoc 只在 rolepage。";
 
 const TO_DOC =
-  "点名的 wizard (裸名, 带 `.` 也认)。只认本 room 的成员 —— chat_say 的 `to` 只是指出对谁说, 不唤醒、不开 duty; chat_ask 的每个 `to` 各开一条 duty。";
+  "点名的 wizard (裸名, 带 `.` 也认); chat_ask 还可点名本 room 的人 (`human:<userid>`, room_members 里能看到)。只认本 room 的成员 —— chat_say 的 `to` 只是指出对谁说, 不唤醒、不开 duty; chat_ask 的每个 `to` 各开一条 duty (人名下的那条由人的下一句话关账, 并唤醒你)。";
 
 const INTERRUPT_DOC =
   "true = 先 Esc 打断对方当前这一轮再投本条 (不拆 pane)。限权: 只有对方的直属 parent、本 room 的 host、或人能用, 其余 403; 计入本 room 的回合预算 (10 分钟 20 次), 超了 409。被打断那一轮的 duty 不关 —— 它下次被唤醒时按游标重投, 只是那一轮白付。";
@@ -137,7 +137,7 @@ const FOR_DOC =
   "这件活为你欠着的**哪一笔**派的: 写提问方的名字, 或那条消息的 id。只作血缘记录, 不参与关账 (完成只认 status); 缺省 = 本轮唤醒你的那一条, 通常不用给。";
 
 const STATUS_DOC =
-  "done = 做完了 · passed = 无需答复 · canceled = 不做了 (这三者关账) · need = 反问, 等提问方补信息 · progress = 中间进展 (后两者不关账)。";
+  "done = 做完了 · passed = 无需答复 · canceled = 不做了 (这三者关账) · need = 反问, 等提问方补信息 (提问方是人时, 在人名下开一条 duty, 人回话会叫醒你) · progress = 中间进展 (后两者不关账)。";
 
 const ASK_KIND_DOC =
   "`ask` (默认) 一个问题, `task` 一件活 —— 两者都开 duty, 区别只写在行上给读的人看。";
@@ -423,7 +423,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Ask a wizard in a room (opens a duty)",
       description:
-        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它。对方只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 → 400, 先 room_open。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答。",
+        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它; 也可点名本 room 的人 (`human:<userid>`) 向人提问 —— 人名下的 duty 不用 chat_reply, 人在本 room 的下一句话就关账 (带企微引用只关被引用的那条) 并唤醒你, 不需要了就对那条 id chat_reply canceled / passed。对方 wizard 只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 → 400, 先 room_open。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答。",
       inputSchema: currentAddressSchema({
         room: z.string().optional().describe(ROOM_DOC),
         to: z.union([z.string(), z.array(z.string())]).describe(TO_DOC),

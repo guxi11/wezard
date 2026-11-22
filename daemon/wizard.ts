@@ -1122,6 +1122,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "**终句没有任何路由语义**: 它只进你这一轮的记录与 rolepage, 不进任何 room、不关任何 duty、谁也不会收到。要谁看见, 就写成一行",
       "**完成只认 chat_reply 的 status**: done / passed / canceled 关账, need / progress 不关; 只有这条 duty 的处理人 (或人) 能写",
       "**被唤醒就要交代**: 一条 chat_ask / 人话 / join-req 唤醒你时, 它在你名下开了一条 duty —— 这一轮必须用 chat_reply 交代。不交代会被提醒一次; 再不交代, 守护进程会给提问者写一条系统行",
+      "**对人 need 也开账**: 向人反问 (对人话 `chat_reply({status:\"need\"})`, 或 `chat_ask` 点名 `human:<userid>`) 会在人名下开一条 duty, 人在本 room 的下一句话关账并**叫醒你** (带企微引用只关被引用的那条); 不需要答了就对那条 id `chat_reply` canceled / passed。问完这一轮就结束, 别原地等人",
       "**绑定 room 里每条消息都进企微**: 你说的话、系统行、文件都是真的发出去了; dm / adhoc 只在 rolepage",
       "**不需要实时就别订阅**: room_watch 默认关, 订阅后每条人话都真的花你一轮 —— 只想看一眼就 room_read",
       "**答案写在 chat_reply 里, 不是写在备注里**: 交代写清做成了什么 · commit · ARTIFACT: <路径>, 取舍与遗留单列一段; 别把结论塞进 progress / need 的正文然后指望别人当它交付了",

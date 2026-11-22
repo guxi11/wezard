@@ -53,7 +53,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeNotice, leaveOps, dutiesHeldBy, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeNotice, leaveOps, dutiesHeldBy, planDm, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -331,8 +331,11 @@ const main = async (): Promise<void> => {
     // 占位气泡: frame 记表 (reload 后也能收口), 先挂 loading; 第一条 re 它的 reply 覆盖 (§3a)。
     rememberBubble?.(streamId, a.frame, expires);
     if (a.frame && streamId) void ws.client.replyStream(a.frame, streamId, withTagHeader(a.principal, "…"), false).catch(() => undefined);
+    // 引用了哪一行 → re: 人话关账只关被引用的那条 (对不上就不带 re, 关它在本 room 名下全部的账, 见 humanCloses)。
+    const st = roomStateOf?.(room);
+    const re = st && a.quoted ? quotedRowIds(st, a.quoted, author) : [];
     const v = roomHub?.append(room, { author, kind: "say", text, origin: "inbound", ext: streamId,
-      bubble: { stream: streamId, expires },
+      bubble: { stream: streamId, expires }, ...(re.length ? { re } : {}),
       ...(a.images?.length ? { files: a.images.map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })) } : {}),
       ...(to?.length ? { to } : {}) });
     if (!v || !v.ok) {
@@ -1501,7 +1504,7 @@ const main = async (): Promise<void> => {
       if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
       const to = whosOf(b.to ?? []);
       if (to.error) { json(res, 400, { ok: false, reason: to.error }); return; }
-      if (!to.who?.length) { json(res, 400, { ok: false, reason: "to required: 至少点名一个 wizard" }); return; }
+      if (!to.who?.length) { json(res, 400, { ok: false, reason: "to required: 至少点名一个 wizard (或本 room 的人 human:<userid>)" }); return; }
       const target = roomTargetOf(me, to.who, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       const after = idList(b.after);

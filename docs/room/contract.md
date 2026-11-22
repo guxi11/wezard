@@ -76,6 +76,13 @@ type Who = { kind: "human"; id: string /*userid*/ }
 - 覆盖检查: 关 duty X 时, 若提问者在 X 线程里有 seq > holder 游标的补充 → 409「先读 seq N」。
 - after: 前置 duty 全部 done 之前不唤醒 holder。
 
+**人也有 duty** (`Duty.kind` 多一个 `"need"`; 人名下的 duty 槽位是 `human:<userid>`, 读侧 `dutiesHeldBy` / `dutyFacts` 与 wizard 同口径):
+- 开: (a) wizard 对 asker 是人的 duty 写 `reply status:"need"` —— judge 把这些人补进该行的 `to`, fold 据此在每个人名下开一条 `need` (asker = 这个 wizard, msg = 这条 reply 的 id); (b) `chat_ask` 的 `to` 可点名本 room 的人成员 (`human:<userid>`), 人名下开 ask / task (`to` 里至少一个 wizard 或人)。
+- 关: 人在本 room 的**下一句话**关掉它名下未关的 duty, 状态记 done (写进该行 `closes`)。这句带 `re` (企微引用, daemon 把引用正文对回账本里最近一条互相包含的行: `quotedRowIds`) 且命中其中几条 → 只关那几条; 没引用 / 引用没命中它名下的账 → 全关。人写 `chat_reply` 照旧 (超集)。**提问的 wizard** 对自己开出的人名下 duty 可显式写 `canceled` / `passed` (不再需要了; done 仍只有人), 且不受「提问者补充先读」覆盖检查。
+- 唤醒: 人话关了谁的账, 谁 (提问者, 仍在 room 的 wizard) 由 judge 补进这行的 `to` —— 与点名同义: 唤醒它、给它开 `human` duty、且这句不再当「没点名的人话」落给 host (所以非 host 的提问者被叫醒, host 不被连带吵醒)。
+- 人叫不醒、也不被 pane 投递 (唤醒泵、Stop hook / 欠账提醒、`reportGone` 都只认 wizard holder)。
+- 逾期 (§overdue): 人名下的 duty 不发 remind; 到 `groupMin` 在该 room 写一行 `sys:"overdue-group@<userid>"` 的 system 行「⏰ <人> 有一条 .<wizard> 的提问 (<id>) N 分钟没回」(绑定 room 镜像进企微, 非绑定 room 另发提问者 home 群); 提问的 wizard 已不在 room 里就不催。反过来 wizard 名下那条若它最后一条非终态是 `need`、且那句 need 在人名下开的账还开着, 不对该 wizard 计逾期 (球在人那边)。
+
 ## 3. 五个工具 (+ 管理面)
 
 room 缺省 = 唤醒本轮的那条消息所在 room; 本轮由多个 room 一起唤醒 → 400 要求显式给。回包一律回显 `room` 与新行 `id`。

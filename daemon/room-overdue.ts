@@ -2,6 +2,7 @@
 //   remind → trigger 行唤醒处理人 (hub 的 scanOwed 认 trigger 的 re, 它必须交代);
 //   group  → 逾期 room 里记一行 system (去重用), 非绑定 room 再往处理人 (退到提问者) 的 home 群
 //            写一行 system 让人看见。两条都不带 to: wakeTargets 对 system 行不唤醒任何人。
+//   人名下的 duty (wizard 的 need / 点名人的 ask): 叫不醒人, 只有 group 一级 —— 话直接对人说「⏰ 人 有一条 .wizard 的提问 N 分钟没回」。
 // 不自动 canceled —— 完成只认显式关账。
 import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
@@ -44,9 +45,12 @@ export const createOverdueScan = (p: OverdueDeps): { scan: () => { remind: numbe
       if (v.ok) out.remind++; else p.log?.warn({ room, msg: duty.msg, reason: v.reason }, "overdue: remind 写入被拒");
       return;
     }
+    // 人名下的账: 叫不醒人, 话直接对人说 (镜像进企微); 非绑定 room 的转 home 群见下。
+    const human = holder.kind === "human";
     const v = p.append(room, {
       author: DAEMON, kind: "system", origin: "daemon", sys: groupSysOf(holder.id), re: [duty.msg],
-      text: `[wezard] ⏰ ${holderName} 名下 ${duty.msg} (来自 ${askerName}) 已 ${n} 分钟没有动静`,
+      text: human ? `[wezard] ⏰ ${holderName} 有一条 ${askerName} 的提问 (${duty.msg}) ${n} 分钟没回`
+        : `[wezard] ⏰ ${holderName} 名下 ${duty.msg} (来自 ${askerName}) 已 ${n} 分钟没有动静`,
     });
     if (!v.ok) { p.log?.warn({ room, msg: duty.msg, reason: v.reason }, "overdue: group 记录被拒"); return; }
     out.group++;
@@ -57,7 +61,8 @@ export const createOverdueScan = (p: OverdueDeps): { scan: () => { remind: numbe
     try {
       const m = p.append(home, {
         author: DAEMON, kind: "system", origin: "daemon", sys: SYS_OVERDUE_GROUP,
-        text: `[wezard] ⏰ ${holderName} 名下 ${duty.msg} (来自 ${askerName}, 在 ${p.roomLabel(room)}) 已 ${n} 分钟没有动静`,
+        text: human ? `[wezard] ⏰ ${holderName} 有一条 ${askerName} 的提问 (${duty.msg}, 在 ${p.roomLabel(room)}) ${n} 分钟没回`
+          : `[wezard] ⏰ ${holderName} 名下 ${duty.msg} (来自 ${askerName}, 在 ${p.roomLabel(room)}) 已 ${n} 分钟没有动静`,
       });
       if (m.ok) out.mirrored++; else p.log?.warn({ home, msg: duty.msg, reason: m.reason }, "overdue: home 群通知被拒");
     } catch (e) { p.log?.warn({ home, msg: duty.msg, err: (e as Error).message }, "overdue: home 群通知失败 (不补发)"); }

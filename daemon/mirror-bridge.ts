@@ -2599,6 +2599,8 @@ export interface MirrorDispatchArgs {
   /** P7-S3c ②: 信封/提醒尾部之前的原文 —— 与账本 human 行同一文本; strict 群的
    *  rolepage 入消息按它渲染 (口径与出气泡同源: 账本)。 */
   rawText?: string;
+  /** 人引用了哪段话 (企微的引用只带文字): 剥掉名字头后的净正文; 人话行据它对回账本里被引用的那一行 (re)。 */
+  quoted?: string;
 }
 
 export interface AttachArgs {
