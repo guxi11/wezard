@@ -46,7 +46,8 @@
 - [x] `docs/evolve/README.md` 与 `roadmap.md` 加醒目的「历史文档」头: 列出已退役的名词, 指向 `docs/room/contract.md` / `CLAUDE.md` / 本文。没有重写 —— 它们留作决策史。
 - [x] 开发者指南 [`docs/dev-guide.md`](../dev-guide.md) (RoseQuincy `afb1743` `06bd575`): 加 MCP 工具 / room 行类型 / reminder kind 各动哪几处 + vm 沙箱截取锚点表。顺带对齐 CLAUDE.md (reminder kind 现状、room 唤醒不挂信封而是 `【label】(roomId)` 头、`daemonPost` 每个 POST 都带 selfRef)、contract.md §2/§6、过时注释。
 - [x] `tests/charter.test.ts` 断言默认注册的 MCP 工具都在 charter 名册里 (`c226798`, WendyVance): 合写 `plan_create/get/list/update` 展开比对; 豁免表 `charterExempt` 名字失效也报错。
-- [ ] **下次 charter 攒批**: `wecom_doc_list_tools` / `wecom_doc_call` 要不要进「我能做什么」(现列在 `charterExempt` 里作待办)。
+- [x] ~~下次 charter 攒批: `wecom_doc_*` 要不要进 charter~~ admin 定直接删 (企微文档走官方 skill, admin 另外跟进 skill 安装): `d6b831b` (YaraXu)。
+- [ ] 小清理: `daemon/room-overdue.ts` import 的 `holderOf` 未使用 (`tsc --noUnusedLocals`), 下次清理批带上。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
@@ -89,6 +90,7 @@
 | 2026-11-22 | 清理 (PaulOwen): picker 哨兵被真实输入抢占 (`PaneInputError` canceled) 只打 debug (24h 36 条 warn 噪音); reminder.ts 退役 attr; tests 死数据; 注释退役工具名。顺带修 c6f3c31 引入的 `pane-delivery` 失败 (vm 沙箱缺 `envelopeFor`)。教训已记 workspace 记忆: 别 git stash; vm 沙箱测试要随 mirror-bridge 新 import 补注入 | `e600ed3` `eff3069` `3e03081` `0492e38` |
 | 2026-11-22 | 开发者指南 `docs/dev-guide.md` + CLAUDE.md / 契约 / 注释对齐现行代码 (RoseQuincy, standard)。handoff 修复 `c6f3c31` 线上实证 ok | `afb1743` `06bd575` |
 | 2026-11-22 | 测试: 默认 MCP 工具 ⊆ charter 名册, 带防腐烂豁免表 (WendyVance, light)。探出缺口 `wecom_doc_*` 两个, 留给下次 charter 攒批 | `c226798` |
+| 2026-11-22 | admin 7aeb85fc.378: 删企微文档 MCP 桥 (两工具 / `/wedoc/*` / `daemon/wedoc.ts`, -487 行, CHANGELOG BREAKING; YaraXu); 关系图「缓存冷」图例改名 + 冷节点淡灰细描边, 成员栏同源 (AliceYoung, 截图核对) | `d6b831b` `b38ab70` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
