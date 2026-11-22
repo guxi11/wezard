@@ -38,7 +38,7 @@
 - [x] (admin 批, 已做) 接上了: `route.ts` `occupies` 只认别的 wizard 用 chat_ask / delegate 开的 (kind ask/task, asker 是另一个 wizard) 未关 duty; 人话 / join-req / 自己开给自己的不算。常驻 duty 没有专门的标记, 照算 —— 它的持有者是 lead, 本来就被 lead veto 挡着, 不多挡一次。原记录: **delegate 的「任务占用」veto 在生产里从不触发**: `routeRowsOf` (`daemon/index.ts`) 给每行写死 `duties: []`, 而 `route.ts` 的 veto / 渲染都读它。名册那边已有 `dutiesOf` (跨 room 现算 open duty), 喂进来就能恢复。要定: 什么样的 duty 算占用 (常驻 duty 如 d6977146.1 会让 lead 永远被挡 —— lead 本就另有 veto; 人话唤醒开的 duty 在它回复前也会挡) → 改的是派活语义, 先报。
 - [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
 - [ ] svr 重启后名册缺席 30~70s: daemon 应在 svr 上线时立即补推 `WorldFacts`。
-- [ ] lead 标记 (`WizardRecord.lead`) 写入后从不清除。
+- [ ] **lead 标记 (`WizardRecord.lead`) 写入后从不清除** —— 方案见「待 admin 拍板」#3, 已在群里提。
 - [x] `/help` 文案陈旧: 协作一节去掉回执 / 工单 / 循环流水线, 改成 room 口径; 改名权限 lead→parent (与 `wizard_identity` 描述一致)。(本轮)
 - [ ] 源码注释里还有 ~40 处 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` (daemon/index.ts、mirror-bridge.ts、peers.ts、shared/session-label.ts、tool-hints.ts 等), 只是注释, 不进模型; 碰到哪个文件顺手改。运行时文案里只剩 charter 两处 (待拍板 #1)。
 
@@ -53,6 +53,11 @@
 1. ~~charter 删 `wait_peer` 两处~~ 已批已做 (2026-11-22)。原文: (已报, 未批) (`daemon/wizard.ts:1087` 工具行整行删, `:1120` 「不 `wait_peer` 守着」改「不守着」)。纯修正 (工具已不存在), 但会让所有 chartered wizard 收到 handoff 提醒。推荐: 批准, 与下一次必要的 charter 改动合并发出, 减少一次全体提醒。
 
 2. ~~room vs dm A~G~~ admin 回复: A、C 不要; D 改为「dm 统一为 room 特殊形式 + history 参数」(已完成 d986e7a); B 未批; E/F/G 未表态。原文: (见 [research/room-vs-dm-collaboration.md](research/room-vs-dm-collaboration.md) §5)。推荐先批 A (lead 派活信封加一句「小队一个 room」, 零代码) 与 B (多个非成员 chat_ask 自动开 adhoc); G (charter 判据) 与 #1 合并发出。
+
+3. **lead 标记什么时候摘** (2026-11-22 群里提)。现状: `delegate({lead:true})` / `spawn({lead:true})` 写 `lead: true` 后永不清除; 它驱动三件事 —— charter 多一节 lead 规矩、rolepage 👑、delegate「lead 身份, 独立任务不自动复用」veto。实测 `wizards.json` 5 个 lead (Grace / IrisIrwin / JackJones / LeoLane / OliveOwen), 前四个的 lead 活大多已交差, 却永远戴着 👑、永远不被自动派活。
+   - **推荐 B (显式)**: lead 记的是「领了哪一件」—— `WizardRecord` 加可选 `leadOf: <派它那条 chat_ask 的 msg id>`; 那条 duty 被 done / passed / canceled 关掉时 room-hub 摘 lead (还有 active/paused plan 就等 plan 收尾再摘)。合项目口径: 完成只认账本上的显式字段, 不推断。老记录没有 `leadOf`: boot 时若它名下没有同伴开的未关 duty、也没有 active/paused plan, 就摘掉 (会改 `wizards.json` 里 4 条的 flag, 不删记录)。
+   - 备选 A (推断): 不加字段, 每次它 chat_reply 关账后, 名下没有同伴开的未关 duty 且无 active plan 就摘。改动更小, 但同时领两件时会摘早。
+   - 常驻 duty (OliveOwen 的 d6977146.1) 永不关, 两种方案下它都一直是 lead —— 符合事实。
 
 ## 进行中
 
