@@ -129,6 +129,8 @@ const server = createServer((req, res) => {
       const many = Array.from({ length: 120 }, (_, i) => ({ ...base, id: "bb" + String(i).padStart(6, "0") + ".1", seq: 100 + i, text: "第 " + i + " 条消息 ".repeat(8) + (i === 119 ? " v" + (globalThis.__bulk++) : "") }));
       return send("application/json", JSON.stringify({ ...ROOM, at: Date.now(), msgs: many, total: 120 }));
     }
+    // 用例想让某些成员「窗口外才发过言」: globalThis.__staleMembers = [成员 id …] (lastAt 改成 3 天前)
+    if (globalThis.__staleMembers) return send("application/json", JSON.stringify({ ...ROOM, members: ROOM.members.map((m) => globalThis.__staleMembers.includes(m.id) ? { ...m, lastAt: T0 - 3 * 86400000 } : m) }));
     return send("application/json", JSON.stringify(ROOM));
   }
   if (u.pathname === "/api/wizard" && u.searchParams.get("card") === "1" && globalThis.__cardDelay) { globalThis.__cardReqs = (globalThis.__cardReqs || 0) + 1; return setTimeout(() => send0("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "", true))), globalThis.__cardDelay); }
@@ -779,6 +781,24 @@ try {
   assert.equal(cold.sleepCold.fill, WHITE, "休眠且冷 = 白底: " + JSON.stringify(cold.sleepCold));
   assert.equal(cold.sleepCold.dashed, true, "休眠且冷 = 白底虚线");
   assert.equal(cold.workCold.fill, "rgb(45, 164, 78)", "工作中不受冷影响 (仍是绿): " + JSON.stringify(cold.workCold));
+
+  // 4) 时间范围 A: 成员栏里窗口外才发过言的成员整行淡灰, 窗口内的不灰; 选「全部」后都不灰; 图不动 (同样的节点数)。
+  globalThis.__staleMembers = [B];
+  const pgA = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+  await pgA.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });
+  await pgA.waitForSelector("#gside .gs-item", { timeout: 5000 });
+  const quiet = () => pgA.evaluate(() => [...document.querySelectorAll("#gside .gs-item")].map((it) => [it.querySelector(".nm").textContent, it.classList.contains("out"), getComputedStyle(it.querySelector(".nm")).color]));
+  const q2d = await quiet();
+  assert.deepEqual(q2d.filter((x) => x[1]).map((x) => x[0]), ["bob"], "2d: 只有 3 天前才发过言的 bob 淡灰: " + JSON.stringify(q2d));
+  // (fixture 的外壳没有 chat.css 的 --faint 变量, 算出来的颜色比不了: 灰度由截图验, 这里只验 class 与悬停提示)
+  assert.match(await pgA.evaluate(() => document.querySelector("#gside .gs-item.out").getAttribute("title")), /窗口 \(2d\) 内没有发言/, "悬停说明原因");
+  await pgA.click('[data-side="graph"]');
+  await pgA.waitForSelector(".rv-person", { timeout: 5000 });
+  await pgA.click(".convs-h .sp[data-dd=win] .sp-btn");
+  await pgA.click('.convs-h .sp[data-dd=win] .sp-it[data-v="0"]');
+  await pgA.waitForFunction(() => document.querySelectorAll("#gside .gs-item.out").length === 0, null, { timeout: 5000 });
+  await pgA.close();
+  globalThis.__staleMembers = undefined;
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
