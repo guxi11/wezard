@@ -423,6 +423,10 @@ export const ConfigSchema = z.object({
       intervalSec: z.number().int().min(10).default(60).describe("room 看门狗的扫描间隔 (秒); 正常轮终走 turn_end 事件, 看门狗只兜漏事件与 pane 消失"),
       staleMin: z.number().int().min(1).default(5).describe("wizard 距最后一次事件 (turn_end / 注入) 超过这么多分钟且仍有未结 duty, 才进看门狗的视野"),
     }).default({}).describe("room 看门狗 (boot 读一次)"),
+    overdue: z.object({
+      remindMin: z.number().int().min(0).default(60).describe("duty 距最后一次活动超过这么多分钟仍未关: daemon 提醒处理人一次 (它必须交代); 0 = 关这一级"),
+      groupMin: z.number().int().min(0).default(120).describe("超过这么多分钟仍无动静: 在 duty 所在 room 记一行, 非绑定 room 再通知处理人 (退到提问者) 的 home 群让人看见; 0 = 关这一级"),
+    }).default({}).describe("duty 逾期两级提醒 (每次看门狗间隔现读; 不自动 canceled)"),
   }).default({}).describe("room 账本相关 (磁盘护栏 / 看门狗)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),

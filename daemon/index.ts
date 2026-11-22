@@ -50,6 +50,7 @@ import { errText, installResponseTracker } from "./last-response.js";
 import { openRoomStore } from "./rooms.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
+import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
   DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, leaveOps, dutiesHeldBy, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
@@ -1921,6 +1922,16 @@ const main = async (): Promise<void> => {
     // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单 (paste 端口的 touch 见 hub ports)。
     const watchdogTimer = setInterval(() => void roomWatchdog.scan(), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
     watchdogTimer.unref?.();
+    // duty 逾期两级提醒: 与看门狗同节拍, 阈值每轮现读 (hot)。
+    const overdue = createOverdueScan({
+      log: roomLog, now: () => Date.now(),
+      thresholds: () => ({ remindMin: cfg.rooms?.overdue?.remindMin ?? 60, groupMin: cfg.rooms?.overdue?.groupMin ?? 120 }),
+      rooms: roomStore.ids, stateOf: roomState, append: (room, d) => hub.append(room, d),
+      wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
+    });
+    const overdueTimer = setInterval(() => { try { overdue.scan(); } catch (e) { roomLog.warn({ err: (e as Error).message }, "overdue: 扫描失败"); } }, (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
+    overdueTimer.unref?.();
+    setTimeout(() => { try { overdue.scan(); } catch { /* 下一轮再来 */ } }, 20_000).unref?.();
     // ── 新群引导的两端 (契约 §4): 人话落 room → guide 当 founder 说话 → 绑定后交给管家 ────
     /** 引导期: 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。引导从此只能在 room
      *  里说话 (chat_reply), 绑定后那条 duty 连原话一起交给管家。 */
