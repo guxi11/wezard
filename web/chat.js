@@ -27,7 +27,7 @@
   var S = { openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
   var SIDE_KEY = 'wezard.role.side';
   try { if (localStorage.getItem(SIDE_KEY) === 'graph') S.view = 'graph'; } catch (e) { /* 隐私模式 */ }
-  // 时间范围 (列表与图共用): room 的动静与人动过都按这一刀, 有未决 duty 的 room 和活着 / 在跑 / 是 host 的人照旧总在。
+  // 时间范围 (列表与图共用, 见 roomInScope): 只按 room 的最后动静切 —— 有未决 duty 的 room 与正在看的 room 照旧总在; 成员不单独过窗口, 跟着 room 走。
   // 选中的那档与左栏视图开关一样记在 localStorage, 默认 2d。
   var WIN_KEY = 'wezard.role.winMin';
   var WINS = [[60, '1h'], [120, '2h'], [360, '6h'], [720, '12h'], [1440, '1d'], [2880, '2d'], [0, '全部']];
@@ -42,6 +42,14 @@
   };
   var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
   var inWin = function (ts) { return !WIN || (!!ts && ts >= winCut()); };
+  // 列表与图「画哪些 room」的唯一口径: 窗口内有动静 / 留着未决 duty / 正在看的那个 (滑出窗口也不能从眼前消失)。
+  // 成员不单独过窗口: 成员跟着 room 走 (见 participants), 否则 room 的成员边画不出来。
+  var roomInScope = function (r) {
+    return !WIN || r.openDuties > 0 || inWin(r.last && r.last.at) || (!!D.roomId && D.roomId === r.id);
+  };
+  var scopedRooms = function () {
+    return (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); }).filter(roomInScope);
+  };
 
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -822,8 +830,7 @@
     '<span title="当前视角: 左上名片是它, room 里靠右的气泡是它说的"><svg class="lgpov" viewBox="-13 -7 26 14" width="24" height="13" aria-hidden="true"><circle r="4.5"/><path d="M-8 -4L-12 0L-8 4M8 -4L12 0L8 4"/></svg>视角</span></div>';
   var renderGraph = function () {
     if (S.gdrag) return;    // 正在拖: 定时刷新别来动节点
-    var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
-    if (WIN) rooms = rooms.filter(function (r) { return r.openDuties > 0 || inWin(r.last && r.last.at); });
+    var rooms = scopedRooms();
     var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
     var directs = [];
     rooms = rooms.filter(function (r) {
@@ -870,14 +877,6 @@
     return !!r.bound || (r.kind !== 'dm' && r.kind !== 'adhoc') ||
       (r.members || []).some(function (m) { return m.who && m.who.kind === 'human'; });
   };
-  // 与图同一个范围: 按所选时间窗有动静 (或留下未决 duty) 的 room; 「全部」= 整本账, 选中的那个总在。
-  var sideRooms = function () {
-    var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
-    if (!WIN) return rooms;
-    return rooms.filter(function (r) {
-      return r.openDuties > 0 || inWin(r.last && r.last.at) || (!!D.roomId && D.roomId === r.id);
-    });
-  };
   // 视图开关照 main 的「聊天 / 关系」小开关 (.vt): 列表下挂在第一个分组标题右端, 图下挂在图的标题行。
   // 一对图标: 同一套 14px 线描 (stroke 1.5, 圆头), 列表 = 三行带点的条目, 图 = 三个节点连成一张网。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="3" cy="4" r=".9" fill="currentColor" stroke="none"/><circle cx="3" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="3" cy="12" r=".9" fill="currentColor" stroke="none"/><path d="M6.5 4H14M6.5 8H14M6.5 12H14"/></svg>';
@@ -885,7 +884,7 @@
   // 时间范围下拉: 列表与图共用 (main 的 .sp 小下拉), 挂在标题行右端、视图开关左边。
   var winSelect = function () {
     return dropdown('win', {
-      ic: '⏱', end: true, title: '时间范围: room 的动静与人动过只看这段时间内的',
+      ic: '⏱', end: true, title: '时间范围: 只列这段时间内有动静的 room (有待交代 duty 的、正在看的 room 照常显示); 成员跟着 room 走',
       label: winLabel(),
       items: WINS.map(function (w) { return { v: String(w[0]), on: w[0] === WIN, html: '<span class="id">' + w[1] + '</span>' }; }),
     });
@@ -935,7 +934,7 @@
   };
   var renderList = function () {
     gStop();
-    var rooms = sideRooms();
+    var rooms = scopedRooms();
     var groups = rooms.filter(isPeopleRoom), convs = rooms.filter(function (r) { return !isPeopleRoom(r); });
     // 照 main: 分组标题「群聊 N」「会话 N」, 开关挂在第一个标题的右端; 空着的那一组不画。
     var sec = function (title, tip, list) {

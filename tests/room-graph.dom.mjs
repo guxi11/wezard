@@ -240,6 +240,21 @@ try {
   assert.equal(counts.membar, false, "chat detail 上不再挂成员条");
   assert.ok(counts.headActs.indexOf("刷新") < 0, "右上角不再有刷新: " + counts.headActs);
 
+  // 选中的 room 滑出时间窗 (OLD 3 天前, 默认 2d 本不画): 图与列表同一口径, 选中的那个总在 —— 图里不能只剩 detail 开着而节点没了。
+  await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(OLD), { waitUntil: "load" });
+  await page.waitForSelector(".rv-msg, .rv-none", { timeout: 5000 });
+  await page.waitForSelector('.rv-room[data-room="' + OLD + '"]', { timeout: 5000 });
+  const oldG = await page.evaluate((id) => ({ node: document.querySelectorAll('.rv-room[data-room="' + id + '"]').length, rooms: document.querySelectorAll(".rv-room").length, on: !!document.querySelector('.rv-room.on[data-room="' + id + '"]') }), OLD);
+  assert.deepEqual(oldG, { node: 1, rooms: 2, on: true }, "图: 选中的老 room 照画 (其余老 room 仍不画): " + JSON.stringify(oldG));
+  await page.click('[data-side="list"]');
+  await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
+  const oldL = await page.evaluate(() => [...document.querySelectorAll(".rv-list .ci")].map((b) => b.getAttribute("data-room")));
+  assert.deepEqual(oldL, [G, OLD, DM], "列表: 与图同一口径, 选中的老 room 也在: " + JSON.stringify(oldL));
+  await page.click('[data-side="graph"]');
+  await page.waitForSelector(".rv-person", { timeout: 5000 });
+  await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });   // 回到 G 接后面的成员栏验收
+  await page.waitForSelector(".rv-msg", { timeout: 5000 });
+
   // 成员栏: 角色 / 状态 / 聪明度·最近发言 / 待交代 (可展开) / 栏头 (成员数 · host · 建于 · 待交代总数)。
   const gs = await page.evaluate(() => {
     const items = [...document.querySelectorAll("#gside .gs-item")].map((it) => ({
