@@ -208,7 +208,7 @@ export const wizardStream = (
   q: StreamQuery,
 ): StreamRow[] => {
   const inSpanTs = inSpan(q.span);
-  const msgs = allMessages(records, now, dir.canon)
+  const msgs = allMessages(records, now)
     .filter((m) => m.from === role || m.to === role)
     .filter((m) => inSpanTs(m.ts));
   const label = (base: string): string => (base ? q.roomLabel?.(base) || dir.chatName(base) : "");

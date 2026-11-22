@@ -1334,6 +1334,16 @@ const main = async (): Promise<void> => {
       if (isUid(raw) && wizards.byUid(raw)) return { kind: "wizard", id: raw };
       return undefined;
     };
+    /** 名册里已经没有的身份只剩一条成员行 (迁移 / 实例结束留下, 迁移带进来的无名成员就是这样):
+     *  按地址找「本 room 的人」的路径 (room_leave / room_transfer) 要能认出它, 否则它永远移不掉。
+     *  只认本 room 现有的成员 —— uid (可带 uid: 前缀) 优先, 其次成员显示名。 */
+    const memberRefOf = (s: RoomState, ref: string): Who | undefined => {
+      const raw = stripSigil((ref ?? "").trim());
+      if (!raw) return undefined;
+      const byUid = s.members.get(whoKey({ kind: "wizard", id: raw.startsWith("uid:") ? raw.slice(4) : raw }));
+      if (byUid) return byUid.who;
+      return [...s.members.values()].map((m) => m.who).find((w) => stripSigil(roomNameOf(w)).toLowerCase() === stripSigil(raw).toLowerCase());
+    };
     const whosOf = (refs: readonly unknown[]): { who?: Who[]; error?: string } => {
       const list = (Array.isArray(refs) ? refs : [refs]).map((x) => String(x)).filter((x) => x.trim());
       const out: Who[] = [];
@@ -1644,7 +1654,8 @@ const main = async (): Promise<void> => {
       const r = roomResolve(b.room);
       if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
       const s = roomState(r.room)!;
-      const who = (b.who ?? "").toString().trim() ? whoRefOf((b.who ?? "").toString()) : me;
+      const ref = (b.who ?? "").toString();
+      const who = ref.trim() ? whoRefOf(ref) ?? memberRefOf(s, ref) : me;
       if (!who) { json(res, 400, { ok: false, reason: "认不出这个地址: " + b.who }); return; }
       if (!sameWho(who, me) && !sameWho(roomHost(s), me)) { json(res, 403, { ok: false, reason: "只有 host 能移出别人" }); return; }
       if (!s.members.has(whoKey(who))) { json(res, 409, { ok: false, reason: roomNameOf(who) + " 不是这个 room 的成员" }); return; }
@@ -1686,7 +1697,7 @@ const main = async (): Promise<void> => {
       const roomId = re ? roomStore.roomOfMsg(re) : undefined;
       const s = roomId ? roomState(roomId) : undefined;
       if (!roomId || !s || !s.byId.has(re)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re }); return; }
-      const to = whoRefOf((b.to ?? "").toString());
+      const to = whoRefOf((b.to ?? "").toString()) ?? memberRefOf(s, (b.to ?? "").toString());
       if (!to) { json(res, 400, { ok: false, reason: "认不出这个地址: " + (b.to ?? "") }); return; }
       if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是这个 room 的成员" }); return; }
       const ds = openDuties(s).filter((d) => d.msg === re);

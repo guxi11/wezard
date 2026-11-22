@@ -1863,18 +1863,11 @@
     }
     var born = w.bornAt || (D.sessions || []).reduce(function (m, s) { return s.start && (!m || s.start < m) ? s.start : m; }, 0);
     var cb = D.charterBrief;
-    // 链接指的那个化身 (target 的 #tag) 与这一页的规范身份不同时说出来 —— 同身份多化身在
-    // rolepage 聚成一页 (见 makeDirectory 的 canon), 不说明会看着像「点错了 / 没选中」。
-    // 只在还停在链接指的那个 role 上时才提示; 点开别人之后这句就不属于眼前这一页了。
-    var want = S.roleMoved ? '' : ROLE.indexOf("#") > 0 ? ROLE.split("#").pop() : (/^(chat|user):/.test(ROLE) ? ROLE : "");
-    var tip = want && want !== (w.name || "") && ROLE !== w.id
-      ? fact("🔗", "链接指向 " + want, "链接来自 " + want + "; 它与 " + (w.name || w.id) + " 是同一个身份的化身, 这一页是它的规范页") : "";
     // 日程排最后, 可点: 名下排了什么 (main 的口径 —— 名片是这一栏唯一的入口)。
     var pf = schedulesForRole().length || plansForRole().length ? planFact() : null;
     // lead / 聪明程度在名册快照 (world) 的节点上; 快照还没到 (svr 刚重启) 时 nodeOf 给的占位没有这两项, 名片就不画。
     var nd = nodeOf(w.id);
     var facts = [
-      tip,
       homeFact(w),
       w.parent && w.parent.name ? fact('👤', '创建者 ' + w.parent.name, '创建者: ' + w.parent.name + ' (spawn / clone 出它的 wizard, 管理上的 parent)') : '',
       born ? fact('🐣', fmtAgo(born), '出生于 ' + fmtDay(born)) : '',
@@ -2086,7 +2079,6 @@
   // 换 role: 宪章 / 日程栏 / 旧名片都属于上一个人, 清掉; 世界视图的未读 / 计划按新 role 重算。
   var adoptRole = function (role) {
     if (!role || role === D.role || (D.wizard && D.cardRole === D.role && role === D.wizard.id)) return false;
-    if (D.wizard && role !== D.wizard.id) S.roleMoved = true;
     S.charter = null; resetPane();
     D.role = role; D.plans = []; D.schedules = []; D.stats = null;
     loadWorld();
