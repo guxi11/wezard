@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-22
+
+**3.0 是沟通层的一次重写 (破坏性)。** 一个 room (企微群 / 单聊 / 频道帖 / wizard 之间的 dm / 临时 adhoc) 一份 append-only 账本 (`stateDir/rooms/<id>.jsonl`), 成员、消息与未结 duty 全部由账本 fold 得出 —— 旧的「路由行 + 回执 + 义务」三套账整体退役, `tell_peer` / `wait_peer` / `read_chat` / `send_peer` / `dispatch` 与 jobs / workflow 执行器一并删除, 工具面改为 `chat_say` / `chat_ask` / `chat_reply` / `room_*`, **完成只认 `chat_reply` 的 status**, 终句不再有任何路由语义。严格群 (`chatPolicy.topOnly` / `speech`) 移出 schema; `/name` 下线, 身份切成「类 / 实例」两层 (类 = bot × role × workspace 的人物设定, 实例 = 稳定地址); 旧状态文件 (routes / members / chats / obligations …) 冻结在盘上不再打开, 切换时用 `node dist/cli/migrate-rooms.js` 一次性迁进 room 账本。企微文档 MCP 桥 (`wecom_doc_*` / `daemon/wedoc.ts`) 删除, 改用官方 skill (随包安装、按会话注入)。rolepage 随之重做为 room / role 双维视图, 关系图与时间范围一并换实现。
+
 ### Added
 - **人也有 duty (admin 要的, OliveOwen 11937e21.1)**: wizard 向人反问后, 人名下开一条要交代的 duty, 人回话关账并**叫醒提问的 wizard** —— 以前 duty 只开给 wizard, 人没点名的回话只唤醒 host, 非 host 的 wizard 反问人之后, 人的答案根本叫不醒它。**开**: wizard 对 asker 是人的 duty 写 `chat_reply status:"need"`, judge 把这些人补进该行 `to`, fold 在人名下开一条新 kind `need` (asker = 该 wizard, msg = 这条 reply 的 id); `chat_ask` 的 `to` 可点名本 room 的人成员 (`human:<userid>`), 开 ask / task (judge 与 MCP 描述同步放开)。**关**: 人在本 room 的下一句话关掉它名下未关的 duty (状态 done, 写进该行 `closes`); 带企微引用时 daemon 把引用正文对回账本里被引用的那行 (`quotedRowIds`, 人话行带 `re`), 命中其中几条就只关那几条, 没引用 / 没命中全关; 提问的 wizard 可对自己开出的人名下 duty 写 `canceled` / `passed`。**唤醒**: 人话关了谁的账, 谁就由 judge 补进这行的 `to` (与点名同义: 唤醒、开 `human` duty、不再把这句当「没点名」落给 host)。**逾期**: 人名下的 duty 不发 remind, 到 `groupMin` 在该 room 写 system 行「⏰ <人> 有一条 .<wizard> 的提问 (<id>) N 分钟没回」(绑定 room 镜像进企微, 非绑定 room 另发提问者 home 群, 提问者已不在 room 则不催); wizard 名下那条若最后一句是 `need` 且它那句 need 在人名下开的账还开着, 不对它计逾期。人不被 pane 投递 (唤醒泵 / Stop hook / 欠账提醒只认 wizard)。charter 的「对人 need 也开账」一条、`docs/room/contract.md`「人也有 duty」一节同步; 前端不动 (`web/chat.js` 的 `DUTY_KIND` 还没有 `need` 的中文名, 暂显示原词)。测试 `tests/room-human-duty.test.ts`。
 - **群公告 (room notice): 每个 room 一条, 让 room 里所有 wizard 一直知道一句话 (OliveOwen 13cc3d30.1, admin 同意方案)**: 账本加 `notice` op (与 `name` 同构, 空 = 清除, 上限 500 字, 状态 fold 出来不另存); wizard 用 `room_name` 的新可选参数 `notice` (不新增工具; `name` / `notice` 至少给一个; host 才能改, 非 host 403); 人在企微里 `/notice <文字>` 设 / `/notice` 看 / `/notice clear` 清 (照 `/use` 的授权门, `/help` 有一行), 改的是本群 room。公告变了: 落一条 daemon system 行「📌 群公告: …」/「📌 群公告已清除」(绑定 room 镜像进企微, 不唤醒任何人), 在跑的 wizard 成员下一次注入时随 system-reminder 带到 (经 `notices`, 不额外唤醒); 新 wizard 的 charter 里带一节「本群公告」(没有就不出现); `RoomFact.notice` 进 `/api/room` 与 `/api/world` 的 room 节点 (前端本次不改), `room_read` 单 room 输出头部带一行。契约见 `docs/room/contract.md`, 测试 `tests/room-notice.test.ts`。
@@ -1520,7 +1524,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.9.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/guxi11/wezard/compare/v2.9.0...v3.0.0
 [2.9.0]: https://github.com/guxi11/wezard/compare/v2.8.8...v2.9.0
 [2.8.8]: https://github.com/guxi11/wezard/compare/v2.8.7...v2.8.8
 [2.8.7]: https://github.com/guxi11/wezard/compare/v2.8.6...v2.8.7
