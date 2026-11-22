@@ -45,7 +45,6 @@ import {
   makeClaimStatusHandler,
   makeClaimResetHandler,
 } from "./claim.js";
-import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { openRoomStore } from "./rooms.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
@@ -438,71 +437,6 @@ const main = async (): Promise<void> => {
   // 入站监听 (inbound / approval / ask) 都装好了才开收: 首轮 getupdates 会立刻带回 reload 期间
   // 人发的话 (含回菜单的数字), 游标随即前移 —— 早了就是永久丢。
   wx.start();
-
-  // 智能机器人 doc / smartsheet / contact MCP 桥接 — 总是注册路由, 失败让
-  // 错误透传到上游 (Claude / curl)。requesterUserId 解析顺序:
-  // 调用方 body.requesterUserId → defaultChat 里 user:<id> 部分 → 不传
-  // (server 侧会拒, 错误消息原样回去, 比 daemon 提前判更透明)。
-  {
-    const wedocLog = log.child({ mod: "wedoc" });
-    const bridge = makeWedocBridge({
-      client: ws.client,
-      log: wedocLog,
-      pluginVersion: "wezard-0.1",
-      cacheTtlMs: 30 * 60_000,
-      configFetchTimeoutMs: 15_000,
-      requestTimeoutMs: 30_000,
-    });
-    const fallbackUserId = (): string | undefined => {
-      const dc = cfg.defaultChat.trim();
-      if (dc.startsWith("user:")) return dc.slice(5);
-      return undefined;
-    };
-    const resolveUid = (raw: unknown): string | undefined => {
-      const v = typeof raw === "string" ? raw.trim() : "";
-      if (v) return v.startsWith("user:") ? v.slice(5) : v;
-      return fallbackUserId();
-    };
-    http.register("POST /wedoc/list", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ category: string; requesterUserId: string }>;
-      const category = (body.category ?? "").trim();
-      if (!category) { json(res, 400, { ok: false, error: "category required" }); return; }
-      try {
-        const result = await bridge.list(category, resolveUid(body.requesterUserId));
-        json(res, 200, { ok: true, result });
-      } catch (e) {
-        wedocLog.error({ err: (e as Error).message, category }, "wedoc list failed");
-        json(res, 502, { ok: false, error: (e as Error).message });
-      }
-    });
-    http.register("POST /wedoc/call", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{
-        category: string;
-        method: string;
-        args: Record<string, unknown>;
-        requesterUserId: string;
-      }>;
-      const category = (body.category ?? "").trim();
-      const method = (body.method ?? "").trim();
-      if (!category || !method) {
-        json(res, 400, { ok: false, error: "category and method required" });
-        return;
-      }
-      try {
-        const result = await bridge.call(category, method, body.args ?? {}, resolveUid(body.requesterUserId));
-        json(res, 200, { ok: true, result });
-      } catch (e) {
-        wedocLog.error({ err: (e as Error).message, category, method }, "wedoc call failed");
-        json(res, 502, { ok: false, error: (e as Error).message });
-      }
-    });
-    http.register("POST /wedoc/invalidate", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ category: string }>;
-      bridge.invalidate(body.category?.trim() || undefined);
-      json(res, 200, { ok: true });
-    });
-    wedocLog.info("wedoc bridge ready");
-  }
 
   // Mirror-mode: status + the spawn/switch routes the chat side drives.
   {

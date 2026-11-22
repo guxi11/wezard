@@ -86,9 +86,6 @@ const expandSlashForms = (text: string) =>
 const charterExempt: Record<string, string> = {
   // 只给新群引导化身用, 见 daemon/onboarding.ts GUIDE_TOOLS
   onboard_bind: "onboarding guide only",
-  // 待办, 不是有意排除: 尚未进 charter, 待下次 charter 攒批时决定
-  wecom_doc_list_tools: "TODO: decide at next charter batch",
-  wecom_doc_call: "TODO: decide at next charter batch",
 };
 {
   const registered = await toolNames();

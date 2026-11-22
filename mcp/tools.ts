@@ -88,7 +88,7 @@ const daemonGet = async (path: string): Promise<DaemonReply> => {
 };
 
 // Routes answer with either `reason` or `error`; `pick` narrows a payload that
-// is nested rather than spread at the top level (wedoc's `result`).
+// is nested rather than spread at the top level.
 const unwrap = (name: string, { j, status }: DaemonReply, pick?: (j: Record<string, unknown>) => unknown, input?: Record<string, unknown>) =>
   j.ok ? ok(present(name, pick ? pick(j) : j, input)) : fail(`${name} failed: ${(j.reason ?? j.error ?? `http ${status}`) as string}${Object.keys(recovery(j)).length ? `\n${JSON.stringify(recovery(j))}` : ""}`);
 
@@ -280,64 +280,6 @@ export const createWezardServer = (): McpServer => {
         cwd: j.cwd,
         ...(j.pendingCwd ? { pendingCwd: j.pendingCwd, appliedTo: "future-sessions" } : {}),
       });
-    },
-  );
-
-  // 企业微信 doc / smartsheet / contact MCP 桥接。把 daemon 远端的 MCP 转发
-  // 给本地 Claude: list_tools 列工具, call_tool 调用 (创建文档 / 写表格 / 读
-  // 内容)。category 当前可选: "doc" | "smartsheet" | "contact"。
-  // 大模型先调 list_tools 看可用方法和入参 schema, 再 call_tool。
-  server.registerTool(
-    "wecom_doc_list_tools",
-    {
-      title: "List WeCom doc/smartsheet tools",
-      description:
-        "List available WeCom MCP tools for a given category. Categories: 'doc' (online documents), 'smartsheet' (smart sheets), 'contact'. Returns tool names + JSON Schema. Call this BEFORE wecom_doc_call to discover method names and required arguments.",
-      inputSchema: {
-        category: z.string().describe("MCP category: 'doc' | 'smartsheet' | 'contact'."),
-        requesterUserId: z
-          .string()
-          .optional()
-          .describe(
-            "WeCom userid that owns the resulting docs. Optional — daemon falls back to config.wedoc.requesterUserId or defaultChat. 'user:xxx' prefix accepted.",
-          ),
-      },
-    },
-    async ({ category, requesterUserId }) => {
-      const r = await daemonPost("/wedoc/list", { category, ...(requesterUserId ? { requesterUserId } : {}) });
-      return unwrap("wecom_doc_list_tools", r, (j) => j.result);
-    },
-  );
-
-  server.registerTool(
-    "wecom_doc_call",
-    {
-      title: "Call WeCom doc/smartsheet tool",
-      description:
-        "Invoke a specific WeCom MCP tool (after discovering it via wecom_doc_list_tools). Typical flow: list tools for 'doc' → pick a method like 'doc_create' → call it with args matching its inputSchema. Daily quota: 20 docs per requesterUserId.",
-      inputSchema: {
-        category: z.string().describe("MCP category: 'doc' | 'smartsheet' | 'contact'."),
-        method: z.string().describe("Tool name from wecom_doc_list_tools (e.g. 'doc_create', 'smartsheet_add_records')."),
-        args: z
-          .record(z.string(), z.unknown())
-          .optional()
-          .describe("JSON object matching the tool's inputSchema. Empty object if the tool takes no params."),
-        requesterUserId: z
-          .string()
-          .optional()
-          .describe(
-            "WeCom userid acting as document owner. Optional — daemon falls back to config / defaultChat. 'user:xxx' prefix accepted.",
-          ),
-      },
-    },
-    async ({ category, method, args, requesterUserId }) => {
-      const r = await daemonPost("/wedoc/call", {
-        category,
-        method,
-        args: args ?? {},
-        ...(requesterUserId ? { requesterUserId } : {}),
-      });
-      return unwrap("wecom_doc_call", r, (j) => j.result);
     },
   );
 
