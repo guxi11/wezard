@@ -49,6 +49,7 @@ import { errText, installResponseTracker } from "./last-response.js";
 import { openRoomStore } from "./rooms.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
+import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
@@ -1687,6 +1688,33 @@ const main = async (): Promise<void> => {
         .map((mm) => "· " + roomNameOf(mm.who) + (sameWho(host, mm.who) ? " (host)" : "") + " — via " + mm.via + ", " + new Date(mm.since).toLocaleString("zh-CN", { hour12: false }));
       json(res, 200, { ok: true, text: [roomLabel(s.id) + " (" + s.id + ") — 成员 " + lines.length + ", 未决 duty " + openDuties(s).length, ...lines].join("\n") });
     });
+    // ── 管理路径 (持 daemon 口令): 清理 chat room 里迁移带进来的 / 过时的 wizard 成员 ──
+    // 缺省 dry-run, 只回每个 room 留谁移谁; body.apply === true 才经 hub 写 leave (leaveOps,
+    // 带 duty 的先落 canceled reply)。规则见 daemon/room-prune.ts。
+    http.register("POST /room/prune", guarded(async (req, res) => {
+      const { body } = await readPeerBody(req);
+      const b = body as { rooms?: unknown; apply?: unknown; keepRecentHours?: unknown };
+      const now = Date.now();
+      const keepRecentMs = Math.max(1, Number(b.keepRecentHours ?? 48)) * 3600_000;
+      const picked = Array.isArray(b.rooms) && b.rooms.length ? b.rooms.map(String) : roomStore.ids().filter((id) => id.startsWith("chat:"));
+      const rooms = picked.map((id) => {
+        const s = roomState(id);
+        if (!s) return { room: id, error: "没有这个 room" };
+        let stewardUid: string | undefined;
+        try {
+          const st = resolveSteward(cfg, wizards, id, (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
+          stewardUid = wizards.get(st.target)?.uid;
+        } catch { /* 解析不出管家: 不按管家保留 */ }
+        const plan = selectRoomPrune(s, { now, keepRecentMs, stewardUid,
+          rec: (uid) => { const r = wizards.byUid(uid); return r ? { target: r.target, name: r.name } : undefined; } });
+        if (b.apply === true && plan.drop.length) {
+          hub.write(id, pruneLeaveOps(s, plan.drop, now));
+          roomLog.info({ room: id, dropped: plan.drop.length, kept: plan.keep.length }, "room-prune: 已写 leave");
+        }
+        return { ...plan, after: plan.before - plan.drop.length };
+      });
+      json(res, 200, { ok: true, applied: b.apply === true, keepRecentHours: keepRecentMs / 3600_000, rooms });
+    }));
     http.register("POST /room/transfer", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
