@@ -29,6 +29,7 @@ import { applyOp, emptyRoom, type RoomOp, type RoomState } from "../shared/room.
 import { openSeenLog } from "../shared/seen-log.js";
 import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
+import { loadFacts, saveFacts } from "./facts-store.js";
 import { loadConfig } from "../shared/config.js";
 import { bindMultiBot } from "../shared/session-label.js";
 
@@ -194,9 +195,11 @@ const main = async (): Promise<void> => {
   mkdirSync(stateDir, { recursive: true });
   const token = loadOrCreateSvrToken(args.tokenFile, args.token);
   const store = createDetailStore({ stateDir, log });
-  // 注册表快照只放内存: 它是 daemon 那边的投影, 重启后下一次推送 (≤30s) 就补齐,
-  // 落盘只会换来一份过期名册在冷启动那几十秒里冒充现状。
-  const factsBySource = new Map<string, { at: number; facts: WorldFacts }>();
+  // 注册表快照落盘 (facts.json) 并在启动时按 TTL 读回: 否则每次重启后名册 / 关系图要空
+  // 到 daemon 下一次推送 (≤30s)。只读回 at 仍在 FACTS_TTL_MS 内的条目, 刚重启时快照
+  // 最多旧 30s, 与平时一样新; 停机久了的自然过期, 不会让陈旧名册冒充现状。
+  const factsPath = join(stateDir, "facts.json");
+  const factsBySource = loadFacts(factsPath, Date.now(), FACTS_TTL_MS);
   const currentFacts = (): WorldFacts => {
     const cut = Date.now() - FACTS_TTL_MS;
     const fresh = [...factsBySource].filter(([, v]) => v.at > cut);
@@ -251,6 +254,8 @@ const main = async (): Promise<void> => {
         catch { json(res, 400, { ok: false, error: "invalid json" }); return; }
         if (!isFactsPush(parsed)) { json(res, 400, { ok: false, error: "invalid world facts" }); return; }
         factsBySource.set(parsed.source, { at: Date.now(), facts: parsed.facts });
+        try { saveFacts(factsPath, factsBySource); }
+        catch (e) { log.warn({ err: (e as Error).message }, "persist world facts failed"); }
         log.debug({ source: parsed.source, wizards: parsed.facts.wizards.length }, "world facts stored");
         json(res, 200, { ok: true });
         return;
