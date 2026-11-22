@@ -38,6 +38,8 @@ export interface RoomFact {
   kind: RoomKind;
   /** host 起的显示别名 (room_open 的 title 或 room_name 改的); 空 = 没起名, 显示名回落到聊天名 / 成员。 */
   title: string;
+  /** 群公告; 空 = 没有。 */
+  notice: string;
   /** 绑定了传输 (企微群 / 单聊 / topic 帖 / 微信), 镜像进群。 */
   bound: boolean;
   /** undefined = 没有 wizard 成员 (人兜底 / 待人话触发 onboarding)。 */
@@ -69,6 +71,7 @@ export const buildRoomFact = (s: RoomState, n: RenderNames): RoomFact => {
     id: s.id,
     kind: roomKindOf(s),
     title: s.title ?? "",
+    notice: s.notice ?? "",
     bound: isBoundRoom(s.id),
     ...(host ? { host } : {}),
     members: (() => {
@@ -283,8 +286,10 @@ export const renderRoomRead = (
     .sort((a, b) => a.at - b.at || (a.room < b.room ? -1 : a.room > b.room ? 1 : 0) || a.seq - b.seq);
   const page = limit > 0 ? rows.slice(-Math.min(limit, LIMIT_MAX)) : rows;
   const prefix = (m: MsgRow): string => "[" + stamp(m.at, now) + (one ? "" : " · " + n.roomLabel(m.room)) + "] ";
+  // 读的是单个 room 且它有群公告: 头部带一行 (不算进 shown / total)。
+  const head = one && pool[0]!.notice ? "📌 群公告: " + pool[0]!.notice + "\n" : "";
   return {
-    text: page.map((m) => prefix(m) + renderMsgLine(m, n, per)).join("\n"),
+    text: head + page.map((m) => prefix(m) + renderMsgLine(m, n, per)).join("\n"),
     shown: page.length,
     total: rows.length,
     ...(page.length && rows.length > page.length ? { earlier: orderKey(page[0]!) } : {}),

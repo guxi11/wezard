@@ -53,7 +53,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, leaveOps, dutiesHeldBy, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeNotice, leaveOps, dutiesHeldBy, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -276,6 +276,8 @@ const main = async (): Promise<void> => {
   /** 新群引导在 room 模型里的两个接线点 (见 inbound.ts InboundOpts): room 块里回填 —— 只有它持有 hub。 */
   let guideInboundHook: InboundOpts["guideInbound"];
   let guideSettleHook: InboundOpts["guideSettle"];
+  let setNoticeHook: InboundOpts["setNotice"];
+  let getNoticeHook: InboundOpts["getNotice"];
   /** 引导在途状态 (onboarding.json): inbound 与 /onboarding/bind 共用这一份, 不各读各的盘。 */
   const onboarding = loadOnboardingStore(cfg);
 
@@ -349,6 +351,8 @@ const main = async (): Promise<void> => {
   }   }, sourcePath, (w, c) => guardCharter(w, c), { onboarding,
     guideInbound: (a) => (guideInboundHook ? guideInboundHook(a) : Promise.resolve({ ok: false, reason: "room 接线还没就绪" })),
     guideSettle: (base, bound) => (guideSettleHook ? guideSettleHook(base, bound) : false),
+    getNotice: (base) => (getNoticeHook ? getNoticeHook(base) : undefined),
+    setNotice: (base, text, by) => (setNoticeHook ? setNoticeHook(base, text, by) : { ok: false, reason: "room 接线还没就绪, 稍后再试" }),
   });
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), {
@@ -1584,22 +1588,50 @@ const main = async (): Promise<void> => {
       const id = openAdhoc(me, inv.who!, (b.title ?? "").toString().trim());
       json(res, 200, { ok: true, room: id, id, members: [me, ...inv.who!].map(roomNameOf) });
     });
+    /** 改群公告 (空串 = 清除): 落 notice 行 → 发一条 system 行 (绑定 room 会镜像进企微) → 在跑的 wizard 成员
+     *  经 notices 带一行提示 (下一次注入随 system-reminder 到, 不唤醒)。权限由调用方判 (wizard 走 canNotice, 人走 /notice)。
+     *  与现有公告相同 = 无变化, 什么也不写 (免得重复刷群)。 */
+    const setRoomNotice = (room: string, raw: string, by: Who): { ok: true; notice: string; changed: boolean } | { ok: false; status: number; reason: string } => {
+      const s = roomState(room);
+      if (!s) return { ok: false, status: 404, reason: "没有这个 room: " + room };
+      const j = judgeNotice(s, by, raw);
+      if (!j.ok) return j;
+      const next = j.notice;
+      if (!j.changed) return j;
+      hub.write(room, [{ op: "notice", at: Date.now(), room, text: next, by }]);
+      const v = hub.append(room, { author: DAEMON, kind: "system", origin: "daemon", sys: "notice",
+        text: next ? "[wezard] 📌 群公告: " + next : "[wezard] 📌 群公告已清除" });
+      if (!v.ok) roomLog.warn({ room, reason: v.reason }, "notice: 系统行被拒 (公告已生效)");
+      const hint = roomLabel(room) + " 的群公告" + (next ? "更新了: " + next : "已清除");
+      const heard = [...(roomState(room)?.members.values() ?? [])]
+        .filter((x) => x.who.kind === "wizard" && !sameWho(x.who, by))
+        .flatMap((x) => roomWizardOf(x.who.id)?.target ?? [])
+        .filter((t) => m.hasMirrorTarget(t));
+      if (heard.length) notices.post(heard, hint);
+      return { ok: true, notice: next, changed: true };
+    };
+    setNoticeHook = (room, text, by) => setRoomNotice(room, text, by);
+    getNoticeHook = (room) => roomState(room)?.notice;
     http.register("POST /room/name", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
-      const b = body as { room?: string; name?: string };
+      const b = body as { room?: string; name?: string; notice?: string };
       const r = roomResolve(b.room);
       if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
       const s = roomState(r.room)!;
-      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是 " + roomLabel(r.room) + " 的成员, 起不了名" }); return; }
-      if (!canRename(s, me)) { json(res, 403, { ok: false, reason: "只有本 room 的 host 能起名 (现在是 " + (roomHost(s) ? roomNameOf(roomHost(s)!) : "无人") + ")" }); return; }
+      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是 " + roomLabel(r.room) + " 的成员, 起不了名 / 改不了公告" }); return; }
+      if (!canRename(s, me)) { json(res, 403, { ok: false, reason: "只有本 room 的 host 能起名 / 改公告 (现在是 " + (roomHost(s) ? roomNameOf(roomHost(s)!) : "无人") + ")" }); return; }
       const name = (b.name ?? "").toString().trim().replace(/\s+/g, " ");
-      if (!name) { json(res, 400, { ok: false, reason: "name required" }); return; }
+      const noticeGiven = b.notice !== undefined && b.notice !== null;
+      if (!name && !noticeGiven) { json(res, 400, { ok: false, reason: "name 与 notice 至少给一个" }); return; }
       if (name.length > 60) { json(res, 400, { ok: false, reason: "名字太长 (最多 60 字)" }); return; }
-      hub.write(r.room, [{ op: "name", at: Date.now(), room: r.room, title: name, by: me }]);
-      json(res, 200, { ok: true, room: r.room, name });
+      // 先判公告再写名字: 公告被拒 (太长) 时整个请求不留半截。
+      const nt = noticeGiven ? setRoomNotice(r.room, String(b.notice), me) : undefined;
+      if (nt && !nt.ok) { json(res, nt.status, { ok: false, reason: nt.reason }); return; }
+      if (name) hub.write(r.room, [{ op: "name", at: Date.now(), room: r.room, title: name, by: me }]);
+      json(res, 200, { ok: true, room: r.room, ...(name ? { name } : {}), ...(nt?.ok ? { notice: nt.notice, changed: nt.changed } : {}) });
     });
     http.register("POST /room/invite", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2395,6 +2427,7 @@ const main = async (): Promise<void> => {
           .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
         tiers: forDiff ? [] : TIERS.map((n) => { const s = tiersForBackend(cfg, o.cli ?? m.sessionInfo(target)?.cli)[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
+        notice: roomState(baseOfKey(target))?.notice ?? "",
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = memoryCwdOf(target, o.cwd);

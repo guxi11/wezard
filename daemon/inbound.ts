@@ -118,6 +118,15 @@ const parseUseCommand = (text: string): "cli" | "wecom" | "show" | "invalid" | u
   if (!arg || arg === "status") return "show";
   return arg === "cli" || arg === "wecom" ? arg : "invalid";
 };
+// `/notice` 看 · `/notice clear` 清 · `/notice <文字>` 设 —— 本群 room 的公告 (账本 notice 行)。
+// 保留原文 (含大小写): 公告是人写给 wizard 的话。
+export const parseNoticeCommand = (text: string): { op: "show" } | { op: "clear" } | { op: "set"; text: string } | undefined => {
+  const m = /^\/notice(?:\s+([\s\S]*))?$/iu.exec(text.trim());
+  if (!m) return undefined;
+  const arg = (m[1] ?? "").trim();
+  if (!arg) return { op: "show" };
+  return /^(?:clear|清除|清空)$/iu.test(arg) ? { op: "clear" } : { op: "set", text: arg };
+};
 // `/audit` or `/audit <name>`. A supplied name resolves only through the global wizard registry;
 // without one, the caller's own mirror binding is used.
 const parseAuditCommand = (text: string): { name: string } | undefined => {
@@ -248,6 +257,9 @@ const renderHelp = (): string =>
     "",
     "▎审批",
     "`/use cli` 审批交给你本地 CLI 的权限框 (企微卡停用) · `/use wecom` 交回企微 · `/use` 看当前",
+    "",
+    "▎群公告",
+    "`/notice <文字>` 设本群公告 (最多 500 字, 群里的 wizard 都会知道) · `/notice` 看当前 · `/notice clear` 清除",
     "",
     "▎引用 (quote)",
     "引用消息 + 新文字：被引用内容作为上下文前缀附在你的话前。",
@@ -578,6 +590,10 @@ export interface InboundOpts {
   guideInbound?: (a: { base: string; guide: string; text: string; from: string; streamId: string; frame: WsFrame<BaseMessage> }) => Promise<{ ok: boolean; reason?: string }>;
   /** 引导落定: 引导在 room 里时 join 管家 / 转 duty / leave / 系统行。false = 没得交 (不在 room 里)。 */
   guideSettle?: (base: string, bound: OnboardingBound) => boolean;
+  /** 本群 room 的群公告 (`/notice` 读)。 */
+  getNotice?: (base: string) => string | undefined;
+  /** 人改本群公告 (`/notice` 写; 空串 = 清除); 行落账本、群里发系统行、在跑的 wizard 收提示都在 daemon 那头。 */
+  setNotice?: (base: string, text: string, by: { kind: "human"; id: string }) => { ok: true; notice: string; changed: boolean } | { ok: false; reason: string };
 }
 
 export type GuideInbound = NonNullable<InboundOpts["guideInbound"]>;
@@ -779,6 +795,24 @@ export const installInboundRouter = (
           true,
         );
       } catch { /* ignore */ }
+      return { stop: true };
+    }
+    // Authorized `/notice [clear|<文字>]` — 本群 room 的公告; 人在绑定 room 里改的就是这个 room 的。
+    const notice = parseNoticeCommand(text);
+    if (notice) {
+      const base = baseOfKey(who);
+      if (notice.op === "show") {
+        const cur = opts.getNotice?.(base);
+        await replyText(frame, msg, who, cur ? `📌 群公告: ${cur}` : "📌 本群还没有公告 · `/notice <文字>` 设置");
+        return { stop: true };
+      }
+      const r = opts.setNotice
+        ? opts.setNotice(base, notice.op === "clear" ? "" : notice.text, { kind: "human", id: String(msg.from.userid) })
+        : { ok: false as const, reason: "room 接线还没就绪, 稍后再试" };
+      log.info({ who, op: notice.op, ok: r.ok }, "/notice");
+      // 成功时群里已有 daemon 的系统行 (📌 群公告…), 不再另回; 没变化 / 失败才答一句。
+      if (!r.ok) await replyText(frame, msg, who, `[wezard] /notice 没生效: ${r.reason}`);
+      else if (!r.changed) await replyText(frame, msg, who, notice.op === "clear" ? "📌 本群本来就没有公告" : "📌 公告没变");
       return { stop: true };
     }
     // Authorized `/use [cli|wecom]` — 审批 hook 的裁决权在企微卡片与本地 CLI 之间

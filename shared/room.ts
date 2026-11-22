@@ -99,6 +99,11 @@ export interface OpenOp extends OpBase { op: "open"; kind: RoomKind; title?: str
 /** 给 room 起显示名 (host 专用)。名字只是别名, 不参与寻址: 账本文件、消息 id、room 参数
  *  一律用 id 原样; 同名的两个 room 互不干扰。 */
 export interface NameOp extends OpBase { op: "name"; title: string; by: Who }
+/** 群公告: 每个 room 一条, 让 room 里所有 wizard 一直知道一句话 (本周重点 / 某条规矩)。
+ *  与 NameOp 同构, 但空串 = 清除 (name 的空串是忽略)。最后一条生效; 不另存文件, 状态是 fold 出来的。 */
+export interface NoticeOp extends OpBase { op: "notice"; text: string; by: Who }
+/** 公告正文上限 (字)。 */
+export const NOTICE_MAX = 500;
 export interface JoinOp extends OpBase { op: "join"; who: Who; ord: number; via: JoinVia; by: Who }
 export interface LeaveOp extends OpBase { op: "leave"; who: Who; by: Who; why?: string }
 export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number }
@@ -133,7 +138,7 @@ export interface MsgRow extends OpBase {
   /** daemon 系统行的机器语义 (undelivered / left / quota …), 用于去重, 不给模型推断。 */
   sys?: string;
 }
-export type RoomOp = OpenOp | NameOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | MsgRow;
+export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | MsgRow;
 
 // ── fold ───────────────────────────────────────────────────────────────
 
@@ -167,6 +172,8 @@ export interface RoomState {
   kind?: RoomKind;
   /** 显示别名 (host 起), 不是索引: 寻址永远用 id。 */
   title?: string;
+  /** 群公告 (最近一条 notice 行); undefined = 没有 / 已清除。 */
+  notice?: string;
   openedAt?: number;
   seq: number;
   nextOrd: number;
@@ -206,6 +213,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
     case "open":
       s.kind = op.kind; if (op.title) s.title = op.title; s.openedAt ??= op.at; break;
     case "name": if (op.title) s.title = op.title; break;
+    case "notice": if (op.text.trim()) s.notice = op.text; else delete s.notice; break;
     case "join": {
       const k = whoKey(op.who);
       const prev = s.members.get(k);
@@ -271,6 +279,18 @@ export const roomHost = (s: RoomState): Who | undefined => hostOf(s.members.valu
 
 /** 起名 / 改名只有当前 host 能做 (人也不行 —— 人的意见走人话)。 */
 export const canRename = (s: RoomState, who: Who): boolean => sameWho(roomHost(s), who);
+/** 改公告的权限同起名: 只有当前 host。人不受此限 (人的授权在 inbound 的 allowFrom 门)。 */
+export const canNotice = (s: RoomState, who: Who): boolean => who.kind === "human" || canRename(s, who);
+
+/** 一次改公告的裁决: 权限 + 归一化 (空白折成单空格) + 长度。空串 = 清除, 与现有相同 = changed:false。 */
+export const judgeNotice = (s: RoomState, who: Who, raw: string):
+  | { ok: true; notice: string; changed: boolean }
+  | { ok: false; status: 403 | 400; reason: string } => {
+  if (!canNotice(s, who)) return { ok: false, status: 403, reason: "只有本 room 的 host 能改公告" };
+  const notice = raw.replace(/\s+/g, " ").trim();
+  if (notice.length > NOTICE_MAX) return { ok: false, status: 400, reason: "公告太长 (最多 " + NOTICE_MAX + " 字, 现在 " + notice.length + ")" };
+  return { ok: true, notice, changed: notice !== (s.notice ?? "") };
+};
 
 /** duty 此刻的处理人 (host 槽位读时求值)。 */
 export const holderOf = (s: RoomState, d: Duty): Who | undefined => {

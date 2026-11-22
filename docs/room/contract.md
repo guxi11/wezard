@@ -57,7 +57,13 @@ type Who = { kind: "human"; id: string /*userid*/ }
 
 // duty 移交
 { op: "move";  duty: string /*msgId*/; from: Who; to: Who; by: Who }
+
+// 元数据 (不是消息, 不推进 seq): 显示名 / 群公告, 最后一条生效
+{ op: "name";   title: string; by: Who }     // 空串忽略; 只是别名, 不参与寻址
+{ op: "notice"; text: string;  by: Who }     // 群公告, 每 room 一条; 空 (或纯空白) = 清除; 状态是 fold 出来的, 不另存文件
 ```
+
+**群公告**: 让 room 里所有 wizard 一直知道一句话 (本周重点 / 某条规矩)。`text` 空白折成单空格, 上限 `NOTICE_MAX` = 500 字。改的权限同起名 —— wizard 只有当前 host (`room_name({room, notice})`, 非 host 403); 人不受此限, 在企微里 `/notice <文字>` 设 / `/notice` 看 / `/notice clear` 清 (inbound 的 allowFrom 门授权, 改的是本群 room)。与现有相同 = 无变化, 不落行。一次有效改动: ① 写 `notice` 行; ② 追加一条 daemon `system` 行 (`sys:"notice"`, 「📌 群公告: …」/「📌 群公告已清除」, 不唤醒任何人; 绑定 room 照 §3a 镜像进企微); ③ 在跑的 wizard 成员 (除改的人自己) 经 `notices` 在下一次注入时随 system-reminder 带一行, 不额外唤醒。读侧: 新 wizard 的 charter 里 home 群 room 的公告占一节「本群公告」(没有就不出现); `RoomFact.notice` (`/api/room` 的 `room`、`/api/world` 的 room 节点) 与 `room_read` 单 room 输出头部 (`📌 群公告: …`) 都带它。
 
 **duty 不落第二份数据**, fold 时派生:
 - 开: ask / task 行对每个 `to` 各开一条; 绑定 room 里**没点名的人话**开一条给 host; 人话 `.name` 点名开给被点名者; join-req 开给 **host (读时求值)**。
@@ -111,7 +117,7 @@ spawn / clone / delegate 增 `room?` (子 wizard 以 via:"spawn" 免审入群); 
 **一行 op:"msg" 镜像进企微 ⇔ room 绑定了传输 ∧ origin ∉ {inbound, migrate} ∧ kind ≠ trigger。**
 - 也就是说 wizard 的 say / ask / task / reply / file / join-req、daemon 的 system 行 (未交代升级、离开 canceled、额度 / 预算拒绝说明) **全部**进群, 没有受众开关、没有按作者或轮次的例外。
 - inbound 不回镜 (它本来就来自企微); migrate 是历史; trigger 是定时任务唤醒, 不是对人说的话。
-- 非 msg 的 op (join / leave / seen / move) 不镜像。无绑定的 dm / adhoc room 一律不镜像, 只在 rolepage 可见。
+- 非 msg 的 op (join / leave / seen / move / name / notice) 不镜像 (公告变动由上面那条 daemon system 行镜像)。无绑定的 dm / adhoc room 一律不镜像, 只在 rolepage 可见。
 - 形态: 气泡头署作者名; 人话行带 bubble 时, **第一条 re 它的 reply** 覆盖占位气泡, 之后的作为新消息。file 行走媒体消息。
 - 镜像失败只改 Xport 状态, 不回滚、不影响完成。
 
