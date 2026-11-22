@@ -778,8 +778,8 @@ try {
   const icoOf = (id) => icoG.rooms[icoG.roomIds.indexOf(id)].split(" ")[0];
   assert.deepEqual([icoOf(G), icoOf(HM), icoOf(ADHOC)], ["👥", "💬", "🧙‍♂️"], "群 G 👥 / 单聊 HM 💬 / 三 wizard adhoc 🧙‍♂️: " + JSON.stringify(icoG));
 
-  // 3) LeoLane 形态: 一个 wizard 没加入任何多人群, 只靠两人 dm 连着 → 不在图上, 不管那间 dm 的动静在窗口内还是外、有没有未决 duty。
-  //    (admin: 多人群的成员随群一起展示, 其他的没必要。)  例外: 正在看的 dm / 视角有未读的 dm 是眼前的事, 带出它的成员; 多人 room 的成员照旧随 room 展示。
+  // 3) LeoLane 形态: 窗口内不活跃的 wizard, 只靠两人 dm 连着 (dm 不算 room 节点) → 不在图上, 不管那间 dm 的动静在窗口内还是外、有没有未决 duty;
+  //    窗口内活跃的 wizard (最近动静在窗口内 / 正在跑) 一律展示, 不依赖 room; 窗口内不活跃的只随多人 room (room 节点) 一起展示。「全部」= 窗口无限, 名册里的都算活跃。
   const LEO = "w" + "7".padStart(12, "0");
   const leoNode = { target: "uid:" + LEO, kind: "wizard", uid: LEO, name: "leolane", label: "leolane", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: Date.now() - 3 * 86400000, rels: [] };
   const leoDm = (at, over) => ({ ...roomFact("dm:" + [A, LEO].sort().join("|"), "dm", [
@@ -791,12 +791,16 @@ try {
   assert.ok(!leoOld.people.includes("leolane"), "dm 在窗口外、带未决 duty: 不展示: " + JSON.stringify(leoOld));
   assert.ok(!leoOld.direct.some((id) => id.includes(LEO)) && !leoOld.roomIds.some((id) => id.includes(LEO)), "那间 dm 一条线 / 一个节点都不画: " + JSON.stringify(leoOld));
   const leoAll = await graphOf({ rooms: [leoDm(oldAt, { openDuties: 1 })], nodes: [leoNode] }, 0);
-  assert.ok(!leoAll.people.includes("leolane"), "选「全部」也不展示 (规则不看窗口): " + JSON.stringify(leoAll));
+  assert.ok(leoAll.people.includes("leolane"), "选「全部」= 窗口无限, 名册里的 wizard 都算活跃: " + JSON.stringify(leoAll));
   const leoNew = await graphOf({ rooms: [leoDm(Date.now() - 60_000, {})], nodes: [leoNode] });
-  assert.ok(!leoNew.people.includes("leolane"), "dm 窗口内有动静也不展示 (admin 的规则: 只随多人群): " + JSON.stringify(leoNew));
+  assert.ok(!leoNew.people.includes("leolane"), "dm 窗口内有动静、它自己窗口内不活跃: 不展示 (dm 不算 room 节点): " + JSON.stringify(leoNew));
+  const leoActive = await graphOf({ rooms: [leoDm(oldAt, {})], nodes: [{ ...leoNode, lastTs: Date.now() - 60_000 }] });
+  assert.ok(leoActive.people.includes("leolane"), "窗口内活跃的 wizard 不依赖 room, 只靠一间过期 dm 也展示: " + JSON.stringify(leoActive));
+  const leoBusy = await graphOf({ rooms: [], nodes: [{ ...leoNode, busy: true, alive: true }] });
+  assert.ok(leoBusy.people.includes("leolane"), "正在跑的 wizard (哪怕最近动静在窗口外) 展示: " + JSON.stringify(leoBusy));
   assert.ok(leoNew.direct.includes("dm:w000000000001|w000000000002"), "alice—bob 两人都在群里, 它们之间的 dm 照旧画成直连线 (base fixture)");
   const leoUnread = await graphOf({ rooms: [{ ...leoDm(Date.now() - 60_000, {}), last: { seq: 9, at: Date.now() - 60_000 }, unread: 3 }], nodes: [leoNode] });
-  assert.ok(leoUnread.people.includes("leolane"), "视角 (alice) 在这间 dm 里有未读: 是眼前的事, 带出对方: " + JSON.stringify(leoUnread));
+  assert.ok(!leoUnread.people.includes("leolane"), "dm 有未读也不带出窗口内不活跃的对方 (无渐进展开): " + JSON.stringify(leoUnread));
   const bigOld = roomFact("adhoc:old3", "adhoc", [A, B, LEO].map((id, i) => ({ who: who("wizard", id), name: "n" + i, via: "invite", since: 40 + i, ord: i + 1, host: i === 0 })), who("wizard", A), oldAt);
   const leoBig = await graphOf({ rooms: [{ ...bigOld, openDuties: 1 }], nodes: [leoNode] });
   assert.ok(leoBig.people.includes("leolane"), "多人 room (窗口外但留着未决 duty) 的成员随 room 一起展示: " + JSON.stringify(leoBig));
