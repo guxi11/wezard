@@ -44,8 +44,10 @@
 
 ### P2 — 模型 / 文档 / 体验
 - [x] `docs/evolve/README.md` 与 `roadmap.md` 加醒目的「历史文档」头: 列出已退役的名词, 指向 `docs/room/contract.md` / `CLAUDE.md` / 本文。没有重写 —— 它们留作决策史。
-- [ ] 开发者指南: 新加一个 MCP 工具 / 一个 room 行类型 / 一个 reminder kind 要动哪几处 (现在只能读 CLAUDE.md 长段落)。
-- [ ] 上下文成本: charter 体积、handoff 可靠性 (daemon.log: `handoff: 放弃` 15 次 / `打断后仍未静下来` 21 次, 24h 内)。
+- [x] 开发者指南 [`docs/dev-guide.md`](../dev-guide.md) (RoseQuincy `afb1743` `06bd575`): 加 MCP 工具 / room 行类型 / reminder kind 各动哪几处 + vm 沙箱截取锚点表。顺带对齐 CLAUDE.md (reminder kind 现状、room 唤醒不挂信封而是 `【label】(roomId)` 头、`daemonPost` 每个 POST 都带 selfRef)、contract.md §2/§6、过时注释。
+- [ ] 没有测试断言「默认注册的 MCP 工具 = charter 名册」: 漏写 charter 行是静默的。可照 `tests/chat-record.test.ts` 的 `toolNames()` 探针加一条。
+- [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
+- [ ] 上下文成本: charter 体积。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
 
 ## 待 admin 拍板
@@ -84,6 +86,7 @@
 | 2026-11-22 | svr 冷启动名册不再缺席: 快照落盘 + 按 TTL 读回 (不改推送协议) | `f0fc2f8` |
 | 2026-11-22 | handoff 简报回贴不再永远判失败 (LeoKing): fd4715b 删旧沟通层时连 `withMsg` 调用一起删了, 无信封注入不带 message-event 标记, 提交确认永远找不到 → 每次 `handoff: 放弃` (简报其实送到了)。新增 `envelopeFor`, `injectText` 对有 eventId 无信封的注入补标记。核对: handoff 后的「继续 <event>」续答 (`owed: () => []` / `resume` 空桩) 是有意退役 —— room hub 按 seen 游标重投欠账, 不需要它。待验: 下一次真实自我 handoff 时 daemon.log 不再出现「框空了且转录里始终没有这一笔」 | `c6f3c31` |
 | 2026-11-22 | 清理 (PaulOwen): picker 哨兵被真实输入抢占 (`PaneInputError` canceled) 只打 debug (24h 36 条 warn 噪音); reminder.ts 退役 attr; tests 死数据; 注释退役工具名。顺带修 c6f3c31 引入的 `pane-delivery` 失败 (vm 沙箱缺 `envelopeFor`)。教训已记 workspace 记忆: 别 git stash; vm 沙箱测试要随 mirror-bridge 新 import 补注入 | `e600ed3` `eff3069` `3e03081` `0492e38` |
+| 2026-11-22 | 开发者指南 `docs/dev-guide.md` + CLAUDE.md / 契约 / 注释对齐现行代码 (RoseQuincy, standard)。handoff 修复 `c6f3c31` 线上实证 ok | `afb1743` `06bd575` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
