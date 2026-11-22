@@ -29,12 +29,13 @@ for (const tool of ["wizard_roster", "delegate", "chat_ask", "chat_reply", "chat
   assert.ok(charter.includes(tool), `charter must advertise ${tool}`);
 }
 assert.ok(charter.includes("ARTIFACT:"), "charter must mention ARTIFACT:");
+assert.ok(!charter.includes("wait_peer"), "charter must not name the retired wait_peer tool");
 
 const codingChapter = chapter(charter, "## 怎么干活: 编排");
 assert.ok(codingChapter.includes("**Coding 默认编排**"));
 for (const fragment of ["范围清楚、低风险", "默认用 light", 'tier:"light"', "不递归派 coder"])
   assert.ok(codingChapter.includes(fragment), `coding light-default contract must include ${fragment}`);
-for (const fragment of ["多步的活默认开一个跟进 room", "只有需要人和执行者直接对话", "不提前合并或宣告完成", "不 `wait_peer` 守着"])
+for (const fragment of ["多步的活默认开一个跟进 room", "只有需要人和执行者直接对话", "不提前合并或宣告完成", "不守着、不轮询 `peek_peer`"])
   assert.ok(codingChapter.includes(fragment), `orchestration contract must include ${fragment}`);
 
 const roomChapter = chapter(charter, "## room 是唯一的沟通对象");
