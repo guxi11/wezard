@@ -778,8 +778,8 @@ try {
   const icoOf = (id) => icoG.rooms[icoG.roomIds.indexOf(id)].split(" ")[0];
   assert.deepEqual([icoOf(G), icoOf(HM), icoOf(ADHOC)], ["👥", "💬", "🧙‍♂️"], "群 G 👥 / 单聊 HM 💬 / 三 wizard adhoc 🧙‍♂️: " + JSON.stringify(icoG));
 
-  // 3) LeoLane 形态: 窗口内不活跃的 wizard, 只靠两人 dm 连着 (dm 不算 room 节点) → 不在图上, 不管那间 dm 的动静在窗口内还是外、有没有未决 duty;
-  //    窗口内活跃的 wizard (最近动静在窗口内 / 正在跑) 一律展示, 不依赖 room; 窗口内不活跃的只随多人 room (room 节点) 一起展示。「全部」= 窗口无限, 名册里的都算活跃。
+  // 3) 可见性只有一条规则: 窗口内有消息的 room (最后一条消息在窗口内; 「全部」= 所有 room) → 它的成员及连线。
+  //    不在任何这种 room 里的会话不显示: 没有「活跃 / 在跑 / 未读 / 未决 duty」的例外 (唯一保留的是正在看的 room, 见上面「选中的 room 滑出时间窗」)。
   const LEO = "w" + "7".padStart(12, "0");
   const leoNode = { target: "uid:" + LEO, kind: "wizard", uid: LEO, name: "leolane", label: "leolane", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: Date.now() - 3 * 86400000, rels: [] };
   const leoDm = (at, over) => ({ ...roomFact("dm:" + [A, LEO].sort().join("|"), "dm", [
@@ -787,25 +787,22 @@ try {
     { who: who("wizard", LEO), name: "leolane", via: "invite", since: 31, ord: 2, host: false },
   ], who("wizard", A), at), ...over });
   const oldAt = Date.now() - 3 * 86400000;
-  const leoOld = await graphOf({ rooms: [leoDm(oldAt, { openDuties: 1 })], nodes: [leoNode] });
-  assert.ok(!leoOld.people.includes("leolane"), "dm 在窗口外、带未决 duty: 不展示: " + JSON.stringify(leoOld));
+  const leoOld = await graphOf({ rooms: [leoDm(oldAt, { openDuties: 1, unread: 3 })], nodes: [leoNode] });
+  assert.ok(!leoOld.people.includes("leolane"), "dm 最后一条消息在窗口外 (哪怕带未决 duty / 未读): 不展示: " + JSON.stringify(leoOld));
   assert.ok(!leoOld.direct.some((id) => id.includes(LEO)) && !leoOld.roomIds.some((id) => id.includes(LEO)), "那间 dm 一条线 / 一个节点都不画: " + JSON.stringify(leoOld));
-  const leoAll = await graphOf({ rooms: [leoDm(oldAt, { openDuties: 1 })], nodes: [leoNode] }, 0);
-  assert.ok(leoAll.people.includes("leolane"), "选「全部」= 窗口无限, 名册里的 wizard 都算活跃: " + JSON.stringify(leoAll));
+  const leoAll = await graphOf({ rooms: [leoDm(oldAt, {})], nodes: [leoNode] }, 0);
+  assert.ok(leoAll.people.includes("leolane"), "选「全部」= 所有 room: 展示: " + JSON.stringify(leoAll));
   const leoNew = await graphOf({ rooms: [leoDm(Date.now() - 60_000, {})], nodes: [leoNode] });
-  assert.ok(!leoNew.people.includes("leolane"), "dm 窗口内有动静、它自己窗口内不活跃: 不展示 (dm 不算 room 节点): " + JSON.stringify(leoNew));
-  const leoActive = await graphOf({ rooms: [leoDm(oldAt, {})], nodes: [{ ...leoNode, lastTs: Date.now() - 60_000 }] });
-  assert.ok(leoActive.people.includes("leolane"), "窗口内活跃的 wizard 不依赖 room, 只靠一间过期 dm 也展示: " + JSON.stringify(leoActive));
-  const leoBusy = await graphOf({ rooms: [], nodes: [{ ...leoNode, busy: true, alive: true }] });
-  assert.ok(leoBusy.people.includes("leolane"), "正在跑的 wizard (哪怕最近动静在窗口外) 展示: " + JSON.stringify(leoBusy));
-  assert.ok(leoNew.direct.includes("dm:w000000000001|w000000000002"), "alice—bob 两人都在群里, 它们之间的 dm 照旧画成直连线 (base fixture)");
-  const leoUnread = await graphOf({ rooms: [{ ...leoDm(Date.now() - 60_000, {}), last: { seq: 9, at: Date.now() - 60_000 }, unread: 3 }], nodes: [leoNode] });
-  assert.ok(!leoUnread.people.includes("leolane"), "dm 有未读也不带出窗口内不活跃的对方 (无渐进展开): " + JSON.stringify(leoUnread));
+  assert.ok(leoNew.people.includes("leolane") && leoNew.direct.includes("dm:" + [A, LEO].sort().join("|")), "两人 dm 窗口内有消息: 成员展示, 画成直连线 (不画 room 节点): " + JSON.stringify(leoNew));
+  assert.ok(!leoNew.roomIds.some((id) => id.includes(LEO)), "两人 dm 不画 room 节点");
+  assert.ok(leoNew.direct.includes("dm:w000000000001|w000000000002"), "alice—bob 的 dm 照旧画成直连线 (base fixture)");
+  const leoActive = await graphOf({ rooms: [leoDm(oldAt, {})], nodes: [{ ...leoNode, lastTs: Date.now() - 60_000, busy: true, alive: true }] });
+  assert.ok(!leoActive.people.includes("leolane"), "只在 turn 里干活 (最近动静在窗口内 / 正在跑) 但没有窗口内消息的 room: 不展示: " + JSON.stringify(leoActive));
   const bigOld = roomFact("adhoc:old3", "adhoc", [A, B, LEO].map((id, i) => ({ who: who("wizard", id), name: "n" + i, via: "invite", since: 40 + i, ord: i + 1, host: i === 0 })), who("wizard", A), oldAt);
   const leoBig = await graphOf({ rooms: [{ ...bigOld, openDuties: 1 }], nodes: [leoNode] });
-  assert.ok(leoBig.people.includes("leolane"), "多人 room (窗口外但留着未决 duty) 的成员随 room 一起展示: " + JSON.stringify(leoBig));
+  assert.ok(!leoBig.people.includes("leolane"), "多人 room 窗口外 (留着未决 duty 也一样): 成员不展示: " + JSON.stringify(leoBig));
   const bigFresh = await graphOf({ rooms: [{ ...bigOld, last: { seq: 1, at: Date.now() - 1000 } }], nodes: [leoNode] });
-  assert.ok(bigFresh.people.includes("leolane"), "多人 room 窗口内有动静: 成员展示: " + JSON.stringify(bigFresh));
+  assert.ok(bigFresh.people.includes("leolane") && bigFresh.roomIds.includes("adhoc:old3"), "多人 room 窗口内有消息: room 节点 + 成员展示: " + JSON.stringify(bigFresh));
 
   // 2) 缓存冷 = 节点填充变白, 叠加在空闲 / 休眠上; 工作中不受影响。
   const WHITE = "rgb(255, 255, 255)";
@@ -859,15 +856,15 @@ try {
   await pgA.close();
   globalThis.__staleMembers = undefined;
 
-  // 5) 时间范围 B: 窗口外但视角 (alice) 有未读的 room 算在范围内; 视角不是成员的 room 即使服务端数出了「未读」也不算。
+  // 5) 图的范围只看「窗口内有消息」: 窗口外的 room 即使视角 (alice) 有未读 / 视角不是成员却被服务端数出「未读」, 图里都不画 (列表另有口径)。
   const mem3 = (ids) => ids.map((id, i) => ({ who: who("wizard", id), name: "m" + i, via: "invite", since: 50 + i, ord: i + 1, host: i === 0 }));
   const unreadMine = { ...roomFact("adhoc:unmine", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), last: { seq: 9, at: oldAt }, unread: 2 };   // unreadOf 会按 last.seq 封顶, 所以 seq 要 ≥ 未读数
   const unreadNot = { ...roomFact("adhoc:unnot", "adhoc", mem3([B, C, LEO]), who("wizard", B), oldAt), unread: 5 };
   const quietOld = { ...roomFact("adhoc:quiet", "adhoc", mem3([A, B, C]), who("wizard", A), oldAt), unread: 0 };
   const unr = await graphOf({ rooms: [unreadMine, unreadNot, quietOld], nodes: [leoNode] });
-  assert.ok(unr.roomIds.includes("adhoc:unmine"), "窗口外、视角 alice 是成员且有未读 → 在范围内: " + JSON.stringify(unr));
-  assert.ok(!unr.roomIds.includes("adhoc:unnot"), "视角不是成员 (服务端把整本账数成未读) → 不算: " + JSON.stringify(unr));
-  assert.ok(!unr.roomIds.includes("adhoc:quiet"), "窗口外、没未读 → 仍不在范围内: " + JSON.stringify(unr));
+  assert.ok(!unr.roomIds.includes("adhoc:unmine"), "窗口外、哪怕视角 alice 有未读: 图里不画: " + JSON.stringify(unr));
+  assert.ok(!unr.roomIds.includes("adhoc:unnot"), "窗口外、视角不是成员: 不画: " + JSON.stringify(unr));
+  assert.ok(!unr.roomIds.includes("adhoc:quiet"), "窗口外、没未读: 不画: " + JSON.stringify(unr));
 
   // 6C) 选中的 role 不在任何可见 room 里: 图里仍画它, 作为带 👁 的孤立节点。(李四只在 3 天前的 OLD 群里, 默认 2d 看不见那个群)
   const lone = await graphOf({ rooms: [], nodes: [] }, undefined, "human:U2");
@@ -879,7 +876,8 @@ try {
   assert.deepEqual(notLone.pov, ["alice"]);
   // 6D) 列表角标与图上红点是同一个未读数; 原来角标上的未决 duty 数挪进悬停提示。
   const dutyRoom = { ...roomFact("adhoc:duty3", "adhoc", mem3([A, B, C]), who("wizard", A)), openDuties: 3, unread: 0 };
-  globalThis.__extraRooms = [unreadMine, dutyRoom]; globalThis.__extraNodes = [];
+  const unreadRecent = { ...unreadMine, last: { seq: 9, at: Date.now() - 60_000 } };   // 图只画窗口内有消息的 room, 红点要在窗口内的 room 上看
+  globalThis.__extraRooms = [unreadRecent, dutyRoom]; globalThis.__extraNodes = [];
   const pgD = await browser.newPage({ viewport: { width: 1100, height: 800 } });
   await pgD.addInitScript(() => localStorage.setItem("wezard.role.side", "graph"));
   await pgD.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
