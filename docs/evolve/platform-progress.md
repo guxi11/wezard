@@ -47,9 +47,10 @@
 - [x] 开发者指南 [`docs/dev-guide.md`](../dev-guide.md) (RoseQuincy `afb1743` `06bd575`): 加 MCP 工具 / room 行类型 / reminder kind 各动哪几处 + vm 沙箱截取锚点表。顺带对齐 CLAUDE.md (reminder kind 现状、room 唤醒不挂信封而是 `【label】(roomId)` 头、`daemonPost` 每个 POST 都带 selfRef)、contract.md §2/§6、过时注释。
 - [x] `tests/charter.test.ts` 断言默认注册的 MCP 工具都在 charter 名册里 (`c226798`, WendyVance): 合写 `plan_create/get/list/update` 展开比对; 豁免表 `charterExempt` 名字失效也报错。
 - [x] ~~下次 charter 攒批: `wecom_doc_*` 要不要进 charter~~ admin 定直接删 (企微文档走官方 skill, admin 另外跟进 skill 安装): `d6b831b` (YaraXu)。
-- [ ] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): wizard 对人话 `need` → 人另发一条新消息作答 (不引用) → 唤醒头的「你要交代」只列新那条, 原 duty 仍开在 wizard 名下, 60 分钟后被逾期提醒。可考虑: 人答 need 唤醒时, 「你要交代」把该 wizard 对这个人仍开着、回过 need 的 duty 一并列出。改的是唤醒文案, 不动账本。
-- [ ] **进行中 (LeoJones, standard, e41e58b4.1)**: `for` 血缘默认值从未实现 (描述说缺省=本轮唤醒那条, 但 `/room/ask` 与 `deliverTask` 只写显式值) + 逾期只看本 room, 不知道 holder 已派出且子件在动 → 实例: wezard-1 派 lead FrankDavis 做 .399, 60 分钟后被催 (.413), admin 收到「被提醒后仍没有交代」(.414) 误报。改: hub `defaultFor` (本轮唤醒且仍持有的唯一 duty), 派活路径补默认 `for`; `overdueDue` 并入跨 room 子孙件活动。避开 FrankDavis plan S4 要改的 hub render。
-- [ ] 小清理: `daemon/room-overdue.ts` import 的 `holderOf` 未使用 (`tsc --noUnusedLocals`), 下次清理批带上。
+- [ ] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): wizard 对人话 `need` → 人另发一条新消息作答 (不引用) → 唤醒头的「你要交代」只列新那条, 原 duty 仍开在 wizard 名下, 60 分钟后被逾期提醒。可考虑: 人答 need 唤醒时, 「你要交代」把该 wizard 对这个人仍开着、回过 need 的 duty 一并列出。改的是唤醒文案, 不动账本。 **解锁**: FrankDavis S4 (`d7b513e`, oweLine 节流) 已入库, 等其 plan S5 实测收尾后可做。
+- [x] `for` 血缘缺省 + 逾期计入子件活动 (LeoJones, `1e9aef0`, 见已完成表)。遗留: 同轮被多条 duty 唤醒时 `for` 留空不猜 (仍可能误报, 要治得派活工具显式传); 老账本无 `for` 的子件不回溯。
+- [x] 小清理: `daemon/room-overdue.ts` 未用的 `holderOf` import 已删。
+- [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
@@ -93,6 +94,7 @@
 | 2026-11-22 | 开发者指南 `docs/dev-guide.md` + CLAUDE.md / 契约 / 注释对齐现行代码 (RoseQuincy, standard)。handoff 修复 `c6f3c31` 线上实证 ok | `afb1743` `06bd575` |
 | 2026-11-22 | 测试: 默认 MCP 工具 ⊆ charter 名册, 带防腐烂豁免表 (WendyVance, light)。探出缺口 `wecom_doc_*` 两个, 留给下次 charter 攒批 | `c226798` |
 | 2026-11-22 | admin 7aeb85fc.378: 删企微文档 MCP 桥 (两工具 / `/wedoc/*` / `daemon/wedoc.ts`, -487 行, CHANGELOG BREAKING; YaraXu); 关系图「缓存冷」图例改名 + 冷节点淡灰细描边, 成员栏同源 (AliceYoung, 截图核对) | `d6b831b` `b38ab70` |
+| 2026-11-23 | `for` 血缘缺省由 daemon 填 (hub `defaultFor`: 本轮唤醒且仍持有的唯一 duty; `/room/ask`、delegate、spawn/clone 出生派活三处) + 逾期计入跨 room 子孙件活动 (`buildDescendantActivity`, 深度 ≤5, 子件 done 重新计时)。修 wezard-1 派 lead 做 .399 后被误催 (.413) / 给 admin 误报 (.414)。LeoJones (standard); 我核 diff、重跑 9 个相关测试 + typecheck | `1e9aef0` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
