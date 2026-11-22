@@ -20,7 +20,7 @@
 
 ## 测试基线 (2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
-**111 / 113 通过** (2026-11-22)。只剩 `codex-hooks` / `codex-session` 失败: 本机没装 `codex`, spawn ENOENT, 属环境问题。`codex-backend` 与 `wizard-stream` 已修: 两处都是断言跟不上有意的退役 (`043219c` 删 bin / claudeBin 覆盖; `762482b` 删「全部消息」all=1), 不是回归。每次改动后对照, 通过数不能减少。
+**117 / 119 通过** (2026-11-22 晚, PaulOwen 全量)。只剩 `codex-hooks` / `codex-session` 失败: 本机没装 `codex`, spawn ENOENT, 属环境问题。`codex-backend` 与 `wizard-stream` 已修: 两处都是断言跟不上有意的退役 (`043219c` 删 bin / claudeBin 覆盖; `762482b` 删「全部消息」all=1), 不是回归。每次改动后对照, 通过数不能减少。
 
 ## 优先级清单
 
@@ -36,11 +36,11 @@
 - [x] **`daemon/peers.ts` 回执时代遗留删净** (~260 行): `parseClosing` 一族、`addressedResults`、`replyClosedBefore` / `openingTurn`、`renderTask/Peer/ReceiptEnvelope`、`tailTurns`; `tsc --noUnusedLocals` 逐轮确认, 测试里只测回执措辞的一条断言同删。(本轮)
 - [x] `shared/turn-state.ts` 整个删; `WorldFacts.inflight` / `WorldFactInFlight`、`route.ts` `routeReceiptDutiesOf`、`WizardBrief.turns`、peek 里恒空的 inflight 行一并删。(本轮)
 - [x] (admin 批, 已做) 接上了: `route.ts` `occupies` 只认别的 wizard 用 chat_ask / delegate 开的 (kind ask/task, asker 是另一个 wizard) 未关 duty; 人话 / join-req / 自己开给自己的不算。常驻 duty 没有专门的标记, 照算 —— 它的持有者是 lead, 本来就被 lead veto 挡着, 不多挡一次。原记录: **delegate 的「任务占用」veto 在生产里从不触发**: `routeRowsOf` (`daemon/index.ts`) 给每行写死 `duties: []`, 而 `route.ts` 的 veto / 渲染都读它。名册那边已有 `dutiesOf` (跨 room 现算 open duty), 喂进来就能恢复。要定: 什么样的 duty 算占用 (常驻 duty 如 d6977146.1 会让 lead 永远被挡 —— lead 本就另有 veto; 人话唤醒开的 duty 在它回复前也会挡) → 改的是派活语义, 先报。
-- [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
+- [x] `shared/reminder.ts` 无写入方的退役 attr / 类型删掉 (只读老转录要用的留下并注明); tests 里 `topOnly` / `speech` 夹具删掉; 注释里退役工具名改成现行说法 (`eff3069` `3e03081`, PaulOwen)。
 - [x] **svr 重启后名册缺席** (`f0fc2f8`, IrisHill): `svr/facts-store.ts` 每次 POST /w 后原子落盘 `<stateDir>/facts.json`, 启动按 `FACTS_TTL_MS` 读回。实测重启后 3s: 名字 0→61, degraded true→false。
 - [x] **lead 标记按件摘** (admin 选 B): `WizardRecord.leadOf` 记派它当 lead 的 task 行; 全关账且无未收尾 plan → 摘 (`leadSettled`; hub `onClosed` / plan 更新 / boot 各跑一遍)。老记录无 leadOf 只在 boot 按「名下没有同伴开的未关 duty」摘 —— 首次 boot 摘了 Grace / IrisIrwin / JackJones / LeoLane, OliveOwen 因常驻 duty 保留。(本轮)
 - [x] `/help` 文案陈旧: 协作一节去掉回执 / 工单 / 循环流水线, 改成 room 口径; 改名权限 lead→parent (与 `wizard_identity` 描述一致)。(本轮)
-- [ ] 源码注释里还有 ~40 处 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` (daemon/index.ts、mirror-bridge.ts、peers.ts、shared/session-label.ts、tool-hints.ts 等), 只是注释, 不进模型; 碰到哪个文件顺手改。运行时文案里只剩 charter 两处 (待拍板 #1)。
+- [x] 源码注释里的 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` 已改 (`3e03081` 等); 运行时文案里已无退役工具名。`scripts/room-cutover/*.mjs` 是迁移映射数据, 保留。
 
 ### P2 — 模型 / 文档 / 体验
 - [x] `docs/evolve/README.md` 与 `roadmap.md` 加醒目的「历史文档」头: 列出已退役的名词, 指向 `docs/room/contract.md` / `CLAUDE.md` / 本文。没有重写 —— 它们留作决策史。
@@ -83,6 +83,7 @@
 | 2026-11-22 | 人也有 duty (HenryGreen): wizard 对人 need / chat_ask 点名人 → 人名下开 duty (kind `need` / ask / task); 人下一句话关账 (引用对回账本行, 对不上则全关) 并把提问 wizard 补进 `to` 唤醒; 人名下只做 group 级逾期, wizard 等人时不计逾期; 成员栏「反问」。admin 7aeb85fc.300 done。遗留: 同一条连 need 两次开两条; 提问 wizard 离开后它开在人名下的账不取消 | `6dc15c5` `00a3961` |
 | 2026-11-22 | svr 冷启动名册不再缺席: 快照落盘 + 按 TTL 读回 (不改推送协议) | `f0fc2f8` |
 | 2026-11-22 | handoff 简报回贴不再永远判失败 (LeoKing): fd4715b 删旧沟通层时连 `withMsg` 调用一起删了, 无信封注入不带 message-event 标记, 提交确认永远找不到 → 每次 `handoff: 放弃` (简报其实送到了)。新增 `envelopeFor`, `injectText` 对有 eventId 无信封的注入补标记。核对: handoff 后的「继续 <event>」续答 (`owed: () => []` / `resume` 空桩) 是有意退役 —— room hub 按 seen 游标重投欠账, 不需要它。待验: 下一次真实自我 handoff 时 daemon.log 不再出现「框空了且转录里始终没有这一笔」 | `c6f3c31` |
+| 2026-11-22 | 清理 (PaulOwen): picker 哨兵被真实输入抢占 (`PaneInputError` canceled) 只打 debug (24h 36 条 warn 噪音); reminder.ts 退役 attr; tests 死数据; 注释退役工具名。顺带修 c6f3c31 引入的 `pane-delivery` 失败 (vm 沙箱缺 `envelopeFor`)。教训已记 workspace 记忆: 别 git stash; vm 沙箱测试要随 mirror-bridge 新 import 补注入 | `e600ed3` `eff3069` `3e03081` `0492e38` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
