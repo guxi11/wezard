@@ -15,6 +15,7 @@
 ### Changed
 - **rolepage: chat detail = f(选中的 room, 当前 role), 选中 room 时标题行出「×」取消选择 room (admin 7aeb85fc.276)**: 只选 role = 「<role 名> 的全部聊天记录」; 选中 room = room 名, 同一行右侧挂淡色「👁 <role 名>」(视角的体现) 和一个 32px 触控区的 × (线描, 与返回键 chevron 同套; hover「取消选择 room」), 点它只清 room、保留 role, 回到该 role 的全部记录, URL `room=` 写空串 / 浏览器返回照旧 (走 `toggleRoom`, 窄屏同样压一格历史)。点图 / 列表 / 成员栏 / 消息作者名 = 选 role, 点图 room 节点 / 列表 / 消息里的 room 名 = 选 room, 沿用旧元素, 没造新交互; 不改后端 API 与账本。`tests/room-graph.dom.mjs` 同步: 头的断言改为「视角标在标题行而非 `.rv-sub`」并加点 × 的用例。
 - **rolepage: 标题行 × 挪到 room 名与 role 之间 (admin 7aeb85fc.283「现在那个 x 放在 room 和 role 中间, 表示对前者的消除」)**: 由 `room 名 · 👁 role 名 · ×` 改成 `room 名 × 👁 role 名`, × 的语义是「消除前者 (取消选择 room)」; 点击行为、hover 提示、32px 触控区、窄屏标题先让位都不变。「只选 room、不选 role」不做 (× 仍只在有 role 时出现)。`tests/room-graph.dom.mjs` 加标题行顺序断言。
+- **rolepage: room 图标精简成两种 (admin 7aeb85fc.283「只需要保留表示有人参与的群聊 emoji 和只有 wizard 参与的 wizard emoji」)**: 此前图节点 / 列表兜底头像 / 搜索结果按 kind 区分 👥 💬 📌 🟢 🧙 ◎ 六种, 现在只剩 💬 (有人参与的群聊) 与 🧙‍♂️ (只有 wizard 的 room, 与 wizard 默认头像同一个), `KIND_IC` 删除; 图例同步加这两项; 类型 (企微群 / 企微单聊 / topic 帖 / 微信 / wizard 两人会话 / 临时多人 room) 只留在图节点 (新增 `<title>`) 与列表项的 tooltip 文字里。判据沿用 `isPeopleRoom` (绑定企微 / topic / 微信或成员里有人), 与列表「群聊 / 会话」分组、搜索 `group` 同一口径, 所以绑定了但还没人发过话的群也是 💬。
 - **rolepage: lead 标记改 👑、聪明度改学历梯度 (人 2026-11-22 admin)**: lead 不再用 ★ (易与 host 的 ⭐ 混), 图节点 / 图例 / 成员栏 / 名片 / tooltip 全换皇冠; 聪明度不再显示 `3/5`, 改 🧒小学生 · 🎒初中生 · 🎓大学生 · 🔬研究生 · 👨‍🏫专家教授 (节点半径随档位变大不变, `shared/smarts.ts` 未动)。
 
 ### Removed

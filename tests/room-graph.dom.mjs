@@ -228,6 +228,15 @@ try {
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
   // 默认 2d: 3 天前的老 room 不在范围里 (ROOMS 有 3 间, 画 2 间)。
   // 两人 room (DM) 不画节点: alice—bob 之间直接一条可点的线, 点它 = 打开那个 room。
+  // room 图标只有两种: 有人参与的群聊 💬 / 只有 wizard 的 room 🧙‍♂️ (图节点 + 图例); 类型文字只在 tooltip。
+  const icons = await page.evaluate(() => ({
+    nodes: [...document.querySelectorAll(".rv-room text")].map((t) => t.textContent.trim().split(" ")[0]),
+    tip: ((document.querySelector(".rv-room title") || {}).textContent || ""),
+    legend: [...document.querySelectorAll(".rv-legend .lgemo")].map((e) => e.textContent),
+  }));
+  assert.deepEqual(icons.nodes, ["💬"], "群 G (有人) 的节点图标 = 💬: " + JSON.stringify(icons));
+  assert.match(icons.tip, /群聊 · 企微群/, "类型文字留在 tooltip: " + icons.tip);
+  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["💬", "🧙‍♂️"], "图例只剩两种 room 图标: " + JSON.stringify(icons.legend));
   assert.equal(counts.rooms, 1, "room 节点数 = 2d 内有动静的 ≥3 人 room 数 (两人 room 改成连线)");
   assert.deepEqual(counts.directLinks, [DM], "两人 room 画成成员之间的线");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
