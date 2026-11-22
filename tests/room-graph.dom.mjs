@@ -438,27 +438,25 @@ try {
   await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
   await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
 
-  // b. 图: A 节点有视角标记 (.rv-pov); 选中 edge (m|G|p:A) 带 sel, 点它 = 取消选中 (URL room= 空, 无 .on / sel), detail 换成 A 的全部记录; 再点 G 节点 = 重新选中。
+  // b. 图: A 节点带 .on (视角); 选中 edge (m|G|p:A) 带 sel, 点它 = 取消选中 (URL room= 空, 无 .on / sel), detail 换成 A 的全部记录; 再点 G 节点 = 重新选中。
   await goGraphView();
   const g1 = await page.evaluate((ta) => ({
-    pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.querySelector(".rv-pov")).map((e) => e.getAttribute("data-node")),
+    pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.classList.contains("on")).map((e) => e.getAttribute("data-node")),
     sel: document.querySelectorAll("line.rv-edge.sel").length,
     onEdges: document.querySelectorAll("line.rv-edge.on").length,
     roomOn: !!document.querySelector('.rv-room.on[data-room="' + "chat:wrG" + '"]'),
-    legend: /视角/.test((document.querySelector(".rv-legend") || {}).textContent || ""),
     selGeo: (() => { const l = document.querySelector("line.rv-edge.sel"), h = document.querySelector('line.rv-hit[data-edge="m|chat:wrG|p:' + ta + '"]');
       return !!l && !!h && ["x1", "y1", "x2", "y2"].every((k) => l.getAttribute(k) === h.getAttribute(k)); })(),
   }), TA);
-  assert.deepEqual(g1.pov, [TA], "只有当前 role 的节点带 .rv-pov: " + JSON.stringify(g1));
+  assert.deepEqual(g1.pov, [TA], "只有当前 role 的节点带 .on: " + JSON.stringify(g1));
   assert.equal(g1.sel, 1, "role → 选中 room 的成员边有 sel (只一条)");
   assert.equal(g1.onEdges, 1, "其余成员边不再高亮: .on 也只有 role→room 那一条 (同一条 sel), 别的保持普通灰");
   assert.equal(g1.selGeo, true, "sel 的就是 m|G|p:A 那条 (与它的点击线同一线段)");
   assert.equal(g1.roomOn, true, "room 节点 .on");
-  assert.equal(g1.legend, true, "图例有「视角」一项");
   await page.dispatchEvent('line.rv-hit[data-edge="m|' + G + '|p:' + TA + '"]', "click");
   await ttlIs("alice 的全部聊天记录");
   const g2a = await page.evaluate(() => ({ sel: document.querySelectorAll("line.rv-edge.sel").length, on: document.querySelectorAll(".rv-room.on, line.rv-edge.on").length, ttl: document.querySelector(".rv-ttl").textContent,
-    pov: document.querySelectorAll(".rv-pov").length }));
+    pov: document.querySelectorAll(".rv-person.on").length }));
   assert.equal(q().get("room"), "", "取消选中: URL 写 room= 空串 (刷新不会被落点重新选中)"); assert.equal(q().get("role"), TA);
   assert.equal(q().has("room"), true);
   assert.equal(g2a.sel + g2a.on, 0, "取消选中后图上没有 on / sel: " + JSON.stringify(g2a));
@@ -758,7 +756,7 @@ try {
       rooms: [...document.querySelectorAll(".rv-room")].map((n) => n.querySelector("text").textContent.trim()),
       roomIds: [...document.querySelectorAll(".rv-room")].map((n) => n.getAttribute("data-room")),
       // 视角节点 (👁 标记所在) 的名字 / 它有几条边
-      pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.querySelector(".rv-pov")).map((e) => e.querySelector(".rv-nm").textContent.trim()),
+      pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.classList.contains("on")).map((e) => e.querySelector(".rv-nm").textContent.trim()),
       people: [...document.querySelectorAll(".rv-person .rv-nm")].map((t) => t.textContent.trim()).sort(),
       direct: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
       // 每个 wizard 节点的实际填充 / 描边虚线 (computed): 冷 = 白底, 休眠且冷 = 白底虚线
