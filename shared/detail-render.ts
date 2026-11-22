@@ -568,7 +568,6 @@ const TURN_CSS = `
   .handoff .ho-turn{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:#8c959f}
   .handoff .ho-tag{border-radius:4px;padding:0 5px;font-size:10.5px;line-height:16px;background:#f1f3f6;color:#656d76}
   .handoff .ho-tag.pub{color:#0969da;background:#0969da12}
-  .handoff .ho-tag.priv{color:#9a5b10;background:#9a5b1014}
   .handoff .ho-tag.xfer{color:#8250df;background:#8250df14}
   .handoff .ho-why{color:#9a6700;min-width:0;overflow:hidden;text-overflow:ellipsis}
   .handoff.fail .ho-why{color:#cf222e}
@@ -701,8 +700,8 @@ export interface Handoff {
   name: string;
   /** 活号; 投递失败 / 回包还没回来时没有。 */
   turn?: string;
-  /** 落进公开频道了吗。回包 (`public`) 是权威 —— 顶层模式 / 工单 / fyi / transfer 都会把调用参数里
-   *  声明的那个降级; 没回包时才是按调用参数推的一份预判。 */
+  /** 落进绑定 room (企微群 / 单聊, 账本行镜像进企微) 了吗。room 模型下回包带落地的 `room`, 由它判
+   *  (dm / adhoc 只在 rolepage); 老回包带 `public` 的照旧信它; 都没有 (还没回包) 只认调用参数的 public。 */
   public: boolean;
   /** 整件交出 (`return:"transfer"` 尾调用): 这一笔交出去就不回你了, 结论直接落你的上游。 */
   handed?: boolean;
@@ -747,6 +746,9 @@ const outcomeOf = (result: ToolResult | undefined, j: Record<string, unknown> | 
   return { state: failed ? "failed" : "lost", reason: clipLine(str(j?.reason) ?? result.body.replace(/^\w+ failed: /, ""), 120) };
 };
 
+/** 绑定 room 的 id 就是 base principal (chat:… / user:… / 频道); 不绑定的是 dm: / adhoc:。 */
+const boundRoom = (room: string): boolean => !/^(?:dm|adhoc):/.test(room);
+
 const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<string, unknown> | undefined, out: Pick<Handoff, "state" | "reason">): Hint => {
   const kind = str(j?.kind) ?? str(a.kind);
   const dec = str(j?.decision);
@@ -756,7 +758,7 @@ const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<
     ...(dec === "existing" || dec === "spawn" ? { decision: { kind: dec, why: str(j?.reason) ?? "" } } : {}),
     name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.to) ?? ""),
     turn: event,
-    public: typeof j?.public === "boolean" ? j.public : a.public === true || (via === "dispatch" && a.public !== false),
+    public: typeof j?.public === "boolean" ? j.public : str(j?.room) ? boundRoom(str(j?.room)!) : a.public === true,
     // 交出的那一笔回包不带 `receipt` 而是带 `transfer` (一句交接口径); 还没回包就看 `return`。
     ...(str(a.return) === "transfer" || str(j?.transfer) ? { handed: true as const } : {}),
     priority: priorityOf(j?.priority) ?? priorityOf(a.priority) ?? (a.re ? "now" : "normal"),
@@ -779,7 +781,7 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
   const out = outcomeOf(result, j);
   switch (tool) {
     // 回包的 id 就是这条 ask 在账本里的行 id —— 提示行凭它挂上 duty 的交代 (rolepage 的 deco.status)。
-    case "chat_ask": return handoffFrom("tell", { ...a, name: str(a.name) ?? (Array.isArray(a.to) ? a.to[0] : a.to) }, j && { ...j, event: str(j.event) ?? str(j.id), ...(str(j.room) ? { public: !/^(?:dm|adhoc):/.test(str(j.room)!) } : {}) }, out);
+    case "chat_ask": return handoffFrom("tell", { ...a, name: str(a.name) ?? (Array.isArray(a.to) ? a.to[0] : a.to) }, j && { ...j, event: str(j.event) ?? str(j.id) }, out);
     case "delegate": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
     case "clone_wizard": case "spawn_wizard": {
       const via = tool === "clone_wizard" ? "clone" : "spawn";
@@ -909,13 +911,13 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   if (h.state === "failed")
     return hoBox(" fail", attrs, `${hoArrow({ key: "fail", tip: "没交出去" }, glyph)}没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
   const [pt, tip] = PRIORITY_TAG[h.priority];
-  // 公开与否以落地那一轮为准 (见 HandoffDeco.pub): 私聊的那句原文默认收起、只跟一行摘要,
-  // 公开的才当成一条气泡摊开。
+  // 进没进群以落地那一轮为准 (见 HandoffDeco.pub): 私下的那句原文默认收起、只跟一行摘要,
+  // 进群的才当成一条气泡摊开。只标进群这一种 —— dm / adhoc 是派活的常态, 落在哪个 room 由账本气泡的头写着。
   const pub = deco?.pub(h) ?? h.public;
   const tags = [
     h.decision ? hoTag("pri", h.decision.kind === "existing" ? "选中" : "新生", h.decision.why) : "",
     h.handed ? hoTag("xfer", "整件交出", "尾调用: 这一笔交给它, 结论直接回你的上游, 不回你") : "",
-    pub ? hoTag("pub", "公开", "在群里说的, 回复也进群") : hoTag("priv", "私聊", "只在双方的 rolepage"),
+    pub ? hoTag("pub", "进群", "落在绑定的企微群 / 单聊里: 人看得见, 交代也进群") : "",
     h.busy === true ? hoTag("pri", pt, `${tip} —— 投的时候它正忙`) : "",
     h.kind === "ask" ? hoTag("kind", "只问", "只问一句") : h.kind === "fyi" ? hoTag("kind", "知会", "只是知会, 不要回话") : "",
   ].join("");

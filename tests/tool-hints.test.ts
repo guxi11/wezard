@@ -61,6 +61,24 @@ assert.ok(!html.includes("t:child"), "peer 轮不并进父轮");
 const multiHtml = renderTurnGroup({ ...parent, items: [{ ...use, toolInput: multi }, { ...result, body: wrap([b, a]) }] }, 10).html;
 assert.equal((multiHtml.match(/class="handoff/g) ?? []).length, 2);
 
+// room 模型: delegate 回包不带 public, 只带落地的 room —— 进没进群由 room 判 (dm / adhoc = 不进群)。
+// 只标「进群」这一种; 落在 dm 的派活不再挂「公开」(曾经 delegate 无 public 回包一律被当成公开) 也不挂「私聊」。
+const dlg = { ...use, toolName: "mcp__wezard__delegate", toolInput: { task: "check model" } };
+const dlgReply = (room: string) => ({ ok: true, room, id: "e0.1", event: "e0.1", name: "router-check", queued: true, decision: "spawn", reason: "无合适候选" });
+const dmHint = hintOf(dlg, { ...result, body: JSON.stringify(dlgReply("dm:wa|wb")) });
+assert.equal(dmHint?.k === "handoff" && dmHint.public, false);
+const grpHint = hintOf(dlg, { ...result, body: JSON.stringify(dlgReply("chat:wrX")) });
+assert.equal(grpHint?.k === "handoff" && grpHint.public, true);
+assert.equal((h => h?.k === "handoff" && h.public)(hintOf(dlg, undefined)), false, "还没回包时不预判成进群");
+const tagsOf = (room: string) => renderTurnGroup({ ...parent, items: [dlg, { ...result, body: JSON.stringify(dlgReply(room)) }] }, 10).html;
+const dmHtml = tagsOf("adhoc:ab12");
+assert.ok(!/公开|私聊|进群/.test(dmHtml), "dm / adhoc 派活不挂公开 / 私聊 标签");
+assert.match(dmHtml, /ho-tag pri" title="无合适候选">新生/);
+assert.match(dmHtml, /ho-text/, "私下派的原文收在 chevron 下");
+assert.match(tagsOf("chat:wrX"), /ho-tag pub"[^>]*>进群</);
+// chat_ask 同一口径 (回包 room 判)。
+assert.equal((h => h?.k === "handoff" && h.public)(hintOf(direct, { ...result, body: JSON.stringify({ ...askReply, room: "chat:wrX" }) })), true);
+
 // CodeBuddy PTC/REPL 形态: 一切调用包进 REPL 的 code, 内层写 mcp_wezard.x(…),
 // 回包是 {result, stdout, stderr} 壳 —— 三层都得认, hint 才回得来。
 const tellReply = { ok: true, room: "dm:wa|wb", id: "h1.2", name: "router-check" };
