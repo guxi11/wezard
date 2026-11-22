@@ -37,7 +37,7 @@
 - [x] `shared/turn-state.ts` 整个删; `WorldFacts.inflight` / `WorldFactInFlight`、`route.ts` `routeReceiptDutiesOf`、`WizardBrief.turns`、peek 里恒空的 inflight 行一并删。(本轮)
 - [x] (admin 批, 已做) 接上了: `route.ts` `occupies` 只认别的 wizard 用 chat_ask / delegate 开的 (kind ask/task, asker 是另一个 wizard) 未关 duty; 人话 / join-req / 自己开给自己的不算。常驻 duty 没有专门的标记, 照算 —— 它的持有者是 lead, 本来就被 lead veto 挡着, 不多挡一次。原记录: **delegate 的「任务占用」veto 在生产里从不触发**: `routeRowsOf` (`daemon/index.ts`) 给每行写死 `duties: []`, 而 `route.ts` 的 veto / 渲染都读它。名册那边已有 `dutiesOf` (跨 room 现算 open duty), 喂进来就能恢复。要定: 什么样的 duty 算占用 (常驻 duty 如 d6977146.1 会让 lead 永远被挡 —— lead 本就另有 veto; 人话唤醒开的 duty 在它回复前也会挡) → 改的是派活语义, 先报。
 - [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
-- [ ] svr 重启后名册缺席 30~70s: daemon 应在 svr 上线时立即补推 `WorldFacts`。
+- [x] **svr 重启后名册缺席** (`f0fc2f8`, IrisHill): `svr/facts-store.ts` 每次 POST /w 后原子落盘 `<stateDir>/facts.json`, 启动按 `FACTS_TTL_MS` 读回。实测重启后 3s: 名字 0→61, degraded true→false。
 - [x] **lead 标记按件摘** (admin 选 B): `WizardRecord.leadOf` 记派它当 lead 的 task 行; 全关账且无未收尾 plan → 摘 (`leadSettled`; hub `onClosed` / plan 更新 / boot 各跑一遍)。老记录无 leadOf 只在 boot 按「名下没有同伴开的未关 duty」摘 —— 首次 boot 摘了 Grace / IrisIrwin / JackJones / LeoLane, OliveOwen 因常驻 duty 保留。(本轮)
 - [x] `/help` 文案陈旧: 协作一节去掉回执 / 工单 / 循环流水线, 改成 room 口径; 改名权限 lead→parent (与 `wizard_identity` 描述一致)。(本轮)
 - [ ] 源码注释里还有 ~40 处 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` (daemon/index.ts、mirror-bridge.ts、peers.ts、shared/session-label.ts、tool-hints.ts 等), 只是注释, 不进模型; 碰到哪个文件顺手改。运行时文案里只剩 charter 两处 (待拍板 #1)。
@@ -81,6 +81,7 @@
 | 2026-11-22 | 群公告后端 (FrankEvans): 账本 `NoticeOp` + `judgeNotice` (≤500 字, host / 人可改)、`room_name({notice})`、人用 `/notice` (设/看/clear)、改动发「📌 群公告」系统行 + notices.ts 提示、charter「本群公告」节、/api 带 `notice`、room_read 头部。遗留: 同文本 10 分钟内设→清→再设第二条系统行被去重吞; 无账本的新群 `/notice` 回「没有这个 room」; 企微镜像 / `/notice` / 在跑 wizard 提示未在线上实测 | `ca5dbe4` |
 | 2026-11-22 | 成员栏一人一行 + 栏顶群公告 (BobAdams): 状态点·名字·👁/⭐/👑·待交代·最近发言, 次要信息进 tooltip, 人在前, 头一行。admin 7aeb85fc.291 / .299 已 done。遗留: 长名与待交代挤; 公告未线上实测 | `b40388d` |
 | 2026-11-22 | 人也有 duty (HenryGreen): wizard 对人 need / chat_ask 点名人 → 人名下开 duty (kind `need` / ask / task); 人下一句话关账 (引用对回账本行, 对不上则全关) 并把提问 wizard 补进 `to` 唤醒; 人名下只做 group 级逾期, wizard 等人时不计逾期; 成员栏「反问」。admin 7aeb85fc.300 done。遗留: 同一条连 need 两次开两条; 提问 wizard 离开后它开在人名下的账不取消 | `6dc15c5` `00a3961` |
+| 2026-11-22 | svr 冷启动名册不再缺席: 快照落盘 + 按 TTL 读回 (不改推送协议) | `f0fc2f8` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
