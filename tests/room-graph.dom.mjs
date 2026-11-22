@@ -374,6 +374,8 @@ try {
   assert.equal(a1.sub, false, "头不再写「👁 X 的视角」sub 行");
   assert.equal(a1.btns, 0, "#ch-acts 里没有取消选中按钮 (× 在标题行里, 不在右侧按钮区)");
   assert.equal(a1.pov, "👁 alice", "两者都选: 标题行挂「👁 role 名」(视角的体现), 不在 .rv-ttl 内");
+  const ord = await page.evaluate(() => [...document.querySelectorAll("#ch-who .rv-trow > *")].map((e) => e.classList.contains("rv-ttl") ? "ttl" : e.id === "rv-clr" ? "clr" : e.classList.contains("rv-pov-tag") ? "pov" : "?"));
+  assert.deepEqual(ord, ["ttl", "clr", "pov"], "标题行顺序: room 名 × 👁 role 名 (× 在两者之间): " + JSON.stringify(ord));
   assert.ok(a1.clr && a1.clr.title === "取消选择 room" && a1.clr.w >= 32 && a1.clr.h >= 32, "标题行有 × (hover 提示「取消选择 room」, 触控区 ≥32px): " + JSON.stringify(a1.clr));
   assert.equal(a1.me, "alice", "成员列里当前视角那行带 .me");
   assert.equal(q().get("role"), TA); assert.equal(q().get("room"), G);
