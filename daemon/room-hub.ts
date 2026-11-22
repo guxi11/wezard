@@ -41,6 +41,8 @@ export interface HubPorts {
   idle: (target: string) => Promise<boolean>;
   interrupt: (target: string) => Promise<void>;
   paste: (target: string, text: string) => Promise<PasteResult>;
+  /** 有 duty 被关账之后 (任何 status, 任何来路) —— lead 摘章等对账用; 抛错不影响 append。 */
+  onClosed?: () => void;
   /** 轮终等 Stop hook 的 grace (ms, 缺省 3000; 测试给 0)。只对来问过 hook 的 wizard 生效。 */
   stopGraceMs?: number;
 }
@@ -71,6 +73,7 @@ export const createRoomHub = (p: HubPorts) => {
   let again = false;
 
   const state = (room: string): RoomState | undefined => p.store.get(room);
+  const closedHook = (): void => { try { p.onClosed?.(); } catch (e) { p.log?.warn({ err: (e as Error).message }, "room: onClosed 失败 (不影响 append)"); } };
 
   /** 唯一的 append 口子。成功 → 已落盘并已触发扇出。 */
   const append = (room: string, d: Draft, extra: Partial<JudgeCtx> = {}): Verdict => {
@@ -87,6 +90,7 @@ export const createRoomHub = (p: HubPorts) => {
     if (v.degraded.length) p.log?.info({ room, id: v.row.id, degraded: v.degraded }, "room: 回合预算用尽, 这几位只推游标不唤醒");
     if (d.author.kind === "wizard" && v.row.kind === "reply") markReplied(d.author.id, v.row);
     fanout(room, v.row);
+    if (v.row.closes?.length) closedHook();
     // 以 done 关账 = 可能有 after 等着它: 只重算 after 含被关消息的那些 duty (trigger 行无 closes, 不递归)。
     if (v.row.closes?.length && v.row.status === "done") reconcileAfter({ closed: v.row.re ?? [] });
     return v;
@@ -96,6 +100,7 @@ export const createRoomHub = (p: HubPorts) => {
   const write = (room: string, ops: readonly RoomOp[]): RoomState => {
     const s = p.store.append(room, ops);
     ops.forEach((o) => { if (o.op === "msg") fanout(room, o); });
+    if (ops.some((o) => o.op === "msg" && o.closes?.length)) closedHook();
     return s;
   };
 

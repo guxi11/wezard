@@ -11,8 +11,8 @@
 
 ## 每轮规矩
 
-1. 读本文 → `wizard_roster` / `pending_items` / `plan_list` (别重复派、别撞文件) → `free -m`。
-2. 可用 < 700MB, 或活着的 wizard (含我) 已 ≥ 4: 只做轻量工作 (读码 / 设计 / 文档 / 小改动自己做), 不起新 wizard。否则可起执行者, 活着的总数 (含我) 不超过 4, 交差即收。
+1. 读本文 → `wizard_roster` / `pending_items` / `plan_list` (别重复派、别撞文件); `room_read` wezard dev 群看有没有 admin 的新话。
+2. **内存不是不干活的理由** (admin 2026-11-22: 已配 swap + earlyoom)。照常推进, 需要就起执行者; 只是别半分钟内连生多个, 交差即收。
 3. 选 1 件做完: typecheck、相关 tests 通过数不减少、前端改动截图 (`node scripts/shot.mjs`, 串行)。
 4. 小步 commit, `git diff --cached` 只含自己的 hunk; 不 stash / reset / checkout 别人的改动。
 5. 更新本文并提交; 交差的分身 `stop_wizard`; 做成了就在群里报一句 (commit + 测试 + 遗留)。没值得做的事就回 QUIET。
@@ -38,7 +38,7 @@
 - [x] (admin 批, 已做) 接上了: `route.ts` `occupies` 只认别的 wizard 用 chat_ask / delegate 开的 (kind ask/task, asker 是另一个 wizard) 未关 duty; 人话 / join-req / 自己开给自己的不算。常驻 duty 没有专门的标记, 照算 —— 它的持有者是 lead, 本来就被 lead veto 挡着, 不多挡一次。原记录: **delegate 的「任务占用」veto 在生产里从不触发**: `routeRowsOf` (`daemon/index.ts`) 给每行写死 `duties: []`, 而 `route.ts` 的 veto / 渲染都读它。名册那边已有 `dutiesOf` (跨 room 现算 open duty), 喂进来就能恢复。要定: 什么样的 duty 算占用 (常驻 duty 如 d6977146.1 会让 lead 永远被挡 —— lead 本就另有 veto; 人话唤醒开的 duty 在它回复前也会挡) → 改的是派活语义, 先报。
 - [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
 - [ ] svr 重启后名册缺席 30~70s: daemon 应在 svr 上线时立即补推 `WorldFacts`。
-- [ ] **lead 标记 (`WizardRecord.lead`) 写入后从不清除** —— 方案见「待 admin 拍板」#3, 已在群里提。
+- [x] **lead 标记按件摘** (admin 选 B): `WizardRecord.leadOf` 记派它当 lead 的 task 行; 全关账且无未收尾 plan → 摘 (`leadSettled`; hub `onClosed` / plan 更新 / boot 各跑一遍)。老记录无 leadOf 只在 boot 按「名下没有同伴开的未关 duty」摘 —— 首次 boot 摘了 Grace / IrisIrwin / JackJones / LeoLane, OliveOwen 因常驻 duty 保留。(本轮)
 - [x] `/help` 文案陈旧: 协作一节去掉回执 / 工单 / 循环流水线, 改成 room 口径; 改名权限 lead→parent (与 `wizard_identity` 描述一致)。(本轮)
 - [ ] 源码注释里还有 ~40 处 `tell_peer` / `read_chat` / `send_peer` / `wait_peer` (daemon/index.ts、mirror-bridge.ts、peers.ts、shared/session-label.ts、tool-hints.ts 等), 只是注释, 不进模型; 碰到哪个文件顺手改。运行时文案里只剩 charter 两处 (待拍板 #1)。
 
@@ -54,7 +54,7 @@
 
 2. ~~room vs dm A~G~~ admin 回复: A、C 不要; D 改为「dm 统一为 room 特殊形式 + history 参数」(已完成 d986e7a); B 未批; E/F/G 未表态。原文: (见 [research/room-vs-dm-collaboration.md](research/room-vs-dm-collaboration.md) §5)。推荐先批 A (lead 派活信封加一句「小队一个 room」, 零代码) 与 B (多个非成员 chat_ask 自动开 adhoc); G (charter 判据) 与 #1 合并发出。
 
-3. **lead 标记什么时候摘** (2026-11-22 群里提)。现状: `delegate({lead:true})` / `spawn({lead:true})` 写 `lead: true` 后永不清除; 它驱动三件事 —— charter 多一节 lead 规矩、rolepage 👑、delegate「lead 身份, 独立任务不自动复用」veto。实测 `wizards.json` 5 个 lead (Grace / IrisIrwin / JackJones / LeoLane / OliveOwen), 前四个的 lead 活大多已交差, 却永远戴着 👑、永远不被自动派活。
+3. ~~lead 标记什么时候摘~~ admin 选 B, 已做 (2026-11-22)。原文: (2026-11-22 群里提)。现状: `delegate({lead:true})` / `spawn({lead:true})` 写 `lead: true` 后永不清除; 它驱动三件事 —— charter 多一节 lead 规矩、rolepage 👑、delegate「lead 身份, 独立任务不自动复用」veto。实测 `wizards.json` 5 个 lead (Grace / IrisIrwin / JackJones / LeoLane / OliveOwen), 前四个的 lead 活大多已交差, 却永远戴着 👑、永远不被自动派活。
    - **推荐 B (显式)**: lead 记的是「领了哪一件」—— `WizardRecord` 加可选 `leadOf: <派它那条 chat_ask 的 msg id>`; 那条 duty 被 done / passed / canceled 关掉时 room-hub 摘 lead (还有 active/paused plan 就等 plan 收尾再摘)。合项目口径: 完成只认账本上的显式字段, 不推断。老记录没有 `leadOf`: boot 时若它名下没有同伴开的未关 duty、也没有 active/paused plan, 就摘掉 (会改 `wizards.json` 里 4 条的 flag, 不删记录)。
    - 备选 A (推断): 不加字段, 每次它 chat_reply 关账后, 名下没有同伴开的未关 duty 且无 active plan 就摘。改动更小, 但同时领两件时会摘早。
    - 常驻 duty (OliveOwen 的 d6977146.1) 永不关, 两种方案下它都一直是 lead —— 符合事实。
@@ -72,6 +72,7 @@
 | 2026-11-22 | room_invite/room_approve `history` 参数 (none/N/from:id/all); dm 显示统一 (多人列全员); ensureDmRoom 补回 / 混入第三人改落 {A,B} adhoc。coder QuinnQuincy, 白板 reviewer RoseReed 通过。遗留: join-req 路径不校验 history; rejoin 不写 seen 未细查; 多个 {A,B} adhoc 取最近活动会合流 | `d986e7a` |
 | 2026-11-22 | `daemon/peers.ts` 删回执时代死代码 ~260 行 (我自己做: 活着的 wizard 已 4 个, 不起新人) | 见 git log |
 | 2026-11-22 | room hub: 投给已结束 wizard 的 duty 不再静默丢失 (`gone` → `undelivered` 系统行给提问者; 其他失败打 warn)。起因: IrisIrwin 被 /kill 后两次派活都没投进去 | 见 git log |
+| 2026-11-22 | lead 按件摘 (方案 B: leadOf + leadSettled); 内存不再挡活 (round 规矩与 platform-push 提示词同步) | 见 git log |
 | 2026-11-22 | admin 批「按推荐处理」: charter 删 `wait_peer`; delegate 占用 veto 接上 (只认同伴 chat_ask/delegate 开的 duty); 被结束 wizard 不自动重生 (维持 undelivered 系统行); platform-push 提示词改成「有进展就在群里说」 | 见 git log |
 | 2026-11-22 | `/help` 协作一节改成 room 口径; `wizard.ts` 身份注释去 `tell_peer` | 见 git log |
 | 2026-11-22 | 删 `shared/turn-state.ts` 与恒空的 `WorldFacts.inflight` / `routeReceiptDutiesOf` / `WizardBrief.turns` (-64 行); 顺带发现 delegate 的占用 veto 恒空 (登记 P1) | 见 git log |

@@ -108,6 +108,7 @@ import {
   identityWorkspaceOf,
   identityEditRefusal,
   instancesOf,
+  leadSettled,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
@@ -1165,6 +1166,26 @@ const main = async (): Promise<void> => {
     const heldDuties = (who: Who): Duty[] =>
       roomStore.ids().flatMap((id) => { const s = roomState(id); return s ? dutiesHeldBy(s, who) : []; });
     const dutyLine = (d: Duty): string => d.msg + " " + (d.last?.status ?? "open");
+    /** 摘 lead (方案 B, 见 leadSettled): 有 duty 关账、plan 变动后各跑一遍, boot 再跑一遍带老记录。
+     *  lead 全机就几个, 每个只查自己 leadOf 那几条, 不扫全表。 */
+    const settleLeads = (boot = false): void => {
+      for (const rec of wizards.all()) {
+        if (!rec.lead || !rec.uid) continue;
+        const who: Who = { kind: "wizard", id: rec.uid };
+        const open = (msg: string): boolean => {
+          const room = roomStore.roomOfMsg(msg);
+          const s = room ? roomState(room) : undefined;
+          return !!s && dutiesHeldBy(s, who).some((d) => d.msg === msg);
+        };
+        // plan 账本坏了 (fail closed) 就当它还有没收尾的 —— 宁可晚摘, 不错摘。
+        let unfinishedPlan = true;
+        try { unfinishedPlan = plans.hasUnfinished(rec.target); } catch { /* 见上 */ }
+        const facts = { open, unfinishedPlan, boot, occupied: boot && heldDuties(who).some((d) => occupies(d, who)) };
+        if (!leadSettled(rec, facts)) continue;
+        wizards.upsert(rec.target, { lead: undefined, leadOf: undefined });
+        log.info({ mod: "lead", target: rec.target, leadOf: rec.leadOf ?? [], boot }, "lead: 领的活都关账了, 摘 lead");
+      }
+    };
     /** 占位气泡的 frame 表 (cutmap A-4): 企微 msgid → {frame, expires}。
      *  人话行 append 时写 (B 节接 inbound), 第一条 re 它的 reply 用它把占位收口 ——
      *  bridge 的 replyBubbles 只认自己 dispatch 过的 event id, room 的人话行不再走
@@ -1272,12 +1293,15 @@ const main = async (): Promise<void> => {
         const r = await m.interruptPane(target);
         if (!r.ok) roomLog.warn({ target, reason: r.reason }, "room: Esc 打断失败 (照常投递本条)");
       },
+      onClosed: () => settleLeads(),
       paste: async (target, text) => {
         const r = await m.injectText(target, text, { requireIdle: true });
         if (r.ok) roomActivityTouch(target); // 注入成功 = 该 wizard 有新事件, 看门狗的 stale 窗口重置
         return r.ok ? "ok" : r.uncertain ? "uncertain" : r.gone ? "gone" : "failed";
       },
     });
+    // boot 摘 lead: leadOf 全关了的, 以及没有 leadOf 的老 lead 名下已无同伴的活 (2026-11-22 admin 选 B)。
+    try { settleLeads(true); } catch (e) { log.warn({ mod: "lead", err: errText(e) }, "lead: boot 清扫失败 (不影响启动)"); }
     // boot 对账: 停机期间 / 旧版本落下的 after 欠账 (前置已 done、被点名者没被叫过) 补一条 trigger 行。
     // 只收真前置; after:["undefined"] 旧受害行要人看过清单后经 POST /room/after-reconcile {fake:true} 补。
     try {
@@ -2020,7 +2044,11 @@ const main = async (): Promise<void> => {
         if (!wizards.get(owner)) throw new PlanError(404, "plan owner is not a registered wizard");
         return plans.create(owner, input, at, origin);
       },
-      update: (owner, id, input, at) => plans.update(owner, id, input, at),
+      update: (owner, id, input, at) => {
+        const plan = plans.update(owner, id, input, at);
+        try { settleLeads(); } catch (e) { log.warn({ mod: "lead", err: errText(e) }, "lead: 摘章失败 (plan 已更新)"); } // plan 收尾可能是摘章的最后一个条件
+        return plan;
+      },
       hasUnfinished: (owner) => plans.hasUnfinished(owner),
       healthy: () => plans.healthy(),
       reminded: (id, revision, token, eventId, at) => plans.reminded(id, revision, token, eventId, at),
@@ -2852,7 +2880,8 @@ const main = async (): Promise<void> => {
         const r = resolvePeer(self, name);
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, ...(r.candidates?.length ? { candidates: r.candidates } : {}) }); return; }
         const t = await deliverTask(name);
-        if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
+        if (lead && t.status === 200) wizards.upsert(r.target, { lead: true,
+          leadOf: [...(wizards.get(r.target)?.leadOf ?? []), String(t.body.id)] });
         if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, name);
         json(res, t.status, { ...t.body, diagnostics, decision: "existing", ...dispatchReason(t.status === 200, t.body.reason, d.why), ...(shown.length ? { candidates: shown } : {}) });
         return;
@@ -3022,6 +3051,7 @@ const main = async (): Promise<void> => {
         tier: pick.tier,
         // 显式写 undefined: 复用的冷记录可能当过 lead。
         lead: b.lead === true ? true : undefined,
+        leadOf: undefined,
         // 生完才清; 这个进程中途没了, 下次开机由 sweepUnborn 认出并收掉。
         spawning: BOOT_ID,
       });
@@ -3074,7 +3104,10 @@ const main = async (): Promise<void> => {
             const v = hub.append(dest.room, { author: me, kind: "task",
               text: task + (b.lead === true ? "\n\n" + renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
               to: [{ kind: "wizard", id: who }], origin: "tool", ...(requestedPlanId ? { planId: requestedPlanId } : {}) });
-            if (v.ok) { dispatchedEvent = v.row.id; dispatchedRoom = v.row.room; }
+            if (v.ok) {
+              dispatchedEvent = v.row.id; dispatchedRoom = v.row.room;
+              if (b.lead === true) wizards.upsert(target, { leadOf: [v.row.id] });
+            }
           }
         }
       }

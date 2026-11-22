@@ -93,6 +93,9 @@ export interface WizardRecord {
   tier?: string;
   /** 被派来领一件复杂活的 lead: 宪章多一节层级规矩 (renderLeadRules), 组队打法随派活信封带 (renderLeadPlaybook)。 */
   lead?: boolean;
+  /** 它是为哪几件活当的 lead: 派它的那几条 task 行的消息 id。全部关账、且名下没有未收尾的 plan
+   *  时摘 lead (`leadSettled`)。没有这个字段的 lead 是老记录 (或不带 task 的 lead spawn)。 */
+  leadOf?: string[];
   /** 身份的工作区 (身份级, 只在锚点记录上有意义; 2026-11-17 人拍板: <role, workspace> 唯一确定身份): 该身份在任何群
    *  的新化身都从这里起。没写 = 照旧从锚点会话的 live cwd 推。新群引导新建管家时落。 */
   workspace?: string;
@@ -976,6 +979,18 @@ export const renderLeadPlaybook = (): string[] => [
 ];
 
 /** lead 的全套 (规矩 + 打法): 随派活信封带给**已经存在**的 wizard —— 它的宪章是出生时定的, 没有 lead 这一节。 */
+/** lead 该不该摘 (方案 B: 完成只认账本上的显式关账, 不推断)。有未收尾的 plan 一律不摘;
+ *  记着 leadOf 的, 那几条 duty 都关了才摘; 老记录没有 leadOf, 只在 boot 清扫时按「名下没有
+ *  同伴开的未关 duty」摘 —— 平时不按推断摘, 免得刚 spawn 还没接到第一条 chat_ask 的 lead 被误摘。 */
+export const leadSettled = (
+  rec: Pick<WizardRecord, "lead" | "leadOf">,
+  facts: { open: (msg: string) => boolean; occupied: boolean; unfinishedPlan: boolean; boot: boolean },
+): boolean => {
+  if (!rec.lead || facts.unfinishedPlan) return false;
+  if (rec.leadOf?.length) return !rec.leadOf.some(facts.open);
+  return facts.boot && !facts.occupied;
+};
+
 export const renderLead = (): string[] => [...renderLeadRules(), ...renderLeadPlaybook()];
 
 /** host (这个 room 的默认会话) 那一节。room 模型里它不再是「顶层」: 人说的话在绑定 room 里
