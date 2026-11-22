@@ -364,16 +364,27 @@ try {
   assert.equal(await cardName(), "alice", "选中 room 时名片仍是 role (wizard 名), 不是 room");
   assert.deepEqual(await ciOn(), [G], "列表高亮选中的 room");
   assert.deepEqual(await meAuthors(), ["aa000001.2", "aa000001.3"], "A 说的两行靠右 (.me)");
-  const a1 = await page.evaluate(() => ({ ttl: document.querySelector(".rv-ttl").textContent, sub: !!document.querySelector(".rv-sub"), btns: document.querySelectorAll("#ch-acts button:not(.gs-open)").length,
+  const a1 = await page.evaluate(() => ({ ttl: document.querySelector(".rv-ttl").textContent, sub: !!document.querySelector(".rv-sub"), pov: ((document.querySelector("#ch-who .rv-pov-tag") || {}).textContent || "").trim(),
+    clr: (() => { const x = document.querySelector("#ch-who #rv-clr"); if (!x) return null; const r = x.getBoundingClientRect(); return { title: x.title, w: r.width, h: r.height }; })(), btns: document.querySelectorAll("#ch-acts button:not(.gs-open)").length,
     sess: !!document.querySelector("#rb-who #rb-sp .sp"), me: (document.querySelector("#gside .gs-mem.me .nm") || {}).textContent }));
   assert.equal(a1.ttl, "群G", "标题 = room 名");
   // 人在群里直接说的话 (无 to / re): 头上的收件人用账本行的 wakeTo (alice), 不再只剩 `张三 —群G→`。
   const hh = await page.evaluate(() => { const p = document.querySelector('#thread-in .rv-msg[data-id="aa000001.1"] .rv-path'); return { txt: p ? p.textContent : "", to: p ? [...p.querySelectorAll(".rv-tag")].map((e) => e.textContent) : [] }; });
   assert.deepEqual(hh.to, ["alice"], "人话头部有收件人 (wakeTo): " + JSON.stringify(hh));
   assert.equal(a1.sub, false, "头不再写「👁 X 的视角」sub 行");
-  assert.equal(a1.btns, 0, "头上没有取消选中按钮");
+  assert.equal(a1.btns, 0, "#ch-acts 里没有取消选中按钮 (× 在标题行里, 不在右侧按钮区)");
+  assert.equal(a1.pov, "👁 alice", "两者都选: 标题行挂「👁 role 名」(视角的体现), 不在 .rv-ttl 内");
+  assert.ok(a1.clr && a1.clr.title === "取消选择 room" && a1.clr.w >= 32 && a1.clr.h >= 32, "标题行有 × (hover 提示「取消选择 room」, 触控区 ≥32px): " + JSON.stringify(a1.clr));
   assert.equal(a1.me, "alice", "成员列里当前视角那行带 .me");
   assert.equal(q().get("role"), TA); assert.equal(q().get("room"), G);
+  // a'. 点 ×: 只清 room、保留 role —— 标题回「A 的全部聊天记录」, 标题行不再有 × / 视角标, 列表无高亮, URL room= 空 role 不变。再回到 ?role=A&room=G 接后面的用例。
+  await page.click("#ch-who #rv-clr");
+  await ttlIs("alice 的全部聊天记录");
+  const a2 = await page.evaluate(() => ({ clr: !!document.querySelector("#rv-clr"), pov: !!document.querySelector(".rv-pov-tag"), on: document.querySelectorAll(".rv-list .ci.on").length, card: ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim() }));
+  assert.deepEqual(a2, { clr: false, pov: false, on: 0, card: "alice" }, "只选 role: 无 ×, 名片仍是 alice, 无 room 高亮: " + JSON.stringify(a2));
+  assert.equal(q().get("room"), ""); assert.equal(q().get("role"), TA);
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
+  await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
 
   // b. 图: A 节点有视角标记 (.rv-pov); 选中 edge (m|G|p:A) 带 sel, 点它 = 取消选中 (URL room= 空, 无 .on / sel), detail 换成 A 的全部记录; 再点 G 节点 = 重新选中。
   await goGraphView();
