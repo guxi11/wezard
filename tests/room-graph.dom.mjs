@@ -736,16 +736,31 @@ try {
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
     return read;
   };
-  // 1) 单聊 (一个人 + 一个 wizard 的 wecom-dm) = 💬; 多人群 = 👥; 只有 wizard 的 ≥3 人 adhoc = 🧙‍♂️。
-  const SOLO = "user:U1", ADHOC = "adhoc:abc123";
-  const solo = roomFact(SOLO, "wecom-dm", [
-    { who: who("wizard", A), name: "alice", via: "founder", since: 7, ord: 1, host: true },
-    { who: who("human", "U1"), name: "张三", via: "inbound", since: 8, ord: 2, host: false },
-  ], who("wizard", A));
+  // 1) 单聊 (HM: 一个人 + 一个 wizard 的 wecom-dm, 上面已入 ROOMS) = 💬; 多人群 = 👥; 只有 wizard 的 ≥3 人 adhoc = 🧙‍♂️。
+  const ADHOC = "adhoc:abc123";
   const adhoc = roomFact(ADHOC, "adhoc", [A, B, C].map((id, i) => ({ who: who("wizard", id), name: "w" + i, via: "invite", since: 9 + i, ord: i + 1, host: i === 0 })), who("wizard", A));
-  const nodeC = { target: "uid:" + C, kind: "wizard", uid: C, name: "carol", label: "carol", base: "", tag: "", chat: "", busy: false, alive: true, lastTs: T0, rels: [] };
-  const icoG = await graphOf({ rooms: [solo, adhoc], nodes: [nodeC] });
-  assert.deepEqual(icoG.rooms.map((t) => t.split(" ")[0]).sort(), ["👥", "💬", "🧙‍♂️"].sort(), "三种图标各一间 (群 G / 单聊 / 三 wizard adhoc): " + JSON.stringify(icoG));
+  const icoG = await graphOf({ rooms: [adhoc], nodes: [] });
+  assert.deepEqual(icoG.rooms.map((t) => t.split(" ")[0]).sort(), ["👥", "💬", "🧙‍♂️"].sort(), "三种图标各一间 (群 G / 单聊 HM / 三 wizard adhoc): " + JSON.stringify(icoG));
+
+  // 3) LeoLane 形态: 一个 wizard 没加入任何多人群, 只靠一间两人 dm 连着; 那间 dm 的最后动静在窗口外、还挂着一条未决 duty。
+  //    窗口内 (默认 2d) 不出现; 选「全部」才出现。对照: 同一间 dm 窗口内有动静则出现; 窗口外但有未决 duty 的 ≥3 人 room 仍留着 (规则只豁免两人 dm)。
+  const LEO = "w" + "7".padStart(12, "0");
+  const leoNode = { target: "uid:" + LEO, kind: "wizard", uid: LEO, name: "leolane", label: "leolane", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: Date.now() - 3 * 86400000, rels: [] };
+  const leoDm = (at, duties) => ({ ...roomFact("dm:" + [A, LEO].sort().join("|"), "dm", [
+    { who: who("wizard", A), name: "alice", via: "founder", since: 30, ord: 1, host: true },
+    { who: who("wizard", LEO), name: "leolane", via: "invite", since: 31, ord: 2, host: false },
+  ], who("wizard", A), at), openDuties: duties });
+  const oldAt = Date.now() - 3 * 86400000;
+  const leoOld = await graphOf({ rooms: [leoDm(oldAt, 1)], nodes: [leoNode] });
+  assert.ok(!leoOld.people.includes("leolane"), "只靠一间窗口外、带未决 duty 的两人 dm 连着的 wizard 不展示: " + JSON.stringify(leoOld));
+  assert.ok(!leoOld.direct.some((id) => id.includes(LEO)), "那间 dm 不画直连线: " + JSON.stringify(leoOld));
+  const leoAll = await graphOf({ rooms: [leoDm(oldAt, 1)], nodes: [leoNode] }, 0);
+  assert.ok(leoAll.people.includes("leolane"), "选「全部」就出现了: " + JSON.stringify(leoAll));
+  const leoNew = await graphOf({ rooms: [leoDm(Date.now() - 60_000, 0)], nodes: [leoNode] });
+  assert.ok(leoNew.people.includes("leolane"), "dm 窗口内有动静 = 展示: " + JSON.stringify(leoNew));
+  const bigOld = roomFact("adhoc:old3", "adhoc", [A, B, LEO].map((id, i) => ({ who: who("wizard", id), name: "n" + i, via: "invite", since: 40 + i, ord: i + 1, host: i === 0 })), who("wizard", A), oldAt);
+  const leoBig = await graphOf({ rooms: [{ ...bigOld, openDuties: 1 }], nodes: [leoNode] });
+  assert.ok(leoBig.people.includes("leolane"), "窗口外但留着未决 duty 的多人 room 仍在, 成员随 room 一起展示: " + JSON.stringify(leoBig));
 
   // 2) 缓存冷 = 节点填充变白, 叠加在空闲 / 休眠上; 工作中不受影响。
   const WHITE = "rgb(255, 255, 255)";

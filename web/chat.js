@@ -27,7 +27,8 @@
   var S = { openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
   var SIDE_KEY = 'wezard.role.side';
   try { if (localStorage.getItem(SIDE_KEY) === 'graph') S.view = 'graph'; } catch (e) { /* 隐私模式 */ }
-  // 时间范围 (列表与图共用, 见 roomInScope): 只按 room 的最后动静切 —— 有未决 duty 的 room 与正在看的 room 照旧总在; 成员不单独过窗口, 跟着 room 走。
+  // 时间范围 (列表与图共用, 见 roomInScope): 只按 room 的最后动静切 —— 正在看的 room 照旧总在; 有未决 duty 的 room 也留着, 但「只有 wizard 的两人 dm」除外 (见 roomInScope)。
+  // 成员不单独过窗口: 成员跟着 room 走 —— 多人群的成员随群一起展示, 只靠一间过期的两人 dm 连着的 wizard 不展示。
   // 选中的那档与左栏视图开关一样记在 localStorage, 默认 2d。
   var WIN_KEY = 'wezard.role.winMin';
   var WINS = [[60, '1h'], [120, '2h'], [360, '6h'], [720, '12h'], [1440, '1d'], [2880, '2d'], [0, '全部']];
@@ -42,10 +43,12 @@
   };
   var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
   var inWin = function (ts) { return !WIN || (!!ts && ts >= winCut()); };
-  // 列表与图「画哪些 room」的唯一口径: 窗口内有动静 / 留着未决 duty / 正在看的那个 (滑出窗口也不能从眼前消失)。
+  // 列表与图「画哪些 room」的唯一口径: 窗口内有动静 / 正在看的那个 (滑出窗口也不能从眼前消失) / 留着未决 duty ——
+  // 最后一条不适用于两个 wizard 的 dm (isDirectRoom): 它在图上收成 wizard 之间的一条直连线, 一旦让 duty 把它留下, 那间 dm 的两端 wizard 就整个被拖进图里,
+  // 而它们本来既没加入任何展示中的多人群、dm 窗口内也没有消息 (admin: 没有消息就不该展示)。duty 本身没丢: 在那个 wizard 的页面 / pending_items 里都还在。
   // 成员不单独过窗口: 成员跟着 room 走 (见 participants), 否则 room 的成员边画不出来。
   var roomInScope = function (r) {
-    return !WIN || r.openDuties > 0 || inWin(r.last && r.last.at) || (!!D.roomId && D.roomId === r.id);
+    return !WIN || inWin(r.last && r.last.at) || (!!D.roomId && D.roomId === r.id) || (r.openDuties > 0 && !isDirectRoom(r));
   };
   var scopedRooms = function () {
     return (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); }).filter(roomInScope);
@@ -896,6 +899,7 @@
   // ── 左栏: 列表 / 图 ─────────────────────────────────────────────────
   // 有人参与 = 群聊: 绑定企微的群 / 单聊 / topic / 微信, 或账本里有人发过话 (人从不 join, 发过话才进成员);
   // 只有 wizard 的 dm / adhoc = 会话。与服务端 room-search 的 isPeopleRoom 同一口径。
+  var isDirectRoom = function (r) { return !isPeopleRoom(r) && (r.members || []).length === 2; };
   var isPeopleRoom = function (r) {
     return !!r.bound || (r.kind !== 'dm' && r.kind !== 'adhoc') ||
       (r.members || []).some(function (m) { return m.who && m.who.kind === 'human'; });
@@ -907,7 +911,7 @@
   // 时间范围下拉: 列表与图共用 (main 的 .sp 小下拉), 挂在标题行右端、视图开关左边。
   var winSelect = function () {
     return dropdown('win', {
-      ic: '⏱', end: true, title: '时间范围: 只列这段时间内有动静的 room (有待交代 duty 的、正在看的 room 照常显示); 成员跟着 room 走',
+      ic: '⏱', end: true, title: '时间范围: 只列这段时间内有动静的 room (正在看的 room、留着待交代 duty 的多人 room 照常显示); 成员跟着 room 走, 只靠一间过期两人 dm 连着的 wizard 不展示',
       label: winLabel(),
       items: WINS.map(function (w) { return { v: String(w[0]), on: w[0] === WIN, html: '<span class="id">' + w[1] + '</span>' }; }),
     });
