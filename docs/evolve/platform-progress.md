@@ -78,6 +78,25 @@
 | 2026-11-22 | 删 `shared/turn-state.ts` 与恒空的 `WorldFacts.inflight` / `routeReceiptDutiesOf` / `WizardBrief.turns` (-64 行); 顺带发现 delegate 的占用 veto 恒空 (登记 P1) | 见 git log |
 | 2026-11-22 | 测试基线 109→111 / 113: `codex-backend` (bin 覆盖已退役) 与 `wizard-stream` W-2 (all=1 已退役) 改断言现行行为 | 见 git log |
 
+## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
+
+**没有按时间触发的超时提醒, 也没有超时关账。** 所有动作都由事件触发 (轮次结束 / pane 消失 / 投递失败), 而且每条 duty 只做一次:
+- **处理人这一轮结束却没交代** (`room-hub.ts` `onStop` / `onIdle`): 只看「唤醒它的 duty、本轮它还没 chat_reply 过」。支持 Stop hook 的后端 (`hooks/stop.sh` → `/room/stop-check`) 同一轮拦一次让它接着交代; 不支持的在轮终往 pane 贴一条 `REMIND_TEXT`。还不交代 → 给提问者写一条 `sys:"undelivered"` 系统行 (唤醒提问者; 绑定 room 里会进企微)。每条 duty 提醒一次、系统行一条, 之后不再有动作。「已提醒」记号只在内存里, reload 后清空; 但 reload 后 `turns` 也是空的, 所以不会补提醒。
+- **只要回过 progress / need**, 这一轮就算交代过了 (`dutyAnswered`): 不提醒、不告状, duty 继续开着, 之后没有任何提醒。
+- **处理人在忙**: 看门狗 (`room-watchdog.ts`, `rooms.watchdog.staleMin` 默认 5 分钟、`intervalSec` 默认 60 秒) 只把它计入日志汇总 `busyList`, 不打扰。
+- **pane 活着但闲** (漏了 turn_end): 看门狗补一次 `onIdle`, 走上面那条路 (已提醒过的不重复)。
+- **pane 没了**: 看门狗两次扫描确认后对它所在的每个 room 走 `leaveOps` —— 它名下的 duty 写 `canceled` (唤醒提问者), 再写一行 `instance-ended`。**这是唯一一种自动关账。**
+- **被 stop_wizard 结束 (没有会话绑定)**: 投递时 `gone` → 给提问者写 `undelivered` 系统行 (0077aef), duty 不关。
+- **冷 wizard (没有 pane 绑定)**: 看门狗只计数; 有新行要投时 hub 粘贴会重生它。
+- plan 提醒 (`plan-reminders.ts`, 30 秒一轮) 反而在 owner 还欠着该 plan 的 duty 时**不提醒** —— 它管的是 plan 没人推, 不是 duty 超时。
+
+**无限期挂着的后果**: rolepage 成员栏一直显示「待交代 N」; delegate 的占用 veto (813530e) 一直挡着它, 不会被自动派新活 (`to` 点名仍可); 它若是 lead, 👑 不摘 (2692790); 提问者要是在等, 只会等下去, 除非它自己 `pending_items` 去看。
+
+**建议 (只是方案, 未做)**: 在看门狗扫描里加一条「逾期」检查, 不改账本格式 (`sys` 本来就是字符串, 只多一个取值):
+- 未关、kind 为 ask / task 的 duty, 账本里最后一条碰它的行 (原 ask、reply、trigger) 距今超过 `rooms.dutyOverdueHours` (默认 24, 0 = 关): 给**提问者**写一条 `sys:"overdue"` 系统行 (唤醒它; 绑定 room 里会进企微, 人就看得见), 让提问者决定催、改派还是 canceled。账本里已有这一行、且之后没有新活动就不重复。
+- 不自动 canceled —— 完成只认显式关账; 处理人还在, 自动关账会丢活。
+- 升级只做一级: 提问者是 wizard 就由它处理; 提问者是人, 或这行在绑定 room 里, 镜像本身就是「让人知道」。要不要第二级 (2×阈值仍没动静再通知 host), 等跑一阵看量再定。
+
 ## 已知坑
 
 - **测试基线失败**: 见上「测试基线」。`tests/charter.test.ts` 断言 charter 含「不 `wait_peer` 守着」—— 改 charter 时要一起改。
