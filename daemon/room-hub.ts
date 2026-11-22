@@ -223,8 +223,15 @@ export const createRoomHub = (p: HubPorts) => {
       const label = p.roomLabel(room);
       const head = "【" + label + "】(" + room + ")" + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
       const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500));
-      const owe = openDuties(s).filter((d) => sameWho(holderOf(s, d), who) && triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));
-      const oweLine = owe.length ? "你要交代: " + owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")").join("; ") + usage : "";
+      const held = openDuties(s).filter((d) => sameWho(holderOf(s, d), who));
+      const owe = held.filter((d) => triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));
+      // 它反问过人、人另发一条新话 (不带引用) 作答: 原 duty 没被本批触发行碰到, 但答复很可能就在上面 —— 附在后面提醒一并关掉 (只是提示, 不改 seen / turns)。
+      const answered = held.filter((d) => !owe.includes(d) && d.last?.status === "need" && d.asker.kind === "human" && triggers.some((t) => sameWho(t.author, d.asker)));
+      const oweLine = owe.length || answered.length
+        ? "你要交代: " + [
+          ...owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")"),
+          ...answered.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + " · 你反问过, 对方的答复可能就在上面)"),
+        ].join("; ") + usage : "";
       parts.push([head, ...lines, ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
       msgs.push(...triggers.map((t) => t.id));
