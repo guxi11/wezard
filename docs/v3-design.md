@@ -20,7 +20,7 @@
 
 **行首寻址**: `NAME_TOKEN` / `nameTokenRe` (session-label.ts:47) —— 入站消息清洗后**落在开头**的那一个 `.x` 是路由目标 (inbound.ts parseTag), 认不认识都算; 正文里的 `.fix` 只是提及 (`MENTION_RE` + `linkTags` 挂 rolepage 链接)。
 
-**envelope 属性** (`shared/reminder.ts`): 与文本表示**完全无关**。轮次归属 / 回执 / 去向 / 提交见证全部读 `REMINDER_KINDS.envelope` 登记过的属性 (kind/from/scope/chat/chat-key/msg/event/receipt/status/audience), `parseEnvelope` 取最后一个信封。
+**envelope 属性** (`shared/reminder.ts`): 与文本表示**完全无关**。轮次归属 / 回执 / 去向 / 提交见证全部读 `REMINDER_KINDS.envelope` 登记过的属性 (kind/from/scope/chat-key/msg/event/receipt/status; 老转录里的 chat 只读), `parseEnvelope` 取最后一个信封。
 
 **其余显示面**: read_chat 纯文本 `.a: .b` (SPEAKER_KIT 的 said/speakerHead); rolepage 头像 emoji + 名字 (`nameHead`); charter / roster 用 `addr()` 渲染 `.name` (`daemon/wizard.ts`)。
 
@@ -195,7 +195,7 @@ P1 曾把 🧙‍♂️ 记号铺到全部显示面; 人随后拍板修正: wiza
 
 - **身份**: `kind:"apprentice"`, 每 bot 实例全局唯一 (boot 保证存在, 名字人定, 缺省「学徒」); workspace 人指定 (缺省 `~`); home = 与 owner 的单聊 (`user:<owner>`), 不属于任何群/组团, 但可被人授权进群发言。
 - **连续且唯一的会话**: 唯一 manifestation —— `/new` 对学徒禁用 (CLI 侧拦不住就 daemon 拦: 学徒的 /new 改为「整理记忆 + 原会话继续」); pane 死亡 → respawn 同身份 (memory 保留, transcript --resume 接续, dispatch 的既有复活路径); `drop`/`forgetWizard`/`evictStaleName`/`stop_wizard(end)` 对 `kind:"apprentice"` 一律拒绝 (interrupt 照常)。
-- **一个连续会话挂多个群 (不是每群一个化身)**: 任何群点名学徒都经 P2 锚点回落落它的唯一会话, 不自动新建化身; 每条注入的信封带 `chat=` 属性 (renderHumanEnvelope) 标明来自哪个群, 回复按发话群回去 (dispatch.channel) —— 输入源永远分得清哪个群。这层是「群聊严格治理」(成员制按 (群, 身份) 落账) 的前置。
+- **一个连续会话挂多个群 (不是每群一个化身)**: 任何群点名学徒都经 P2 锚点回落落它的唯一会话, 不自动新建化身; 每条注入的 room 头 `【群名】(roomId)` 标明来自哪个群 (非 home 群的人话信封另带 `chat-key`), 回复按发话群回去 (dispatch.channel) —— 输入源永远分得清哪个群。这层是「群聊严格治理」(成员制按 (群, 身份) 落账) 的前置。
 - **出站接缝 (为「群聊严格治理」预留)**: 「这一句话怎么进群」收在 `daemon/outbound.ts` 的 `deliverToChat(client, chatKey, content)` 一个函数里 —— 现在 wezard send / MCP 推送 / 定时任务预告都走它; 将来切显式工具出站 (chat_say / chat_reply / chat_pass) 只改这一处。
 - **自主巡检最小化**: config `wrc.apprentice.patrol` 是权威 (boot 装配, 幂等) —— 触发 = 固定 id 的 quiet 定时任务 (默认关, 开启时间隔下限 30 分钟); 上限 = 每轮 maxItems 条 (写进指令); 产物默认只进学徒自己的会话与 rolepage, 要发群必须显式动作 (notify / send_file); 没事就 QUIET 一行收尾, 不许无界自转。
 - **与 handoff / context cut 的相处**: handoff 保留为学徒的**上下文管理工具** (简报压缩), 但: ① 学徒的 charter 写死「交接前先 wizard_remember」; ② 学徒的提醒线提前 (`handoffAt` 打五折), 鼓励小步交接而非撑满; ③ context cut 时 armCharter 重注入 (已有机制) + 附「你是学徒, 连续身份」句。

@@ -7,8 +7,8 @@
 //   ensurePatrolTask              自主巡检: boot 时按 config 装配一条 quiet 定时任务 (有界); 宪章学徒章在 wizard.ts (renderApprenticeRules)
 //
 // 连续会话 × 多群的输入路由不在这一层: 点名 (resolveName) 走 P2 的锚点回落 —— 学徒
-// 的唯一记录 (target === identity) 就是锚点, 任何群点名都落它; 每条注入的信封自带
-// chat= 属性 (renderHumanEnvelope), 回复按发话群回去 (dispatch.channel)。
+// 的唯一记录 (target === identity) 就是锚点, 任何群点名都落它; 每条注入的 room 头
+// 自带 (roomId), 非 home 群的人话信封另带 chat-key, 回复按发话群回去 (dispatch.channel)。
 import type { Config } from "../shared/config.js";
 import { keyOf } from "../shared/session-label.js";
 import { handoffAt, type WizardKind, type WizardStore } from "./wizard.js";

@@ -141,8 +141,9 @@ assert.equal(dispatched2.length, 2);
 assert.equal(dispatched2[0]!.principal, anchor2, "A 群点名落学徒唯一会话");
 assert.equal(dispatched2[1]!.principal, anchor2, "B 群点名也落同一个会话 (不是每群一个化身)");
 assert.equal(spawned2.length, 1, "没有为 B 群新开化身");
-assert.ok(dispatched2[0]!.text.includes(String.raw`chat="chat:chat:A"`), "A 群注入的信封带 chat=chat:A");
-assert.ok(dispatched2[1]!.text.includes(String.raw`chat="chat:chat:B"`), "B 群注入的信封带 chat=chat:B");
+assert.ok(dispatched2[0]!.text.includes(String.raw`chat-key="chat:chat:A"`), "A 群 (非学徒 home) 注入的信封带 chat-key");
+assert.ok(dispatched2[1]!.text.includes(String.raw`chat-key="chat:chat:B"`), "B 群注入的信封带 chat-key");
+assert.ok(!/ chat="/.test(dispatched2[0]!.text), "信封不再写 chat 显示名");
 assert.equal(dispatched2[0]!.channel, "chat:chat:A", "回复回发话群 A");
 assert.equal(dispatched2[1]!.channel, "chat:chat:B", "回复回发话群 B");
 assert.equal(store2.get("chat:A#学徒"), undefined, "A 群没有学徒化身记录");
@@ -162,7 +163,7 @@ const charter = renderCharter({
   chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4, lead: false, tiers: [],
 });
 assert.ok(charter.includes("你是学徒 (连续身份)"), "宪章带学徒章");
-assert.ok(charter.includes("chat="), "宪章写明多群信封纪律");
+assert.ok(charter.includes("注入头 `【群名】(roomId)`"), "宪章写明多群出处看注入头");
 assert.ok(charter.includes("wizard_remember"), "交接前先记忆");
 const charterPlain = renderCharter({
   self: { name: "x", address: "x", description: "", cwd: "~" },

@@ -25,7 +25,7 @@ import { CLASS_NAME_MAX, inClassSpace, instanceName, parseInstanceName, validCla
 const renderApprenticeRules = (): string[] => [
   "## 你是学徒 (连续身份)",
   "- 每 bot 实例唯一, 代表人: 不可被退役 / 顶名; `/new` 对你无效, pane 死了会带着记忆同身份重生 —— 你的价值在连续, 不在新鲜。",
-  "- 一个连续会话服务多个群: 每条注入的信封都带 `chat=` 属性标明来自哪个群, 回复自动回那个群; 分不清出处时先看信封, 别猜。",
+  "- 一个连续会话服务多个群: 每条注入头 `【群名】(roomId)` 标明来自哪个 room / 群, 回复自动回那个群; 分不清出处时先看注入头, 别猜。",
   "- `handoff` 只作上下文工具 (压简报), 会话与身份不变; **交接前先把值得跨会话留下的用 `wizard_remember` 记下**。",
   "- 你的审批卡永远到人: 会话级豁免 (⏱ 窗口 / skipAll) 对你禁用 —— 你代表人动手, 人必须看得见。",
   "- 巡检 / 自主整理的产物默认只进你自己的会话与 rolepage; 要发群必须显式动作 (`notify` / `send_file`), 巡检指令里给了每轮上限, 超过就分轮。",

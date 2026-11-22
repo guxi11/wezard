@@ -576,8 +576,8 @@ const answerOf = (
 export { parseEnvelope, type Envelope };
 
 /** 身份来自入站 userid, 包括本聊天私信; home 不能代替真实发话人。 */
-export const renderHumanEnvelope = (user: string, chat: string, chatKey?: string): string =>
-  renderReminder(envelopeAttrs.human(user, chat, chatKey), []);
+export const renderHumanEnvelope = (user: string, chatKey?: string): string =>
+  renderReminder(envelopeAttrs.human(user, chatKey), []);
 
 /** 人对管家说的那一轮挂一行「自己答还是派出去」: 宪章里的检查项离这句话太远, sonnet 档的管家一接到活
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */

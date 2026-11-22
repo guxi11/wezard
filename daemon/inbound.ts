@@ -1253,10 +1253,10 @@ export const installInboundRouter = (
     const slash = text.trimStart().startsWith("/");
     const hint = slash ? [] : [peerMentionPart(peerMentions(who, text), ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(who)))];
     // 谁、在哪个群说的 —— transcript 里只有这一段记着它 (room_read 从那里读回来)。
-    // 私信也带真实 userid 与稳定 chat key, 不能从 wizard home/defaultChat 猜。
+    // 私信也带真实 userid, 不能从 wizard home/defaultChat 猜; 稳定 chat key 只在不是 home 群时才写
+    // (mirror openingOf 缺省就是 home, 在 home 群说话写出来是纯重复; 群本身由 room 唤醒头带)。
     const channel = chatPrincipal(msg);
-    const chat = chatNameOf(cfg, channel);
-    const envelope = slash ? "" : renderHumanEnvelope(msg.from.userid, chat || channel, channel);
+    const envelope = slash ? "" : renderHumanEnvelope(msg.from.userid, channel === baseOfKey(who) ? undefined : channel);
     const steward = slash || !stewardTierOf(cfg, who) ? "" : renderStewardHint();
     // 同一条边界上再挂: 点名提示, 以及这个 wizard 不在场时群里发生的成员变动 (见 notices.ts,
     // 近几次注入里给过的不再重复)。

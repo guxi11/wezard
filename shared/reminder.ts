@@ -34,8 +34,9 @@ type Use = "M" | "C";
  *  = 在这里加一行并说清谁读它。读者在行尾。 */
 export const REMINDER_KINDS = {
   envelope: {
-    kind: "M", from: "M", scope: "M", chat: "M",      // 出处: parseEnvelope → room_read / rolepage / mirror
-    "chat-key": "M",                                  // 人话: 改名不变的群 key (mirror 恢复频道)
+    kind: "M", from: "M", scope: "M",                 // 出处: parseEnvelope → rolepage / mirror
+    "chat-key": "M",                                  // 人话: 改名不变的群 key —— 仅当它不是接话 wizard 的 home 群才写 (mirror openingOf 缺省即 home); room 唤醒头 `(roomId)` 已带群
+    chat: "M",                                        // 只读: 老转录里的群显示名 (无任何读者, 已无写入方)
     "asker-user": "M", "asker-chat": "M",              // 只读: 老转录里 peer 信封带的链头人话 (openingOf); 已无写入方
     msg: "M",                                         // 注入事件 id: 提交见证 / 轮次↔事件绑定 / serves 反查
     event: "M",                                       // 定时任务信封的群根行 id (老回执也带, 只读)
@@ -147,9 +148,7 @@ export interface Envelope {
   from: string;
   /** wizard 之间的私聊。 */
   private: boolean;
-  /** 公开轮所在群的名字; "" = 这个会话的 home 聊天。 */
-  chat: string;
-  /** Stable inbound principal; chat is a display name and may be renamed. */
+  /** Stable inbound principal (改名不变); 缺省 = 这个会话的 home 聊天。 */
   chatKey?: string;
   /** Original human request, preserved across private dispatch and receipts. */
   asker?: Asker;
@@ -168,7 +167,8 @@ export type ReceiptStatus = "done" | "need" | "error" | "progress" | "timeout" |
 
 type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {
-  human: (user: string, chat: string, chatKey?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
+  /** `chatKey` 只在人说话的群不是接话 wizard 的 home 群时才给 (home 是读侧缺省, 写了是纯重复)。 */
+  human: (user: string, chatKey?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "human", from: user, ...(chatKey ? { "chat-key": chatKey } : {}) }),
   /** `channel` = 实际注入频道 key: 空串表示私聊, 非空公开信封按稳定 key 归属; `event` = 定时任务对应的群根行。 */
   task: (taskId: string, channel: string, event?: string): EnvelopeAttrs => ({
     wezard: "envelope", kind: "task", from: taskId,
@@ -184,7 +184,6 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         kind: a.kind as Envelope["kind"],
         from: a.kind === "task" ? `定时 ${a.from ?? ""}` : a.from ?? "",
         private: a.scope === "private",
-        chat: a.chat ?? "",
         ...(a["chat-key"] ? { chatKey: a["chat-key"] } : {}),
         ...(a["asker-user"] && a["asker-chat"] ? { asker: { who: a["asker-user"], chat: a["asker-chat"] } } : {}),
         ...(a.receipt === "1" ? { receipt: true } : {}),
