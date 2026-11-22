@@ -603,14 +603,19 @@
     var a = (rr + 5).toFixed(1), b = (rr + 10).toFixed(1);
     return '<g class="rv-pov"><title>当前视角</title><path d="M-' + a + ' -5L-' + b + ' 0L-' + a + ' 5M' + a + ' -5L' + b + ' 0L' + a + ' 5"/></g>';
   };
-  // lead: 金色皇冠 (不再用 ★, 免得和 host 的 ⭐ 混) 戴在节点圆的头顶: 圆上沿 + 选中环 (r+3.5) 之外、水平居中, 固定像素 (不随圆大小); 画在 .rv-body 外面, 不跟呼吸动画缩放。
+  // 帽子底边 y: 戴在「节点圆本身」(不是选中环) 头上 —— 底边两角落在圆弧上 (x = 偏移 + 半宽, 夹在 0.8r 内防小圆开方为负), 中段略陷进圆里, 所以按每个节点自己的半径算、无缝隙。
+  var gearY = function (rr, dx, hw) {
+    var x = Math.min(Math.abs(dx || 0) + hw, rr * 0.8);
+    return -Math.sqrt(rr * rr - x * x);
+  };
+  // lead: 金色皇冠 (不再用 ★, 免得和 host 的 ⭐ 混) 戴在节点圆的头顶: 底边贴圆上沿 (见 gearY)、选中环从帽下穿过、水平居中, 固定像素 (不随圆大小); 画在 .rv-body 外面, 不跟呼吸动画缩放。
   var leadCrown = function (rr, dx) {
-    var k = 1.15, y = -(rr + 4.5 + 3.6 * k);
-    return '<path class="rv-lead" transform="translate(' + (dx || 0) + ' ' + y.toFixed(1) + ') scale(' + k + ')" d=""M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/>';
+    var k = 1.15, y = gearY(rr, dx, 4.6 * k) - 3.6 * k;
+    return '<path class="rv-lead" transform="translate(' + (dx || 0) + ' ' + y.toFixed(1) + ') scale(' + k + ')" d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/>';
   };
   // host: 紫色礼帽 (替掉原来 room→host 边上的金色箭头), 与金色皇冠同一行头顶、同样固定像素; 既是 host 又是 lead 时两顶并排 (礼帽左、皇冠右), 各偏 ±6.5 不互相遮。
   var hostHat = function (rr, dx) {
-    var k = 1.1, y = -(rr + 4.5 + 3.6 * k);
+    var k = 1.1, y = gearY(rr, dx, 5.2 * k) - 3.6 * k;
     return '<g class="rv-hosthat" transform="translate(' + (dx || 0) + ' ' + y.toFixed(1) + ') scale(' + k + ')"><path class="hh" d="M-3.3 2L-3.3 -3.9L3.3 -3.9L3.3 2Z"/><path class="hb" d="M-3.3 .4L3.3 .4L3.3 2L-3.3 2Z"/><path class="hh" d="M-5.2 3.6L-5.2 2L5.2 2L5.2 3.6Z"/></g>';
   };
   var headGear = function (rr, host, lead) {
