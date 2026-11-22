@@ -53,7 +53,7 @@
 - [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
-- [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `20764ff`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。
+- [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `20764ff`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。 **线上复核 (06:20)**: 修后 2h BobZane 0 次 respawn; reap 照常工作 (修后已收 4 个, 当前 tmux 4 pane), 未被 `wake owed` 整体挡住。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
 
 ## 待 admin 拍板
