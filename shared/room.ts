@@ -155,6 +155,8 @@ export interface Duty {
   after?: string[];
   planId?: string;
   for?: string;
+  /** 最近一次 room_transfer (move 行) 的时刻 —— 逾期计时把它当一次活动。 */
+  movedAt?: number;
   /** 最近一条 holder 写的非终态 status (need / progress / error)。 */
   last?: { status: ReplyStatus; seq: number };
   closed?: { by: string; status: ReplyStatus; at: number };
@@ -228,7 +230,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
       if (!from || from.closed) break;
       s.duties.delete(from.key);
       const key = dutyKey(op.duty, slotOfWho(op.to));
-      s.duties.set(key, { ...from, key, slot: slotOfWho(op.to) });
+      s.duties.set(key, { ...from, key, slot: slotOfWho(op.to), movedAt: op.at });
       break;
     }
     case "msg": {

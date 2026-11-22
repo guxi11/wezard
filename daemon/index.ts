@@ -1926,7 +1926,7 @@ const main = async (): Promise<void> => {
     const overdue = createOverdueScan({
       log: roomLog, now: () => Date.now(),
       thresholds: () => ({ remindMin: cfg.rooms?.overdue?.remindMin ?? 60, groupMin: cfg.rooms?.overdue?.groupMin ?? 120 }),
-      rooms: roomStore.ids, stateOf: roomState, append: (room, d) => hub.append(room, d),
+      rooms: roomStore.ids, stateOf: roomState, append: (room, d, extra) => hub.append(room, d, extra),
       wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
     });
     const overdueTimer = setInterval(() => { try { overdue.scan(); } catch (e) { roomLog.warn({ err: (e as Error).message }, "overdue: 扫描失败"); } }, (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
