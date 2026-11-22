@@ -6,7 +6,7 @@
 // 不自动 canceled —— 完成只认显式关账。
 import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
-import { DAEMON, holderOf, isBoundRoom, type Draft, type JudgeCtx, type RoomState, type Verdict, type Who } from "../shared/room.js";
+import { DAEMON, isBoundRoom, type Draft, type JudgeCtx, type RoomState, type Verdict, type Who } from "../shared/room.js";
 import { buildDescendantActivity, groupSysOf, overdueDue, type OverdueHit, SYS_OVERDUE_GROUP, SYS_OVERDUE_REMIND } from "../shared/room-overdue.js";
 
 export interface OverdueDeps {
