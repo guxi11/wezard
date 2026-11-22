@@ -1083,7 +1083,7 @@
   // 名下有「待交代」(= 本 room 账本里 chat_ask / 派活 / 人话开出、他还没 chat_reply done|passed|canceled 的 duty) 的挂一枚可展开的红标。
   // 窄屏 (≤760px) 没有第三列的位置: detail 头右侧一个「成员 N」入口, 把同一份 HTML 当底部抽屉铺出来。
   var GS_ST = { working: '忙', blocked: '等审批', idle: '闲', asleep: '休眠' };
-  var DUTY_KIND = { ask: '问', task: '派', human: '人话', 'join-req': '入群申请' };
+  var DUTY_KIND = { ask: '问', task: '派', human: '人话', need: '反问', 'join-req': '入群申请' };
   S.gsOpen = S.gsOpen || {}; S.gsNotice = S.gsNotice || {}; S.gsSheet = false;
   var memberKey = function (m) { return m.kind + ':' + m.id; };
   // 状态与图同口径 (stateOfNode); 名册还没到的占位节点没有 alive, 退回成员视图自带的 alive / busy。
