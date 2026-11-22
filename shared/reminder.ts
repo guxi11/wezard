@@ -128,6 +128,11 @@ export const withMsg = (text: string, msg: string): string => {
   return text.slice(0, hit.index) + openTag({ ...attrsOf(hit[1]), msg }) + text.slice(hit.index + old.length);
 };
 
+/** 一次注入实际挂的信封: 斜杠命令不挂; 已有信封原样保留 (别覆盖 room 信封里模型要拿去 re 的 msg);
+ *  无信封但带 eventId 的 (handoff 简报 / 续答) 补一块 message-event, 否则提交确认永远认不出自己的输入。 */
+export const envelopeFor = (text: string, envelope: string | undefined, eventId: string | undefined): string =>
+  text.trimStart().startsWith("/") ? "" : envelope || (eventId ? withMsg("", eventId) : "");
+
 /** 这句话是不是带着注入事件 `id` 进来的 (提交见证用): 任一信封的 `msg`, 或无信封注入块。 */
 export const carriesMsg = (text: string, id: string): boolean =>
   !!id && parseReminders(text).some((r) =>

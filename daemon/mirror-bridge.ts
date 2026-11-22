@@ -1,5 +1,5 @@
 import type { ClearAttempt } from "./handoff.js";
-import { parseEnvelope, renderTail } from "../shared/reminder.js";
+import { envelopeFor, parseEnvelope, renderTail } from "../shared/reminder.js";
 import { charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand, inspectCodexHooks, trustCodexHookSet, type CodexHook } from "../shared/codex-hooks.js";
@@ -7879,7 +7879,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Busy/queued retries must not consume notices or stamp a future turn.
       // Render only after the pane lane grants delivery, then stamp exactly at
       // the first permitted input.
-      const envelope = text.trimStart().startsWith("/") ? "" : opts?.envelope ?? "";
+      const envelope = envelopeFor(text, opts?.envelope, opts?.eventId);
       // 首条注入带上宪章 preamble (newSession/重生/清空后挂上的那份)。印章与回显
       // 去重都记纯正文 —— cleanUserText 两侧都会剥掉 preamble, 认出的仍是同一句。
       const pre = charterPrefixOf(a, text);
