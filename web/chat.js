@@ -760,6 +760,11 @@
       var h = nodeHtml(n);
       if (e._h !== h) { e._h = h; e.innerHTML = h; }
     });
+    // 选中的节点 (含它两侧的 < >) 提到最上层: 邻近节点名字的白色描边 (paint-order: stroke) 否则会盖住 chevron 的一截。
+    // 只在有选中节点后面还跟着别的节点时才挪 (新节点按创建顺序排在后面), 平时不动 DOM。
+    var nodesLayer = layer('rv-gnodes'), picked = g.nodes.filter(nodeOn).map(function (n) { return dom.nodes[n.id]; }).filter(Boolean);
+    var buried = picked.some(function (e) { var nx = e.nextElementSibling; return !!nx && picked.indexOf(nx) < 0; });
+    if (buried) picked.forEach(function (e) { nodesLayer.appendChild(e); });
   };
   var bindGraph = function (svg) {
     if (!svg) return;
