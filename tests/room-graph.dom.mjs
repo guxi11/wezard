@@ -64,7 +64,7 @@ const memberViews = ROOMS[0].members.map((m) => ({ id: m.who.id, kind: m.who.kin
 const DUTIES = [{ key: "aa000001.3@wizard:" + B, msg: "aa000001.3", seq: 3, kind: "ask", at: T0 + 3000, asker: who("wizard", A), askerName: "alice", holder: who("wizard", B), holderName: "bob", slot: "wizard:" + B, summary: "查一下配置", last: { status: "progress", seq: 4 } }];
 const WORLD = {
   ok: true, at: Date.now(), base: G, self: "chat:wrG#guide",
-  rooms: ROOMS,
+  rooms: ROOMS,   // 用例想加 room / 节点: 给 globalThis.__extraRooms / __extraNodes (见 /api/world), 不动这份基线
   uidTargets: { [A]: "chat:wrG#guide", [B]: "chat:wrG#worker" },
   nodes: [
     { target: "chat:wrG#guide", kind: "wizard", uid: A, name: "alice", label: "alice", base: G, tag: "guide", chat: "群G", busy: false, alive: true, lastTs: T0 + 4000, rels: [] },
@@ -120,7 +120,7 @@ const server = createServer((req, res) => {
   if (u.pathname === "/api/world") {
     // 名册缺席 (svr 刚重启): 回包 degraded, 名字全是 id。
     if (globalThis.__degrade) return send("application/json", JSON.stringify({ ...WORLD, degraded: true, names: {}, chatNames: {}, nodes: WORLD.nodes.map((n) => ({ ...n, name: n.target })) }));
-    return send("application/json", JSON.stringify(WORLD));
+    return send("application/json", JSON.stringify({ ...WORLD, rooms: [...WORLD.rooms, ...(globalThis.__extraRooms || [])], nodes: [...WORLD.nodes, ...(globalThis.__extraNodes || [])] }));
   }
   if (u.pathname === "/api/room") {
     // 滚动测试: 一百多条消息, 每次回包最后一条的正文都变 (模拟进行中的一轮 / 新消息), 逼 detail 每 4s 真重渲染一次。
@@ -228,15 +228,15 @@ try {
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
   // 默认 2d: 3 天前的老 room 不在范围里 (ROOMS 有 3 间, 画 2 间)。
   // 两人 room (DM) 不画节点: alice—bob 之间直接一条可点的线, 点它 = 打开那个 room。
-  // room 图标只有两种: 有人参与的群聊 💬 / 只有 wizard 的 room 🧙‍♂️ (图节点 + 图例); 类型文字只在 tooltip。
+  // room 图标三种: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 只有 wizard 的 room 🧙‍♂️ (图节点 + 图例); 类型文字只在 tooltip。
   const icons = await page.evaluate(() => ({
     nodes: [...document.querySelectorAll(".rv-room text")].map((t) => t.textContent.trim().split(" ")[0]),
     tip: ((document.querySelector(".rv-room title") || {}).textContent || ""),
     legend: [...document.querySelectorAll(".rv-legend .lgemo")].map((e) => e.textContent),
   }));
-  assert.deepEqual(icons.nodes, ["💬"], "群 G (有人) 的节点图标 = 💬: " + JSON.stringify(icons));
+  assert.deepEqual(icons.nodes, ["👥"], "群 G (多人群聊) 的节点图标 = 👥: " + JSON.stringify(icons));
   assert.match(icons.tip, /群聊 · 企微群/, "类型文字留在 tooltip: " + icons.tip);
-  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["💬", "🧙‍♂️"], "图例只剩两种 room 图标: " + JSON.stringify(icons.legend));
+  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "🧙‍♂️"], "图例三种 room 图标: " + JSON.stringify(icons.legend));
   assert.equal(counts.rooms, 1, "room 节点数 = 2d 内有动静的 ≥3 人 room 数 (两人 room 改成连线)");
   assert.deepEqual(counts.directLinks, [DM], "两人 room 画成成员之间的线");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
@@ -711,6 +711,34 @@ try {
   await page.waitForFunction(() => !document.querySelector("#gside").classList.contains("sheet") && document.querySelector('.rv-msg[data-id="aa000001.3"].hit'), null, { timeout: 5000 });
   await page.click("#gs-open"); await page.click("#gs-x");
   assert.equal(await gsVis(), false, "✕ 收回抽屉");
+
+  // ── 图的单页用例: 全新页面 (没有 localStorage), 加几间 fixture 之外的 room, 直接看图 ─────────────
+  const graphOf = async (extra, win) => {
+    globalThis.__extraRooms = extra.rooms || []; globalThis.__extraNodes = extra.nodes || [];
+    const pg = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+    await pg.addInitScript((w) => { localStorage.setItem("wezard.role.side", "graph"); if (w !== undefined) localStorage.setItem("wezard.role.winMin", String(w)); }, win);
+    await pg.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+    await pg.waitForSelector(".rv-person", { timeout: 5000 });
+    await pg.waitForTimeout(300);
+    const read = await pg.evaluate(() => ({
+      rooms: [...document.querySelectorAll(".rv-room")].map((n) => n.querySelector("text").textContent.trim()),
+      people: [...document.querySelectorAll(".rv-person .rv-nm")].map((t) => t.textContent.trim()).sort(),
+      direct: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
+    }));
+    await pg.close();
+    globalThis.__extraRooms = []; globalThis.__extraNodes = [];
+    return read;
+  };
+  // 1) 单聊 (一个人 + 一个 wizard 的 wecom-dm) = 💬; 多人群 = 👥; 只有 wizard 的 ≥3 人 adhoc = 🧙‍♂️。
+  const SOLO = "user:U1", ADHOC = "adhoc:abc123";
+  const solo = roomFact(SOLO, "wecom-dm", [
+    { who: who("wizard", A), name: "alice", via: "founder", since: 7, ord: 1, host: true },
+    { who: who("human", "U1"), name: "张三", via: "inbound", since: 8, ord: 2, host: false },
+  ], who("wizard", A));
+  const adhoc = roomFact(ADHOC, "adhoc", [A, B, C].map((id, i) => ({ who: who("wizard", id), name: "w" + i, via: "invite", since: 9 + i, ord: i + 1, host: i === 0 })), who("wizard", A));
+  const nodeC = { target: "uid:" + C, kind: "wizard", uid: C, name: "carol", label: "carol", base: "", tag: "", chat: "", busy: false, alive: true, lastTs: T0, rels: [] };
+  const icoG = await graphOf({ rooms: [solo, adhoc], nodes: [nodeC] });
+  assert.deepEqual(icoG.rooms.map((t) => t.split(" ")[0]).sort(), ["👥", "💬", "🧙‍♂️"].sort(), "三种图标各一间 (群 G / 单聊 / 三 wizard adhoc): " + JSON.stringify(icoG));
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");

@@ -203,9 +203,18 @@
   var roomLabelOf = function (r) {
     return r ? roomNameOf(r, r.label) : '';
   };
-  // room 图标只分两种: 有人参与的群聊 💬 / 只有 wizard 的 room 🧙‍♂️ (与 wizard 默认头像同一个 emoji)。判据 = isPeopleRoom, 与列表的「群聊 / 会话」分组、搜索的 group 同一口径;
-  // 绑定企微 / topic / 微信的 room 不管有没有人发过话都算「有人参与」(群里本来就有人)。按 kind 细分的图标一律不要, 类型只留在 tooltip 的文字里 (KIND_WORD)。
-  var roomIcon = function (people) { return people ? '💬' : '🧙‍♂️'; };
+  // room 图标三种: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 只有 wizard 的 room 🧙‍♂️ (与 wizard 默认头像同一个 emoji)。
+  // 先分「有没有人参与」(isPeopleRoom, 与列表的「群聊 / 会话」分组、搜索的 group 同一口径: 绑定企微 / topic / 微信的 room 不管有没有人发过话都算有人);
+  // 有人的再分单聊 / 群聊: 单聊 = 恰好两位参与者、其中一位是人、且不是企微群 / topic 帖 (即绑定的 wecom-dm 那种: 一个人 + 一个 wizard) —— 这是唯一保留 💬 的特例;
+  // 其余有人的 (企微群 / topic / 多人 adhoc / 人 + 多个 wizard …) 一律 👥。按 kind 细分的图标一律不要, 类型只留在 tooltip 的文字里 (KIND_WORD)。
+  var isSoloChat = function (r) {
+    var ms = r.members || [];
+    return ms.length === 2 && ms.filter(function (m) { return m.who && m.who.kind === 'human'; }).length === 1 &&
+      r.kind !== 'wecom-group' && r.kind !== 'topic-post';
+  };
+  var roomIcon = function (r) { return !isPeopleRoom(r) ? '🧙‍♂️' : isSoloChat(r) ? '💬' : '👥'; };
+  // 搜索命中只带 id + group 布尔: 能在 W.rooms 里找到就走同一套三分, 找不到 (没拉到的老 room) 退回「群聊 / wizard」两分。
+  var roomIconOf = function (id, group) { var r = roomById(id); return r ? roomIcon(r) : group ? '👥' : '🧙‍♂️'; };
   var KIND_WORD = { 'wecom-group': '企微群', 'wecom-dm': '企微单聊', 'topic-post': 'topic 帖', wx: '微信', dm: 'wizard 两人会话', adhoc: '临时多人 room' };
   var roomKindWord = function (r) { return (isPeopleRoom(r) ? '群聊' : '会话') + ' · ' + (KIND_WORD[r.kind] || r.kind || ''); };
   var cssEsc = function (s) { return String(s).replace(/(["\\])/g, '\\$1'); };
@@ -639,7 +648,7 @@
       var un = unreadOf(r);
       var dot = un ? '<g class="rv-un"><circle cx="' + (n.w / 2 - 2).toFixed(1) + '" cy="-13" r="' + (un > 9 ? 8 : 7) + '"/><text x="' + (n.w / 2 - 2).toFixed(1) + '" y="-10" text-anchor="middle">' + (un > 99 ? '99+' : un) + '</text></g>' : '';
       return '<title>' + esc(roomLabelOf(r) + ' · ' + roomKindWord(r)) + '</title><rect x="' + (-n.w / 2).toFixed(1) + '" y="-13" width="' + n.w.toFixed(1) + '" height="26" rx="9"/>' +
-        '<text x="' + (-n.w / 2 + 8).toFixed(1) + '" y="5.5">' + esc(roomIcon(isPeopleRoom(r)) + ' ' + clipName(roomLabelOf(r), gNameMax())) + '</text>' + dot;
+        '<text x="' + (-n.w / 2 + 8).toFixed(1) + '" y="5.5">' + esc(roomIcon(r) + ' ' + clipName(roomLabelOf(r), gNameMax())) + '</text>' + dot;
     }
     var p = n.ref, human = p.kind === 'human', st = stateOfNode(p), rr = n.r;
     var shape = function (cls, grow) {
@@ -828,7 +837,7 @@
     '<span><i class="lg wz working"></i>工作中</span><span title="停在审批框 / 弹窗上等人点"><i class="lg wz blocked"></i>等审批</span>' +
     '<span><i class="lg wz idle"></i>空闲</span><span title="pane 在, 提示缓存已超 TTL"><i class="lg wz stale"></i>缓存冷</span>' +
     '<span title="pane 不在, 下一句话会重新拉起 (不同于缓存冷)"><i class="lg wz asleep"></i>休眠</span>' +
-    '<span><span class="lgemo">👤</span>用户</span><span title="room 图标: 有人参与的群聊 (企微群 / 单聊 / topic, 或有人发过话)"><span class="lgemo">💬</span>群聊</span><span title="room 图标: 只有 wizard 的 room (dm / 临时多人)"><span class="lgemo">🧙‍♂️</span>wizard room</span><span title="room 的 host: 本 room 里加入序最小的 wizard"><svg class="lghost" viewBox="-6 -5 12 10" width="13" height="11" aria-hidden="true"><path d="M-3.3 2L-3.3 -3.9L3.3 -3.9L3.3 2Z"/><path class="hb" d="M-3.3 .4L3.3 .4L3.3 2L-3.3 2Z"/><path d="M-5.2 3.6L-5.2 2L5.2 2L5.2 3.6Z"/></svg>host</span>' +
+    '<span><span class="lgemo">👤</span>用户</span><span title="room 图标: 多人群聊 (企微群 / topic / 多人 room, 有人参与)"><span class="lgemo">👥</span>群聊</span><span title="room 图标: 人与 wizard 的单聊 (绑定的企微单聊)"><span class="lgemo">💬</span>单聊</span><span title="room 图标: 只有 wizard 的 room (dm / 临时多人)"><span class="lgemo">🧙‍♂️</span>wizard room</span><span title="room 的 host: 本 room 里加入序最小的 wizard"><svg class="lghost" viewBox="-6 -5 12 10" width="13" height="11" aria-hidden="true"><path d="M-3.3 2L-3.3 -3.9L3.3 -3.9L3.3 2Z"/><path class="hb" d="M-3.3 .4L3.3 .4L3.3 2L-3.3 2Z"/><path d="M-5.2 3.6L-5.2 2L5.2 2L5.2 3.6Z"/></svg>host</span>' +
     '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/></svg>lead</span>' +
     '<span title="聪明程度 (🧒小学生 🎒初中生 🎓大学生 🔬研究生 👨‍🏫专家教授) = 实际在跑的模型 + effort (haiku 1 · sonnet 2, high 起 3 · opus 4, xhigh/max 5); 认不出模型时按出生档位 mini..ultra; 都没有 = 中号"><i class="lg wz sz1"></i><i class="lg wz sz5"></i>大小 = 聪明程度 (小学生→专家教授)</span>' +
     '<span title="当前视角: 左上名片是它, room 里靠右的气泡是它说的"><svg class="lgpov" viewBox="-13 -7 26 14" width="24" height="13" aria-hidden="true"><circle r="4.5"/><path d="M-8 -4L-12 0L-8 4M8 -4L12 0L8 4"/></svg>视角</span></div>';
@@ -921,7 +930,7 @@
   var memberLabel = function (m) { return m.who && m.who.kind === 'human' ? '👤' : (nodeOf(nodeIdOf(m.who)).label || '🧙‍♂️'); };
   var roomAvatar = function (r) {
     var ms = (r.members || []).slice(0, 4);
-    if (!ms.length) return '<span class="av">' + esc(roomIcon(isPeopleRoom(r))) + '</span>';
+    if (!ms.length) return '<span class="av">' + esc(roomIcon(r)) + '</span>';
     return '<span class="av mosaic n' + ms.length + '" aria-hidden="true">' + ms.map(function (m) { return '<i>' + esc(memberLabel(m)) + '</i>'; }).join('') + '</span>';
   };
   var roomItem = function (r) {
@@ -2412,7 +2421,7 @@
   var roomHitItem = function (r, q) {
     return {
       kind: 'conv',
-      html: '<span class="av">' + esc(roomIcon(r.group)) + '</span><span class="b"><span class="l1">' +
+      html: '<span class="av">' + esc(roomIconOf(r.id, r.group)) + '</span><span class="b"><span class="l1">' +
         '<span class="nm chat">' + hl(r.name, q) + '</span>' + groupTag(r.group) + skTs(r.lastAt) + '</span>' +
         (r.preview ? '<span class="pv">' + esc(r.preview) + '</span>' : '') + '</span>',
       go: function () { goRoom(r.id); },
@@ -2437,7 +2446,7 @@
       html: '<span class="av">' + (human ? '👤' : esc(nodeOf(nodeIdOf(h.author)).label || '🧙‍♂️')) + '</span><span class="b"><span class="l1">' +
         '<span class="said"><span class="nm ' + (human ? 'human' : 'wizard') + '">' + esc(h.authorName) + '</span>' + to + '</span>' + skTs(h.at) + '</span>' +
         '<span class="sn">' + hl(h.snippet, q) + '</span>' +
-        '<span class="l3"><span class="where' + (h.group ? '' : ' priv') + '"><i>' + esc(roomIcon(h.group)) + '</i>' +
+        '<span class="l3"><span class="where' + (h.group ? '' : ' priv') + '"><i>' + esc(roomIconOf(h.room, h.group)) + '</i>' +
           (h.group ? '群聊' : '会话') + ' · ' + esc(h.roomName) + '</span>' +
           (h.hits > 1 ? '<span class="cnt">' + h.hits + ' 处命中</span>' : '') + '</span></span>',
       go: function () { jumpRow(h); },
