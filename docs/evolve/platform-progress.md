@@ -61,7 +61,10 @@
 
 ## 进行中
 
-(无)
+- **duty 逾期提醒** (admin 7aeb85fc.291: 1h 提醒处理人, 2h 提醒到群, 可配) → `AliceZane` (light), 75ec2bbf.1。规格: `shared/room-overdue.ts` 纯函数 + index 定时扫描; `rooms.overdue.remindMin/groupMin`; 活动只算非 daemon 行; 不自动 canceled。交差后派一个白板 reviewer。
+- **成员栏 UI 重做** → `BobAdams` (standard), 850bee9d.1, `after` YaraYoung 的 48437ae5.1 (同改 web/chat.js)。
+- **群公告**: 方案已在群里提 (7aeb85fc.292), 等 admin 表态。
+- 常驻 duty d6977146.1 已 passed 关掉 (admin 授权直接在群里汇报; 否则逾期提醒会每 2h 误报它)。
 
 ## 已完成
 
