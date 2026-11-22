@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contextMaterials } from "../daemon/peers.js";
-import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, tierFor, type RouteRow } from "../daemon/route.js";
+import { commonStems, decide, isSmallTask, occupies, rankCandidates, renderCandidates, tierFor, type RouteRow } from "../daemon/route.js";
 
 const now = 1_000_000;
 const ttlMs = 60_000;
@@ -127,6 +127,14 @@ const sixth = decide(followup, crowded, now, ttlMs);
 assert(sixth.kind === "existing");
 assert.equal(sixth.row.name, "sixth");
 
+// 占用口径: 只有别的 wizard 用 chat_ask / delegate 开给它的 duty 算; 人话、join-req、自己开给自己的不算。
+const me = { kind: "wizard" as const, id: "wme" };
+assert.equal(occupies({ kind: "ask", asker: { kind: "wizard", id: "wboss" } }, me), true, "同伴的 chat_ask 算占用");
+assert.equal(occupies({ kind: "task", asker: { kind: "wizard", id: "wboss" } }, me), true, "delegate / spawn task 算占用");
+assert.equal(occupies({ kind: "human", asker: { kind: "human", id: "u1" } }, me), false, "人话开的 duty 不算");
+assert.equal(occupies({ kind: "join-req", asker: { kind: "wizard", id: "wboss" } }, me), false, "join-req 不算");
+assert.equal(occupies({ kind: "ask", asker: { kind: "human", id: "u1" } }, me), false, "人点名 ask 不算");
+assert.equal(occupies({ kind: "ask", asker: me }, me), false, "自己开给自己的不算");
 // 任何占用 (欠着别人 / 在等别人) 都挡自动复用, force 也不绕。
 for (const duties of [["t123456 open"], ["t123456 need", "t2 progress"]]) {
   const rows = [row({ busy: false, duties })];

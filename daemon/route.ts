@@ -19,6 +19,7 @@ import type { ContextMaterial } from "./peers.js";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import type { TierName } from "../shared/config.js";
+import type { Duty, Who } from "../shared/room.js";
 
 export interface RouteRow extends WizardBrief {
   busy: boolean;
@@ -89,6 +90,12 @@ const GUIDANCE = new Set(["agents", "claude", "readme", "contributing", "code_of
 const withoutGuidance = (text: string): string => text.replace(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g,
   (w) => GUIDANCE.has(stemOf(w).toLowerCase()) ? " " : w);
 const fileRefs = (text: string): string[] => text.match(/(?:\/|\.\/|\.\.\/)?[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9_.\/-])/g) ?? [];
+/** 挡自动复用的「任务占用」= 别的 wizard 用 chat_ask / delegate 开给它、还没关的 duty。
+ *  人话 (human) 与 join-req 开的不算: 那是 room 的日常, 被叫一声不说明它手上压着别人的活。
+ *  常驻 duty (如 lead 对上永不 done 的那条) 照算 —— 持有者是 lead, 本来就另有 lead veto。 */
+export const occupies = (d: Pick<Duty, "kind" | "asker">, holder: Who): boolean =>
+  (d.kind === "ask" || d.kind === "task") && d.asker.kind === "wizard" && d.asker.id !== holder.id;
+
 const shared = (task: Set<string>, text: string): string[] => [...termsOf(withoutGuidance(text))].filter((t) => task.has(t));
 
 const relTo = (cwd: string, p: string): string => (cwd && p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);

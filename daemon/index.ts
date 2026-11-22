@@ -52,8 +52,8 @@ import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, leaveOps, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
-  type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, leaveOps, dutiesHeldBy, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
 import { addressed, footerTarget, responseFormatPolicy, roomBubble } from "./message-format.js";
@@ -121,7 +121,7 @@ import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
 import { renderReminder } from "../shared/reminder.js";
 import { busyOf, createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
-import { coldGateOf, wakeCostOf, decide, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
+import { coldGateOf, wakeCostOf, decide, occupies, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
 import { parseWhen, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle } from "./wait-idle.js";
@@ -1161,6 +1161,10 @@ const main = async (): Promise<void> => {
     const roomState = (id: string): RoomState | undefined => {
       try { return roomStore.get(id); } catch (e) { log.warn({ mod: "room", room: id, err: errText(e) }, "room: 账本损坏, 跳过"); return undefined; }
     };
+    /** 这个 wizard 此刻跨 room 手上未关的 duty (host 槽位读时求值)。 */
+    const heldDuties = (who: Who): Duty[] =>
+      roomStore.ids().flatMap((id) => { const s = roomState(id); return s ? dutiesHeldBy(s, who) : []; });
+    const dutyLine = (d: Duty): string => d.msg + " " + (d.last?.status ?? "open");
     /** 占位气泡的 frame 表 (cutmap A-4): 企微 msgid → {frame, expires}。
      *  人话行 append 时写 (B 节接 inbound), 第一条 re 它的 reply 用它把占位收口 ——
      *  bridge 的 replyBubbles 只认自己 dispatch 过的 event id, room 的人话行不再走
@@ -2662,11 +2666,7 @@ const main = async (): Promise<void> => {
       const dutiesOf = (target: string): string => {
         const uid = wizards.get(target)?.uid;
         if (!uid) return "";
-        const who: Who = { kind: "wizard", id: uid };
-        return roomStore.ids().flatMap((id) => {
-          const s = roomState(id);
-          return s ? openDuties(s).filter((d) => sameWho(holderOf(s, d), who)) : [];
-        }).map((d) => d.msg + " " + (d.last?.status ?? "open")).join(" · ");
+        return heldDuties({ kind: "wizard", id: uid }).map(dutyLine).join(" · ");
       };
       const enrich = (r: (typeof all)[number]) => ({
         ...r,
@@ -2706,6 +2706,12 @@ const main = async (): Promise<void> => {
     /** 候选的原料: 除自己之外每个 wizard 的上下文事实 (文件集 / 最近的话 / ctx / 缓存 TTL)。
      *  `keep` 在读 transcript **之前**收窄: 每行要扫几 MB 尾巴, 全机几百个绑定读一遍是秒级 ——
      *  调用方只要活着的那几个时, 别替死掉的 pane 付这笔。 */
+    const occupyingDuties = (target: string): string[] => {
+      const uid = wizards.get(target)?.uid;
+      if (!uid) return [];
+      const who: Who = { kind: "wizard", id: uid };
+      return heldDuties(who).filter((d) => occupies(d, who)).map(dutyLine);
+    };
     const routeRowsOf = async (self: string, keep: (r: { alive: boolean; target: string }) => boolean = () => true): Promise<(RouteRow & { target: string })[]> => {
       const roster = await rosterOf(self);
       return roster
@@ -2717,7 +2723,7 @@ const main = async (): Promise<void> => {
           return {
             ...r,
             lead: wizards.get(r.target)?.lead === true,
-            duties: [],
+            duties: occupyingDuties(r.target),
             contextTokens: live ? lastContextTokens(live) : 0,
             ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
             ...(live ? { cacheAt: cacheTouchMs(live) } : {}),
