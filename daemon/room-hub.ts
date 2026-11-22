@@ -15,7 +15,7 @@
 import type { Logger } from "pino";
 import {
   DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
-  renderMsgLine, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
+  renderMsgLine, replyHintDue, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
   isDirectParent,
 } from "../shared/room.js";
 import type { WakeTail } from "./notices.js";
@@ -51,6 +51,8 @@ export interface HubPorts {
   onClosed?: () => void;
   /** 轮终等 Stop hook 的 grace (ms, 缺省 3000; 测试给 0)。只对来问过 hook 的 wizard 生效。 */
   stopGraceMs?: number;
+  /** 「你要交代」用法提示的节流窗口 (= 最近多少次唤醒批次; 0 / 缺省 = 每次都附)。热读。 */
+  replyHintWindow?: () => number;
 }
 
 interface AfterScan { closed?: readonly string[]; fake?: boolean; only?: readonly string[] }
@@ -199,6 +201,12 @@ export const createRoomHub = (p: HubPorts) => {
     return out;
   };
 
+  /** uid 当前所在的全部 room 状态 (内存里的 fold, 只做成员判断)。 */
+  const roomsOf = (uid: string): RoomState[] => {
+    const k = whoKey({ kind: "wizard", id: uid });
+    return p.store.ids().flatMap((id) => { try { const s = state(id); return s?.members.has(k) ? [s] : []; } catch { return []; } });
+  };
+
   /** 渲染一次唤醒: 每个 room 一段 (游标之后没看过的行, 触发行全文), 末尾列出它要交代的 duty。 */
   const render = (uid: string, rooms: Map<string, MsgRow[]>): { text: string; seen: Array<{ room: string; seq: number }>; msgs: string[] } => {
     const who: Who = { kind: "wizard", id: uid };
@@ -207,6 +215,8 @@ export const createRoomHub = (p: HubPorts) => {
     const seen: Array<{ room: string; seq: number }> = [];
     const msgs: string[] = [];
     const again = uncertain.get(uid);
+    // 用法半句是教学不是事实: 它最近 N 批唤醒里自己回过 chat_reply 就不再重复 (id 与「这是你的 duty」照旧给)。
+    const usage = replyHintDue(roomsOf(uid), uid, p.replyHintWindow?.() ?? 0) ? " —— 用 chat_reply({re, text, status}) 交代。" : "";
     for (const [room, triggers] of rooms) {
       const s = state(room)!;
       const u = unreadFor(s, who, triggers.map((t) => t.id));
@@ -214,7 +224,7 @@ export const createRoomHub = (p: HubPorts) => {
       const head = "【" + label + "】(" + room + ")" + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
       const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500));
       const owe = openDuties(s).filter((d) => sameWho(holderOf(s, d), who) && triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));
-      const oweLine = owe.length ? "你要交代: " + owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")").join("; ") + " —— 用 chat_reply({re, text, status}) 交代。" : "";
+      const oweLine = owe.length ? "你要交代: " + owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")").join("; ") + usage : "";
       parts.push([head, ...lines, ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
       msgs.push(...triggers.map((t) => t.id));
@@ -238,7 +248,8 @@ export const createRoomHub = (p: HubPorts) => {
     if (res === "ok") {
       for (const [room, rows] of rooms) for (const t of rows)
         p.log?.info({ room, msgId: t.id, target: w.target, lagMs: now() - t.at }, "room: delivered"); // O3: 账本行 at → 注入成功 (msgId 同上, 避开 pino 的 msg 键)
-      for (const { room, seq } of seen) p.store.append(room, [{ op: "seen", at: now(), room, who: { kind: "wizard", id: uid }, seq }]);
+      const batchAt = now(); // 同一批跨 room 共用一个 at: 「最近 N 批」按它去重
+      for (const { room, seq } of seen) p.store.append(room, [{ op: "seen", at: batchAt, room, who: { kind: "wizard", id: uid }, seq, batch: true }]);
       uncertain.delete(uid);
       const t: TurnWake = turns.get(uid) ?? { rooms: new Set(), msgs: new Set(), replied: new Set(), at: now() };
       seen.forEach(({ room }) => t.rooms.add(room));

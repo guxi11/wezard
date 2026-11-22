@@ -1240,6 +1240,7 @@ const main = async (): Promise<void> => {
         if (!r.ok) roomLog.warn({ target, reason: r.reason }, "room: Esc 打断失败 (照常投递本条)");
       },
       onClosed: () => settleLeads(),
+      replyHintWindow: () => cfg.rooms?.replyHint?.window ?? 10,
       tailOf: (target, triggers) => humanWakeTail(wakeTailPorts(cfg, m), target, triggers),
       paste: async (target, text, tail) => {
         const r = await m.injectText(target, text, { requireIdle: true, ...(tail ? { tail } : {}) });

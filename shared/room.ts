@@ -107,7 +107,8 @@ export interface NoticeOp extends OpBase { op: "notice"; text: string; by: Who }
 export const NOTICE_MAX = 500;
 export interface JoinOp extends OpBase { op: "join"; who: Who; ord: number; via: JoinVia; by: Who }
 export interface LeaveOp extends OpBase { op: "leave"; who: Who; by: Who; why?: string }
-export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number }
+/** batch: true = 一次成功的唤醒投递写下的游标 (入座时的 history 游标不带) —— 「最近 N 次唤醒」的计数来源。 */
+export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number; batch?: true }
 export interface MoveOp extends OpBase { op: "move"; duty: string; from: Who; to: Who; by: Who }
 export interface WatchOp extends OpBase { op: "watch"; who: Who; on: boolean }
 export interface MsgRow extends OpBase {
@@ -143,7 +144,9 @@ export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | Mo
 
 // ── fold ───────────────────────────────────────────────────────────────
 
-export interface Member { who: Who; ord: number; via: JoinVia; since: number; by: Who; seen: number; watch: boolean }
+export interface Member { who: Who; ord: number; via: JoinVia; since: number; by: Who; seen: number; watch: boolean;
+  /** 它最近几次成功唤醒批次的时刻 (SeenOp.batch 的 at, 去重、最多 BATCH_KEEP 个, 旧→新); 不是 batch 的 seen 不记。 */
+  batches: number[] }
 
 /** duty 的处理人槽位: "host" = 读时求值的当前 host (未点名人话 / join-req); 其余 = whoKey。 */
 export type Slot = string;
@@ -214,6 +217,7 @@ export const dutiesOpenedBy = (row: MsgRow): Array<Omit<Duty, "key">> => {
 };
 
 /** 单步 fold —— 就地推进 (调用方持有状态; 纯度在「同一串行 = 同一状态」上)。 */
+export const BATCH_KEEP = 64;
 export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
   switch (op.op) {
     case "open":
@@ -223,7 +227,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
     case "join": {
       const k = whoKey(op.who);
       const prev = s.members.get(k);
-      s.members.set(k, prev ? { ...prev, via: op.via, by: op.by } : { who: op.who, ord: op.ord, via: op.via, since: op.at, by: op.by, seen: 0, watch: false });
+      s.members.set(k, prev ? { ...prev, via: op.via, by: op.by } : { who: op.who, ord: op.ord, via: op.via, since: op.at, by: op.by, seen: 0, watch: false, batches: [] });
       s.everMembers.set(k, op.who);
       s.nextOrd = Math.max(s.nextOrd, op.ord + 1);
       break;
@@ -232,6 +236,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
     case "seen": {
       const m = s.members.get(whoKey(op.who));
       if (m && op.seq > m.seen) m.seen = op.seq;
+      if (m && op.batch && m.batches[m.batches.length - 1] !== op.at) m.batches = [...m.batches, op.at].slice(-BATCH_KEEP);
       break;
     }
     case "watch": {
@@ -718,3 +723,21 @@ export const findPairAdhoc = (states: readonly RoomState[], a: string, b: string
 /** parent 是不是 child 的直属 parent (judge ⑥ interrupt 限权的判据; hub 与自动 adhoc 落点共用)。 */
 export const isDirectParent = (parentUidOf: (childUid: string) => string | undefined, parent: Who, child: Who): boolean =>
   parent.kind === "wizard" && child.kind === "wizard" && parentUidOf(child.id) === parent.id;
+
+/** 「你要交代」的用法提示这次该不该附: 它最近 window 次成功唤醒批次 (跨 room 按 at 去重) 里写过任何 chat_reply 行 → 不附; 批次不足 window / 窗口内没写过 / window ≤ 0 → 附。
+ *  states = 它所在的各 room; 只从尾往前扫到窗口起点为止。 */
+export const replyHintDue = (states: readonly RoomState[], uid: string, window: number): boolean => {
+  if (window <= 0) return true;
+  const me = whoKey({ kind: "wizard", id: uid });
+  const ats = [...new Set(states.flatMap((s) => s.members.get(me)?.batches ?? []))].sort((a, b) => b - a);
+  if (ats.length < window) return true;
+  const cutoff = ats[window - 1]!;
+  return !states.some((s) => {
+    for (let i = s.msgs.length - 1; i >= 0; i--) {
+      const r = s.msgs[i]!;
+      if (r.at < cutoff) return false;
+      if (r.kind === "reply" && r.author.kind === "wizard" && r.author.id === uid) return true;
+    }
+    return false;
+  });
+};
