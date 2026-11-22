@@ -48,6 +48,7 @@
 - [x] `tests/charter.test.ts` 断言默认注册的 MCP 工具都在 charter 名册里 (`c226798`, WendyVance): 合写 `plan_create/get/list/update` 展开比对; 豁免表 `charterExempt` 名字失效也报错。
 - [x] ~~下次 charter 攒批: `wecom_doc_*` 要不要进 charter~~ admin 定直接删 (企微文档走官方 skill, admin 另外跟进 skill 安装): `d6b831b` (YaraXu)。
 - [ ] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): wizard 对人话 `need` → 人另发一条新消息作答 (不引用) → 唤醒头的「你要交代」只列新那条, 原 duty 仍开在 wizard 名下, 60 分钟后被逾期提醒。可考虑: 人答 need 唤醒时, 「你要交代」把该 wizard 对这个人仍开着、回过 need 的 duty 一并列出。改的是唤醒文案, 不动账本。
+- [ ] **进行中 (LeoJones, standard, e41e58b4.1)**: `for` 血缘默认值从未实现 (描述说缺省=本轮唤醒那条, 但 `/room/ask` 与 `deliverTask` 只写显式值) + 逾期只看本 room, 不知道 holder 已派出且子件在动 → 实例: wezard-1 派 lead FrankDavis 做 .399, 60 分钟后被催 (.413), admin 收到「被提醒后仍没有交代」(.414) 误报。改: hub `defaultFor` (本轮唤醒且仍持有的唯一 duty), 派活路径补默认 `for`; `overdueDue` 并入跨 room 子孙件活动。避开 FrankDavis plan S4 要改的 hub render。
 - [ ] 小清理: `daemon/room-overdue.ts` import 的 `holderOf` 未使用 (`tsc --noUnusedLocals`), 下次清理批带上。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
