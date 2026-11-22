@@ -47,6 +47,7 @@
 - [x] 开发者指南 [`docs/dev-guide.md`](../dev-guide.md) (RoseQuincy `afb1743` `06bd575`): 加 MCP 工具 / room 行类型 / reminder kind 各动哪几处 + vm 沙箱截取锚点表。顺带对齐 CLAUDE.md (reminder kind 现状、room 唤醒不挂信封而是 `【label】(roomId)` 头、`daemonPost` 每个 POST 都带 selfRef)、contract.md §2/§6、过时注释。
 - [x] `tests/charter.test.ts` 断言默认注册的 MCP 工具都在 charter 名册里 (`c226798`, WendyVance): 合写 `plan_create/get/list/update` 展开比对; 豁免表 `charterExempt` 名字失效也报错。
 - [x] ~~下次 charter 攒批: `wecom_doc_*` 要不要进 charter~~ admin 定直接删 (企微文档走官方 skill, admin 另外跟进 skill 安装): `d6b831b` (YaraXu)。
+- [ ] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): wizard 对人话 `need` → 人另发一条新消息作答 (不引用) → 唤醒头的「你要交代」只列新那条, 原 duty 仍开在 wizard 名下, 60 分钟后被逾期提醒。可考虑: 人答 need 唤醒时, 「你要交代」把该 wizard 对这个人仍开着、回过 need 的 duty 一并列出。改的是唤醒文案, 不动账本。
 - [ ] 小清理: `daemon/room-overdue.ts` import 的 `holderOf` 未使用 (`tsc --noUnusedLocals`), 下次清理批带上。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
 - [ ] 上下文成本: charter 体积。
