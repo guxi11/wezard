@@ -167,7 +167,7 @@ const DELEGATE_SCHEMA = {
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
       lead: z.boolean().optional().describe("复杂任务由 lead 统筹并逐阶段维护 plan；简单任务不要建 plan。产出是一条 chat_ask —— 结果由你在它交代后自己收口。"),
       planId: z.string().optional().describe("这次派活归属的 plan id。仅关联event供owner的闲时提醒判断，不会自动推进plan；补充同一event时沿用关联。"),
-      room: z.string().optional().describe(ROOM_DOC + " 给了就把这条 chat_ask 落在这个 room (选中的子 wizard 以 spawn 免审入群)。"),
+      room: z.string().optional().describe(ROOM_DOC + " 给了就把这条 chat_ask 落在这个 room (选中的子 wizard 以 spawn 免审入群; 你须是该 room 成员)。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
     };
 
@@ -195,7 +195,7 @@ const offspringShape = {
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   planId: z.string().optional().describe("若task属于现有plan，指定plan id以关联派活event；plan仍由owner显式更新。"),
   for: z.string().optional().describe(FOR_DOC),
-  room: z.string().optional().describe(ROOM_DOC + " 给了就让它在那个 room 里入座 (via spawn, 免审) 并把这件活落在那儿; 省略 = 你的 room。"),
+  room: z.string().optional().describe(ROOM_DOC + " 给了就让它在那个 room 里入座 (via spawn, 免审) 并把这件活落在那儿 (你须是该 room 成员; 认不出 / 不是成员在生之前就拒, 派活失败回包 dispatched:false + dispatchError); 省略 = 你的 room。"),
 };
 
 type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; room?: string; model?: string; effort?: string; tier?: string; planId?: string; for?: string };

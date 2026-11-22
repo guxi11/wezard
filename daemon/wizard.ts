@@ -1100,7 +1100,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`room_open` 开一个跟进 room (你是 host) · `room_members` 谁在里面 · `room_read` 读账本 · `room_watch` 订阅 (默认关, 订阅后每条人话都花你一轮) · `room_invite` / `room_join` / `room_approve` / `room_leave` / `room_transfer` 管成员与 duty 归属 · `room_name` 给 room 起显示名 / 设群公告 `notice` (host 专属; 名字只是别名, 寻址仍用 id)",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_channel` 频道 (topic) 的历史 —— 频道派来的活消息头带 `topic=`, 注入的上下文不够时按需翻 / 搜",
       "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料; 指定 `from` 时也仍归你管理 · `spawn_wizard` 白板起步, 可去别的目录或聊天, 仍由你管理 —— " + tierLine(a.tiers),
-      "新建 wizard 推荐省略 `name`: daemon 按稳定序号分配中性英文名, 职责写 `description`; 仅明确指定新名字时才传 `name`, 指定已有执行者用 `to` · spawn / clone / delegate 都可以带 `room` 让它免审进那个 room",
+      "新建 wizard 推荐省略 `name`: daemon 按稳定序号分配中性英文名, 职责写 `description`; 仅明确指定新名字时才传 `name`, 指定已有执行者用 `to` · spawn / clone / delegate 都可以带 `room` 让它免审进那个 room (你须是该 room 成员, 否则整件被拒、不会生人)",
       "`stop_wizard` 打断或强制结束一个 wizard",
       "复杂任务用 `plan_create/get/list/update` 维护自己的 DAG 状态；简单任务不用 plan · `pending_items` 查看自己派出且未交代的件 (`drop` 消项)",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",

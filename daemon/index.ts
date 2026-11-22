@@ -52,6 +52,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
+import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
   DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeNotice, leaveOps, dutiesHeldBy, planDm, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
@@ -1816,23 +1817,30 @@ const main = async (): Promise<void> => {
     });
     // ── 出生 / 退役的 room 落账 ──────────────────────────────────────────
     /** spawn / clone / delegate 的 room? 参数: 落地的 wizard 以 via:"spawn" 免审入群 (契约 §3)。 */
-    const joinRoomSpawn = (self: string, roomRef: unknown, bornName: string): void => {
+    const joinRoomSpawn = (self: string, roomRef: unknown, bornName: string): SeatResult => {
       const ref = String(roomRef ?? "").trim();
-      if (!ref || !bornName) return;
+      if (!ref || !bornName) return { ok: true };
       try {
         const r = roomResolve(ref);
         const s = r.room ? roomState(r.room) : undefined;
         const me = roomSelfOf(self);
         const target = resolvePeer(self, bornName);
         const rec = target?.ok ? wizards.get(target.target) : undefined;
-        if (!s || !me || !rec?.uid) { roomLog.warn({ room: ref, born: bornName }, "room?: 入群没落 (room 认不出 / 名字解析不到)"); return; }
+        if (!s || !me || !rec?.uid) { roomLog.warn({ room: ref, born: bornName }, "room?: 入群没落 (room 认不出 / 名字解析不到)"); return { ok: false, reason: "room 认不出 / 名字解析不到: " + ref }; }
         const who: Who = { kind: "wizard", id: rec.uid };
-        if (s.members.has(whoKey(who))) return;
+        if (s.members.has(whoKey(who))) return { ok: true };
         hub.write(s.id, [{ op: "join", at: Date.now(), room: s.id, who, ord: s.nextOrd, via: "spawn", by: me }]);
+        return { ok: true };
       } catch (e) {
         roomLog.warn({ room: ref, born: bornName, err: errText(e) }, "room?: 出生入群失败");
+        return { ok: false, reason: errText(e) };
       }
     };
+    /** room? 给了就在生 / 派之前验: room 认得出、调用方在里面 (顺序见 room-spawn.ts)。 */
+    const checkRoomArg = (self: string, ref: unknown) => checkRoomTarget({
+      resolve: roomResolve,
+      isMember: (room, who) => roomState(room)?.members.has(whoKey(who)) ?? false,
+    }, roomSelfOf(self), String(ref ?? "").trim());
     /** 实例退役: 从所有 room 退出, 手上的 duty 由 daemon 写 canceled (契约 §4)。 */
     const leaveRooms = (target: string, why: string): void => {
       const rec = wizards.get(target);
@@ -2871,20 +2879,32 @@ const main = async (): Promise<void> => {
         json(res, 200, { ok: true, dryRun: true, diagnostics, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: taskTier }), ...(shown.length ? { candidates: shown } : {}) });
         return;
       }
+      // room? 给了: 在选人 / 生人之前验 room 目标, 不合法直接 4xx, 不生 wizard。
+      const delegateRoom = ((b as { room?: string }).room ?? "").toString().trim();
+      if (delegateRoom) {
+        const chk = checkRoomArg(self, delegateRoom);
+        if (!chk.ok) { json(res, chk.status, { ok: false, reason: chk.reason }); return; }
+      }
       /** 投递 = hub.append 一条 task 行; room 按 room?/缺省规则落 (D-1)。 */
       const deliverTask = async (name: string): Promise<{ status: number; body: Record<string, unknown> }> => {
         const me = roomSelfOf(self);
         if (!me) return { status: 400, body: { ok: false, reason: "caller 不在名册上, 没有 uid" } };
         const who = whoRefOf(name);
         if (!who || who.kind !== "wizard") return { status: 400, body: { ok: false, reason: "认不出执行者: " + name } };
-        const target = roomTargetOf(me, [who], (b as { room?: string }).room);
+        const roomArg = ((b as { room?: string }).room ?? "").toString().trim();
+        const target = roomTargetOf(me, [who], roomArg);
         if (target.error || !target.room) return { status: target.status ?? 400, body: { ok: false, reason: target.error ?? target.reason ?? "" } };
         // lead 的层级规矩随正文带 (宪章是出生快照, 打法只这一件活用得上)。
         const body2 = lead ? text + "\n\n" + renderReminder({ wezard: "lead" }, wizards.byUid(who.id)?.lead ? renderLeadPlaybook() : renderLead()) : text;
-        const v = hub.append(target.room, { author: me, kind: "task", text: body2, to: [who], origin: "tool",
+        const draft = { author: me, kind: "task" as const, text: body2, to: [who], origin: "tool" as const,
           ...((b.for ?? "").toString().trim() ? { for: (b.for ?? "").toString().trim() } : {}),
-          ...(planId ? { planId } : {}) });
-        if (!v.ok) return { status: v.status, body: { ok: false, reason: v.reason } };
+          ...(planId ? { planId } : {}) };
+        // room? 给了: 先入座再 append (judge 要求 to 是成员); 没给: 落点本来就接得住 (dm / 缺省 room)。
+        const placed = roomArg
+          ? seatThenAppend(target.room, () => joinRoomSpawn(self, roomArg, name), (r) => hub.append(r, draft))
+          : ((v) => (v.ok ? { ok: true as const, verdict: v } : { ok: false as const, status: v.status, reason: v.reason }))(hub.append(target.room, draft));
+        if (!placed.ok) return { status: placed.status, body: { ok: false, reason: placed.reason } };
+        const v = placed.verdict;
         return { status: 200, body: { ok: true, room: v.row.room, id: v.row.id, event: v.row.id, name: peerAddress(cfg, wizards.byUid(who.id)?.target ?? who.id), queued: true,
           receipt: "已持久化排队; 结论经 chat_reply({re, text, status}) 交代" } };
       };
@@ -2902,7 +2922,6 @@ const main = async (): Promise<void> => {
         const t = await deliverTask(name);
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true,
           leadOf: [...(wizards.get(r.target)?.leadOf ?? []), String(t.body.id)] });
-        if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, name);
         json(res, t.status, { ...t.body, diagnostics, decision: "existing", ...dispatchReason(t.status === 200, t.body.reason, d.why), ...(shown.length ? { candidates: shown } : {}) });
         return;
       }
@@ -2913,8 +2932,13 @@ const main = async (): Promise<void> => {
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody);
       if (born.status !== 200) { json(res, born.status, { ...born.body, diagnostics, decision: "spawn", ...dispatchReason(false, born.body.reason, d.why) }); return; }
       const t = await deliverTask(String(born.body.name ?? ""));
-      // room? 参数: 白板新生落地即入座 (via spawn, 免审)。
-      if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, String(born.body.name ?? ""));
+      // 派不出去 (入座 / append 失败): 别留没活的孤儿 —— 走 stop_wizard end 同一条回收路径。
+      if (t.status !== 200 && typeof born.body.target === "string") {
+        const orphan = born.body.target;
+        const killed = await m.killPane(orphan).catch(() => ({ ok: false }));
+        const forgotten = forgetWizard(orphan);
+        log.warn({ orphan, killed: killed.ok, forgotten, reason: t.body.reason }, "delegate: 派活失败, 回收刚生的 wizard");
+      }
       json(res, t.status, {
         ...t.body,
         decision: "spawn",
@@ -3001,6 +3025,12 @@ const main = async (): Promise<void> => {
         const linkedPlan = plans.get(requestedPlanId);
         if (!linkedPlan || linkedPlan.owner !== self || !["active", "paused"].includes(linkedPlan.state))
           return { status: 409, body: { ok: false, reason: "planId must name an unfinished plan owned by the caller" } };
+      }
+      // room? 给了: 生之前先验 (认得出 + 调用方是成员), 不合法回 4xx, 不留孤儿。
+      const roomArg = (b.room ?? "").toString().trim();
+      if (roomArg) {
+        const chk = checkRoomArg(self, roomArg);
+        if (!chk.ok) return { status: chk.status, body: { ok: false, reason: chk.reason } };
       }
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
@@ -3111,27 +3141,36 @@ const main = async (): Promise<void> => {
         ...(kid.description ? { job: kid.description } : {}), cwd: r.cwd,
       }, subjectOf(wizards.get(target)));
       // 出生即派活 (契约 §3): 一条 task 行, 结论经 chat_reply 交代; room? 入座。
-      const dispatched = !!task && birthGuard();
+      const wantDispatch = !!task && birthGuard();
+      let dispatched = false;
       let dispatchedEvent = "";
       let dispatchedRoom = "";
-      if (dispatched) {
+      let dispatchError = "";
+      if (wantDispatch) {
         const me = roomSelfOf(self);
         const who = wizards.get(target)?.uid;
-        if (me && who) {
-          const roomRef = (b.room ?? "").toString().trim();
-          const dest = roomTargetOf(me, [{ kind: "wizard", id: who }], roomRef || undefined);
-          if (dest.room) {
-            const v = hub.append(dest.room, { author: me, kind: "task",
+        if (!me || !who) dispatchError = "caller / 新生者不在名册上, 没有 uid";
+        else {
+          const dest = roomTargetOf(me, [{ kind: "wizard", id: who }], roomArg || undefined);
+          if (!dest.room) dispatchError = dest.error ?? dest.reason ?? "没有落点 room";
+          else {
+            const draft = { author: me, kind: "task" as const,
               text: task + (b.lead === true ? "\n\n" + renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
-              to: [{ kind: "wizard", id: who }], origin: "tool", ...(requestedPlanId ? { planId: requestedPlanId } : {}) });
-            if (v.ok) {
-              dispatchedEvent = v.row.id; dispatchedRoom = v.row.room;
+              to: [{ kind: "wizard" as const, id: who }], origin: "tool" as const, ...(requestedPlanId ? { planId: requestedPlanId } : {}) };
+            // room? 给了: 先入座再 append (judge 要求 to 是成员); append 被拒如实回 dispatched:false。
+            const placed = roomArg
+              ? seatThenAppend(dest.room, () => joinRoomSpawn(self, roomArg, name), (r) => hub.append(r, draft))
+              : ((v) => (v.ok ? { ok: true as const, verdict: v } : { ok: false as const, status: v.status, reason: v.reason }))(hub.append(dest.room, draft));
+            if (placed.ok) {
+              const v = placed.verdict;
+              dispatched = true; dispatchedEvent = v.row.id; dispatchedRoom = v.row.room;
               if (b.lead === true) wizards.upsert(target, { leadOf: [v.row.id] });
-            }
+            } else dispatchError = placed.reason;
           }
         }
+        if (dispatchError) log.warn({ self, target, room: roomArg, reason: dispatchError }, "spawn/clone: 出生即派活没落进 room");
       }
-      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent, ...(dispatchedRoom ? { room: dispatchedRoom } : {}) } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via } };
+      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatchError ? { dispatchError } : {}), ...(dispatched ? { event: dispatchedEvent, ...(dispatchedRoom ? { room: dispatchedRoom } : {}) } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via } };
     };
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
