@@ -67,4 +67,36 @@ assert.ok(!renamed.includes("**`.renamed`**"));
 assert.ok(!renamed.includes("🧙‍♂️ renamed"));
 assert.ok(renamed.includes("人点你写作 `.name`"));
 
+// ── 默认注册的 MCP 工具必须都在 charter 名册里 (charter 是唯一保证进上下文的发现层) ──
+const toolNames = async (): Promise<string[]> => {
+  const { createWezardServer } = await import("../mcp/tools.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const server = createWezardServer();
+  const client = new Client({ name: "probe", version: "0" }, { capabilities: {} });
+  const [t1, t2] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(t1), client.connect(t2)]);
+  return (await client.listTools()).tools.map((x) => x.name);
+};
+// `plan_create/get/list/update` → plan_create plan_get plan_list plan_update
+const expandSlashForms = (text: string) =>
+  text.replace(/\b([a-z]+_)([a-z]+(?:\/[a-z]+)+)/g, (_m, prefix: string, rest: string) =>
+    rest.split("/").map((s) => prefix + s).join(" "));
+// 豁免表: 不进 charter 的默认工具, 每项写明理由; 名字若已不在工具清单里, 测试同样失败 (防腐烂)。
+const charterExempt: Record<string, string> = {
+  // 只给新群引导化身用, 见 daemon/onboarding.ts GUIDE_TOOLS
+  onboard_bind: "onboarding guide only",
+  // 待办, 不是有意排除: 尚未进 charter, 待下次 charter 攒批时决定
+  wecom_doc_list_tools: "TODO: decide at next charter batch",
+  wecom_doc_call: "TODO: decide at next charter batch",
+};
+{
+  const registered = await toolNames();
+  const advertised = new Set(expandSlashForms(renderCharter(base)).split(/[^A-Za-z0-9_]+/));
+  const missing = registered.filter((n) => !advertised.has(n) && !(n in charterExempt));
+  assert.deepEqual(missing, [], `default MCP tools missing from charter: ${missing.join(", ")}`);
+  const stale = Object.keys(charterExempt).filter((n) => !registered.includes(n));
+  assert.deepEqual(stale, [], `charterExempt names no longer registered: ${stale.join(", ")}`);
+}
+
 console.log("Charter structure and conditional guidance passed");
