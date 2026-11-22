@@ -121,7 +121,7 @@ idle = false;
 const env = {
   byTarget: new Map([["target", attachment]]), paneUsable: async () => true,
   charterPrefixOf: () => "", setCharterPending: (a: { charterPending?: string }, c?: string) => { a.charterPending = c?.trim() || undefined; },
-  renderTail: () => "", parseEnvelope: () => ({}),
+  renderTail: () => "", parseEnvelope: () => ({}), envelopeFor: () => "",
   listJsonls: () => [], dirname: () => ".", jsonlIsPostClearChild: () => false,
   // injectText 的注入前判定已换成三态 `probePane` (unknown 不再当 pane 死了去重生)。
   probePane: async () => ({ state: "session" }),
