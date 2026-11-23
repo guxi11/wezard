@@ -58,9 +58,10 @@
   - topic_at_bot: 原生帧照旧进帖子 room (点名 host)。原生帧没到的兜底: 如果帖子已配对, 写进帖子 room; 没配对就写频道 room 并标 mention:"bot"。
 - **配对**: learnChannelPost 同时记下 post_id ↔ opk ↔ topic_id (channel.ts:760 那一刻三个 id 都在手里)。channel-posts.json 的值从 topic_id 扩成 {channel, post}, 读侧兼容旧格式 (只有 topic_id 的字符串)。
 - **帖子 room 诞生**: 被点名成为帖子 room host 的管家默认同时加入所属频道 room —— 成员关系表达归属, 不靠 graph 容器; 这些成员一般不在频道 room 里说话。
-- **出站**:
-  - 频道 room 一律 send_post 发新帖;
-  - 帖子 room 一律 send_reply, 评论到根帖下面。
+- **出站** (2026-11-23 补, 人报「帖子下评论提问却发了一条新帖」; 选择编码在动作里, 不加工具参数):
+  - 频道 room: `chat_reply` 且 re 指向的原话行带 `post` (帖子下的人话) → `send_reply` 评论回那个帖子; 其余 (`chat_say` 主动说 / re 的不是评论) → `send_post` 发新帖。频道 room 的人话行两个来源 (topic_event 新帖 / 未配对的 topic_reply_event 评论) 都带 `post`, 所以对一条新帖正文的回话同样回在它下面;
+  - 帖子 room 一律 send_reply, 评论到根帖下面 (不变)。
+  - 分支判定是 `daemon/channel.ts` `channelOutboundOf` (纯函数): reply 行按 re 顺序查第一条带 post 的原话行。charter 与 chat_say / chat_reply 工具描述同步写明这套语义 (此前只有群语义, 管家自述机制全错)。
   - 删掉按 lastPost / replyOk 挑一个帖子去评论的逻辑 (channel.ts:558、620; daemon/index.ts:1219)。
 
 ### 2.4 删 room_transfer

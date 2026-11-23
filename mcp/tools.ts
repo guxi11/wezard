@@ -344,7 +344,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Say something in a room",
       description:
-        "在一个 room 里说一句 (不开 duty、不关账)。绑定 room 里这一行就真的进企微; dm / adhoc 只在 rolepage。派活 ack / 中间进展 / 只是想让别人看见一句话, 都用它。`to` 只指出对谁说, 不唤醒、不开 duty —— 要对方交代就用 chat_ask。",
+        "在一个 room 里说一句 (不开 duty、不关账)。绑定 room 里这一行就真的进企微; dm / adhoc 只在 rolepage。派活 ack / 中间进展 / 只是想让别人看见一句话, 都用它。`to` 只指出对谁说, 不唤醒、不开 duty —— 要对方交代就用 chat_ask。**频道 room 里这一句 = 发一条新帖**; 要回到某条评论 (原帖) 下面用 chat_reply, 帖子 room 里出站一律评论回根帖。",
       inputSchema: currentAddressSchema({
         room: z.string().optional().describe(ROOM_DOC),
         text: z.string().describe("要说的话 (markdown)"),
@@ -395,7 +395,7 @@ export const createWezardServer = (): McpServer => {
       title: "Close (or field) a duty — the only completion signal",
       description:
         "答一条或多条 duty。room 由 `re` 定 —— 消息 id 全机唯一, 自带 room, 不用给。status: " + STATUS_DOC +
-        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问用 need, 长活中间报一句用 progress。",
+        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问用 need, 长活中间报一句用 progress。**频道 room 里 re 到一条评论 = 评论回原帖下面** (要新开一帖用 chat_say); 帖子 room 里一律评论回根帖。",
       inputSchema: currentAddressSchema({
         re: z.union([z.string(), z.array(z.string())]).describe("要答的那些消息 id (信封 / 注入的未读行头部的 `[<id>]`)。"),
         text: z.string().optional().describe("答复正文; 不给 (且你是处理人) = passed。"),

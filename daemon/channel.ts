@@ -256,6 +256,21 @@ export const isTopicChat = (base: string): boolean =>
   base.startsWith("chat:") && topics.has(base.slice("chat:".length));
 
 /** 频道 room 的出站: 一律发新帖 (send_post)。 */
+/** 频道 room 的出站选择 (§2.3): 交代 / 回话挂在那条评论行上 (原话行带 post) → 评论回那个帖子;
+ *  其余 (chat_say 主动说 / re 的不是评论) → 发新帖。选择编码在动作里, 不给工具加参数。
+ *  postOf = 按消息 id 查那条原话行的频道 post_id (频道 room 的人话行带, 帖子 room 的行不带)。 */
+export const channelOutboundOf = (
+  row: { kind: string; re?: string[] },
+  postOf: (id: string) => string | undefined,
+): { action: "post" } | { action: "reply"; post: string } => {
+  if (row.kind === "reply")
+    for (const id of row.re ?? []) {
+      const post = postOf(id);
+      if (post) return { action: "reply", post };
+    }
+  return { action: "post" };
+};
+
 export const sendTopicPost = async (client: WSClient, log: Logger, topicId: string, content: string): Promise<"post"> => {
   const body = await call(client, CMD_POST, { topic_id: topicId, content });
   if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel tool post rejected");

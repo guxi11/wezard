@@ -31,6 +31,10 @@ for (const tool of ["wizard_roster", "delegate", "chat_ask", "chat_reply", "chat
 }
 assert.ok(charter.includes("ARTIFACT:"), "charter must mention ARTIFACT:");
 assert.ok(!charter.includes("wait_peer"), "charter must not name the retired wait_peer tool");
+// 频道 / 帖子 room 出站语义: 回话 = 评论回原帖, 主动说 = 新帖 (此前只有群语义, 管家自述机制全错)。
+assert.ok(charter.includes("频道 room"), "charter: 频道 room 的语义常驻");
+assert.ok(charter.includes("评论回**原帖**") && charter.includes("新帖"), "charter: 回话回原帖 / 主动说发新帖");
+assert.ok(charter.includes("评论回根帖"), "charter: 帖子 room 是评论区");
 
 const codingChapter = chapter(charter, "## 怎么干活: 编排");
 assert.ok(codingChapter.includes("**Coding 默认编排**"));

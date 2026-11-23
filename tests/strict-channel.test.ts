@@ -1,13 +1,13 @@
-// 频道 / 帖子 room 的出站 (§2.3): 频道 room 一律 send_post, 帖子 room 一律 send_reply
-// (评论到根帖)。旧的一次性判官与「按 replyOk 挑帖子」已删; room 路由在 index 的 roomMirror,
-// 这里测传输原语与判定面。
+// 频道 / 帖子 room 的出站 (§2.3): 频道 room 回话 (reply re 到带 post 的评论) → send_reply 回原帖,
+// 主动说 → send_post; 帖子 room 一律 send_reply (评论到根帖)。旧的一次性判官与「按 replyOk 挑帖子」
+// 已删; room 路由在 index 的 roomMirror, 这里测传输原语、判定面与出站选择。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
-import { installChannelEvents, installChannelTransport, isTopicChat, registerTopic, sendTopicPost, sendTopicReply } from "../daemon/channel.js";
+import { channelOutboundOf, installChannelEvents, installChannelTransport, isTopicChat, registerTopic, sendTopicPost, sendTopicReply } from "../daemon/channel.js";
 import { channelOfPost, learnChannelPost, postRefOf } from "../daemon/channel-posts.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "strict-channel-"));
@@ -66,4 +66,16 @@ learnChannelPost(cfg, "chat:opkP", "topicX", "pX");
 assert.equal(channelOfPost(cfg, "chat:opkP"), "topicX");
 assert.deepEqual(postRefOf(cfg, "chat:opkP"), { channel: "topicX", post: "pX" }, "帖子 room 出站要的两个 id 都在映射里");
 
-console.log("strict-channel (room 口径): 频道 → send_post, 帖子 → send_reply");
+// ⑤ 频道 room 的出站选择: reply re 到带 post 的评论 → 评论回原帖; 其余 → 新帖。
+assert.deepEqual(
+  channelOutboundOf({ kind: "reply", re: ["m1"] }, (id) => (id === "m1" ? "pC" : undefined)),
+  { action: "reply", post: "pC" }, "回话 → 评论回原帖 (断言用的 post id)");
+assert.deepEqual(
+  channelOutboundOf({ kind: "reply", re: ["m9"] }, () => undefined),
+  { action: "post" }, "re 的原话不带 post (不是评论) → 新帖");
+assert.deepEqual(channelOutboundOf({ kind: "say" }, () => "pC"), { action: "post" }, "主动说 → 新帖");
+assert.deepEqual(
+  channelOutboundOf({ kind: "reply", re: ["m1", "m2"] }, (id) => (id === "m2" ? "pX" : undefined)),
+  { action: "reply", post: "pX" }, "按 re 顺序取第一条带 post 的原话行");
+
+console.log("strict-channel (room 口径): 频道回话 → send_reply 回原帖, 主动说 → send_post, 帖子 → send_reply");

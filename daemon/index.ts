@@ -30,7 +30,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, rende
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
-import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicPost, sendTopicReply, type ChannelHuman } from "./channel.js";
+import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicReply, type ChannelHuman } from "./channel.js";
 import { channelOf, channelRefOf, learnChannelRoom, postRefOf, postsOfChannel } from "./channel-posts.js";
 import { channelMonitorLeaveOps, channelMonitorWanted, channelRoomOf, channelGuideJoinOps, hostJoinOps, planChannelGuideTurn, postRoomBirthOps, type ChannelGuideTurn } from "./channel-onboarding.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -1242,7 +1242,14 @@ const main = async (): Promise<void> => {
         return true;
       }
       if (isTopicChat(chat)) {
-        // 频道 room: 一律新帖。
+        // 频道 room: 回话 (reply 且 re 到带 post 的评论行) = 评论回原帖; 主动说 = 新帖 (§2.3)。
+        const out = channelOutboundOf(row, (id) => roomState(chat)?.byId.get(id)?.post);
+        if (out.action === "reply") {
+          if (authorTarget) postAsReply(authorTarget, chat, chat.replace(/^chat:/, ""), out.post, body);
+          else void sendTopicReply(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), out.post, linkTags(chat, md))
+            .catch((e) => log.warn({ mod: "room", room: chat, post: out.post, err: errText(e) }, "room: topic 评论回帖失败"));
+          return true;
+        }
         if (authorTarget) postAsTopic(authorTarget, chat, body);
         else void sendTopicPost(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), linkTags(chat, md))
           .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: topic 镜像失败"));
