@@ -62,7 +62,7 @@
 - **出站** (2026-11-23 补, 人报「帖子下评论提问却发了一条新帖」; 选择编码在动作里, 不加工具参数):
   - 频道 room: `chat_reply` 且 re 指向的原话行带 `post` (帖子下的人话) → `send_reply` 评论回那个帖子; 其余 (`chat_say` 主动说 / re 的不是评论) → `send_post` 发新帖。频道 room 的人话行两个来源 (topic_event 新帖 / 未配对的 topic_reply_event 评论) 都带 `post`, 所以对一条新帖正文的回话同样回在它下面;
   - 帖子 room 一律 send_reply, 评论到根帖下面 (不变)。
-  - **企微限制**: bot 只能评论 **@ 过它的帖子**。send_reply 被 errcode 拒时回退 `send_post` 发新帖, 正文开头带 `> 回 <名字>: <原话前 80 字>` 引用标注 (原先只 warn → 交代静默丢失, 2026-11-23 修); 回退记 log.warn。未配对预判未做 (按运行期 errcode 回退, 简单可靠)。
+  - send_reply 评论回原帖对**没 @ 过机器人**的帖子同样可用 (2026-11-23 真机实测, 人报纠正: 早先「bot 只能评论 @ 过它的帖子」的说法不成立, 出处是讨论口径非官方文档/实测)。errcode 被拒时回退 `send_post` 发新帖, 正文开头带 `> 回 <名字>: <原话前 80 字>` 引用标注 (原先只 warn → 交代静默丢失, 2026-11-23 修); 回退仅作兜底, 不按 @ 与否预判, 回退记 log.warn。
   - 分支判定是 `daemon/channel.ts` `channelOutboundOf` (纯函数): reply 行按 re 顺序查第一条带 post 的原话行。charter 与 chat_say / chat_reply 工具描述同步写明这套语义 (此前只有群语义, 管家自述机制全错)。
   - 删掉按 lastPost / replyOk 挑一个帖子去评论的逻辑 (channel.ts:558、620; daemon/index.ts:1219)。
 

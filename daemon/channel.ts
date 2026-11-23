@@ -289,8 +289,9 @@ export const sendTopicReply = async (client: WSClient, log: Logger, topicId: str
   return "reply";
 };
 
-/** 评论回帖, 被企微拒时回退发新帖 (2026-11-23 人报: bot 只能评论 **@ 过它** 的帖子, 没 @ 过的会被拒,
- *  原先只 warn → 交代静默丢失)。fallback 是新帖正文 (通常带引用标注); 没给就用原正文。 */
+/** 评论回帖, 被企微拒时回退发新帖 (2026-11-23 人报纠正: 没 @ 过机器人的帖子实测也能评论, 早先
+ *  「只能评论 @ 过它的帖子」的说法不成立; 回退仅作真被拒的兜底, 不按 @ 与否预判。原先只 warn → 交代
+ *  静默丢失)。fallback 是新帖正文 (通常带引用标注); 没给就用原正文。 */
 export const sendTopicReplyOrPost = async (
   client: WSClient, log: Logger, topicId: string, postId: string, content: string, fallback?: string,
 ): Promise<"reply" | "post"> => {

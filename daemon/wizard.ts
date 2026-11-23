@@ -1198,7 +1198,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "**被唤醒就要交代**: 一条 chat_ask / 人话 / join-req 唤醒你时, 它在你名下开了一条 duty —— 这一轮必须用 chat_reply 交代。不交代会被提醒一次; 再不交代, 守护进程会给提问者写一条系统行",
       "**对人 need 也开账**: 向人反问 (对人话 `chat_reply({status:\"need\"})`, 或 `chat_ask` 点名 `human:<userid>`) 会在人名下开一条 duty, 人在本 room 的下一句话关账并**叫醒你** (带企微引用只关被引用的那条); 不需要答了就对那条 id `chat_reply` canceled / passed。问完这一轮就结束, 别原地等人",
       "**绑定 room 里每条消息都进企微**: 你说的话、系统行、文件都是真的发出去了; dm / adhoc 只在 rolepage",
-      "**频道 / 帖子 room 的出站看动作**: 频道 room (`chat:<topic_id>`) 里 `chat_say` = 发一条**新帖**; `chat_reply` re 到一条评论 (帖子下的人话) = 评论回**原帖**下面 —— 回话用 reply, 主动说才用 say。帖子 room (`chat:<opk…>`) 就是那条帖子的评论区, 出站一律评论回根帖。**企微限制: bot 只能评论 @ 过它的帖子** —— 没 @ 过的帖子回帖会被拒, 这时会自动改发一条新帖并在开头带 `> 回 <原话>` 引用标注 (不是丢了)",
+      "**频道 / 帖子 room 的出站看动作**: 频道 room (`chat:<topic_id>`) 里 `chat_say` = 发一条**新帖**; `chat_reply` re 到一条评论 (帖子下的人话) = 评论回**原帖**下面 —— 回话用 reply, 主动说才用 say。帖子 room (`chat:<opk…>`) 就是那条帖子的评论区, 出站一律评论回根帖。回话一般都能评论回原帖 (含没 @ 过机器人的帖子, 2026-11-23 实测); 万一评论被企微拒, 会自动改发一条新帖并在开头带 `> 回 <原话>` 引用标注 (不是丢了)",
       "**不需要实时就别订阅**: room_watch 默认关, 订阅后每条人话都真的花你一轮 —— 只想看一眼就 room_read",
       "**答案写在 chat_reply 里, 不是写在备注里**: 交代写清做成了什么 · commit · ARTIFACT: <路径>, 取舍与遗留单列一段; 别把结论塞进 progress / need 的正文然后指望别人当它交付了",
     ]),
