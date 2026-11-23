@@ -7,6 +7,7 @@
 1. **频道和帖子都是 room**, 类似 Slack 的 channel 和 thread。
    - 频道 room id = chat:<topic_id>, kind = channel。账本一行就是频道里的一个顶层帖子。
    - 帖子 room id = chat:opk…, kind = topic-post。账本是这个帖子下的评论。
+   - graph 里两者都是普通 room 节点, 不画容器/包含关系; 帖子 room 的 host 默认也是所属频道 room 的成员 (成员关系表达归属)。
 2. **帖子 room 在帖子第一次被 @ 时诞生 (方案 i)**。这时 topic_at_bot 事件和原生帧配上对, 才拿得到帖子的 opk 群 id。诞生之前, 这个帖子下的评论都记在频道 room 里: 那一行带 post 字段, 指向根帖。
 3. **每个频道 room、每个帖子 room 各有一个 monitor** (原来的 judge 改名而来)。
    - 是 room 成员, 有连续会话, 可以自己 handoff。
@@ -56,6 +57,7 @@
   - 评论 (topic_reply_event): 这个帖子已经配上 opk 的 → 帖子 room 的一行人话; 还没配上的 → 频道 room 的一行人话 (带 post);
   - topic_at_bot: 原生帧照旧进帖子 room (点名 host)。原生帧没到的兜底: 如果帖子已配对, 写进帖子 room; 没配对就写频道 room 并标 mention:"bot"。
 - **配对**: learnChannelPost 同时记下 post_id ↔ opk ↔ topic_id (channel.ts:760 那一刻三个 id 都在手里)。channel-posts.json 的值从 topic_id 扩成 {channel, post}, 读侧兼容旧格式 (只有 topic_id 的字符串)。
+- **帖子 room 诞生**: 被点名成为帖子 room host 的管家默认同时加入所属频道 room —— 成员关系表达归属, 不靠 graph 容器; 这些成员一般不在频道 room 里说话。
 - **出站**:
   - 频道 room 一律 send_post 发新帖;
   - 帖子 room 一律 send_reply, 评论到根帖下面。
@@ -70,7 +72,7 @@
 - **room 类型**: shared/room-view.ts:53 KIND_BY_PREFIX 不再靠前缀猜。频道 / 帖子的 kind 由 channel-posts 映射在读的时候算出来 (buildRoomFact 现算, 不落账本)。RoomFact 加 channel?: {id, name} 和 rootPost?。
 - **/api/world**: 帖子 room 带 channel 指针。
 - **web/chat.js graphModel**:
-  - 频道 room 是普通 room 节点; 它的帖子 room 用父子关系挂在下面: 外面套一个圆角框, 布局时加聚拢力, 可以折叠成一个频道节点。
+  - 频道 room 与帖子 room 都是普通 room 节点, **不画容器/父子包含关系**; 帖子 room 的归属由 channel 指针表达 (节点上带频道标注或弱连线即可), 不做聚拢/折叠布局。
   - monitor 画成单独的节点样式, 用虚线连到它所在的 room; 不戴 host 礼帽, 不算关联。
 
 ## 3. 验收
@@ -82,7 +84,7 @@
   - monitor 调发言类工具被拒 (含 REPL 下钻);
   - 帖子没配对 / 已配对时, 入站分别落到哪个 room;
   - 出站频道 → send_post、帖子 → send_reply。
-- typecheck + build + 相关单测全绿。按 CLAUDE.md 截图核对 graph 的频道容器和 monitor 节点。
+- typecheck + build + 相关单测全绿。按 CLAUDE.md 截图核对 graph 的频道/帖子 room 节点 (普通节点, 无容器) 与 monitor 节点。
 - 真机: 测试频道里各发一次 没 @ 的新帖、@ 机器人的帖子、没 @ 的评论, 核对落到的 room、monitor 的判决行、出站形态。把 monitor 的 pane 杀掉, 核对人话不投递、pane 重生后补投。
 - CHANGELOG [Unreleased]: Removed 写 room_transfer 和一次性判官, Added 写 monitor 与频道 / 帖子 room。都是 **BREAKING**。
 
