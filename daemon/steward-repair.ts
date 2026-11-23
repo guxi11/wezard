@@ -7,9 +7,10 @@
 //   ② 任何 room 里属于**别的 room** 的类实例成员请出去, 换成本 room 的实例 (没有就领号新开);
 //   ③ 其余 room 一个字节都不动 (dhtpm 群的 OliveBrown-1 原样留着)。
 import { DAEMON, applyOp, leaveOps, whoKey, type RoomOp, type RoomState, type Who } from "../shared/room.js";
+import { instanceName } from "./classes.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { localManifestation } from "./steward.js";
-import { identityOf, type WizardStore } from "./wizard.js";
+import { identityOf, type WizardRecord, type WizardStore } from "./wizard.js";
 
 export interface StewardRepairResult {
   /** 改写的绑定条数 (实例名 → 类名)。 */
@@ -20,6 +21,8 @@ export interface StewardRepairResult {
   left: Array<{ room: string; target: string }>;
   /** 补进来的 (room, 本 room 的实例 target)。 */
   joined: Array<{ room: string; target: string }>;
+  /** 撞号的实例记录改了序号 (from → to)。 */
+  renamed: Array<{ target: string; from: string; to: string }>;
 }
 
 /** 绑定里可能出现的「实例名 → 类名」改写表: 每条带序号的记录, 它的身份是一个类。 */
@@ -60,6 +63,29 @@ export const foreignClassMembers = (
   return out;
 };
 
+/** 同一个类里**撞号**的实例记录 (每组留身份锚点那条, 其余是坏数据) —— 撞号的后果是两个
+ *  不同 room 的实例同名 (人看到的就是「两边都叫 OliveBrown-1」)。 */
+export const duplicateInstanceRecords = (store: WizardStore | undefined): WizardRecord[] => {
+  const classes = store?.classes;
+  if (!store || !classes) return [];
+  const groups = new Map<string, WizardRecord[]>();
+  for (const rec of store.all()) {
+    if (rec.ordinal === undefined) continue;
+    const id = identityOf(rec);
+    if (!classes.get(id)) continue;
+    const key = id + "#" + rec.ordinal;
+    groups.set(key, [...(groups.get(key) ?? []), rec]);
+  }
+  const losers: WizardRecord[] = [];
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const sorted = list.slice().sort((a, b) =>
+      Number(a.target !== identityOf(a)) - Number(b.target !== identityOf(b)) || a.bornAt - b.bornAt || (a.target < b.target ? -1 : 1));
+    losers.push(...sorted.slice(1));
+  }
+  return losers;
+};
+
 /** 跑一遍自愈 (幂等)。写回走调用方的 room write (daemon 的 hub), 本期不手改任何 JSONL。 */
 export const repairStewardInstances = (a: {
   store: WizardStore | undefined;
@@ -74,7 +100,20 @@ export const repairStewardInstances = (a: {
   now?: () => number;
 }): StewardRepairResult => {
   const now = a.now ?? (() => Date.now());
-  const res: StewardRepairResult = { rebound: 0, rooms: 0, left: [], joined: [] };
+  const res: StewardRepairResult = { rebound: 0, rooms: 0, left: [], joined: [], renamed: [] };
+  // 撞号先改号 (记录本身留着: uid / 会话 / 房间成员都不动, 只把名字与序号纠正到下一个空号)。
+  for (const rec of duplicateInstanceRecords(a.store)) {
+    const id = identityOf(rec);
+    const cls = a.store!.classes!.get(id);
+    if (!cls) continue;
+    const used = a.store!.all().filter((w) => identityOf(w) === id && w.target !== rec.target).map((w) => w.ordinal ?? 0);
+    const ordinal = Math.max(cls.nextOrdinal, ...used.map((n) => n + 1));
+    const to = instanceName(cls.name, ordinal);
+    const from = rec.name;
+    a.store!.upsert(rec.target, { name: to, ordinal });
+    if (a.store!.classes!.get(id)!.nextOrdinal <= ordinal) a.store!.classes!.upsert(id, { nextOrdinal: ordinal + 1 });
+    res.renamed.push({ target: rec.target, from, to });
+  }
   const aliases = instanceAliases(a.store);
   if (aliases.length) res.rebound = a.rewriteBindings(aliases);
   for (const room of a.rooms) {

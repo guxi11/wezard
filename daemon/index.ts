@@ -2282,7 +2282,7 @@ const main = async (): Promise<void> => {
           return name ? (wizards.classes?.byName(name)?.id ?? "") : "";
         },
       });
-      if (rep.rebound || rep.rooms) classLog.info({ ...rep }, "steward instances repaired (per-room)");
+      if (rep.rebound || rep.rooms || rep.renamed.length) classLog.info({ ...rep }, "steward instances repaired (per-room)");
       // 换成实例的频道 room 若还没有 monitor, 这里补建 (帖子 room 的成员是频道管家, 不在这里)。
       for (const j of rep.joined) if (channelRoomOf(cfg, j.room)) ensureMonitor(j.room);
     } catch (e) { classLog.warn({ err: errText(e) }, "steward instance repair failed (不影响启动)"); }

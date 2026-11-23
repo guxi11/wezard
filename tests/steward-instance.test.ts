@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { ConfigSchema } from "../shared/config.js";
 import { applyOp, DAEMON, leaveOps, roomHost, whoKey, type RoomState } from "../shared/room.js";
 import { loadClassStore } from "../daemon/classes.js";
-import { identityWorkspaceOf, loadWizardStore } from "../daemon/wizard.js";
+import { identityWorkspaceOf, loadWizardStore, openInstance } from "../daemon/wizard.js";
 import { applyOnboarding, bindSteward, judgeOnboarding, loadOnboardingStore, rewriteStewardBindings } from "../daemon/onboarding.js";
 import { repairStewardInstances } from "../daemon/steward-repair.js";
 import { H, room as mkRoom, uid, W } from "./room-fixture.js";
@@ -78,6 +78,16 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const byClass = judgeOnboarding(store, "chat:wrN4", { kind: "names", names: ["OliveBrown"] });
   assert.equal((byClass as { name: string }).name, "OliveBrown", "类名 → 类名");
   assert.equal((byClass as { classId?: string }).classId, "chat:wrD");
+
+  // 存量类的 nextOrdinal 落后于已用序号 (现场就是 1): 领号必须跳过, 否则又造一个同名实例。
+  const wsZ = join(dir, "zedws");
+  mkdirSync(wsZ, { recursive: true });
+  classes.create({ id: "chat:wrZ", bot: "", name: "Zed", role: "steward", workspace: wsZ, nextOrdinal: 1 });
+  store.upsert("chat:wrZ", { identity: "chat:wrZ", ordinal: 1, name: "Zed-1", kind: "steward", workspace: wsZ });
+  const zt = openInstance(store, "chat:wrNEWZ", "chat:wrZ")!;
+  assert.equal(store.get(zt)!.name, "Zed-2", "跳过已用序号 (不发第二个 Zed-1)");
+  assert.equal(store.get(zt)!.ordinal, 2);
+  assert.equal(classes.get("chat:wrZ")!.nextOrdinal, 3);
 }
 
 // ── ④ 既有错误绑定的自愈 (幂等) ─────────────────────────────────────
@@ -94,6 +104,10 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const S1 = W(store.get("chat:wrD")!.uid!);
   const M = W(uid(9));
   cfg.wrc.channel.steward = { wrCH: "OliveBrown-1" };   // 现场那种错绑定 (频道表 + 实例名)
+
+  // 撞号的坏数据: 另一个 room 里有条 ordinal 也是 1 的实例 (现场就是这么来的)。
+  store.upsert("chat:wrDUP#OliveBrown-1", { identity: "chat:wrD", ordinal: 1, name: "OliveBrown-1", kind: "steward", workspace: ws });
+  const DUP = W(store.get("chat:wrDUP#OliveBrown-1")!.uid!);
 
   const dhtpm: RoomState = mkRoom("chat:wrD", [S1]);
   const ch: RoomState = mkRoom("chat:wrCH", [S1]);
@@ -116,13 +130,16 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   });
 
   const r1 = run();
+  assert.deepEqual(r1.renamed.map((x) => x.to), ["OliveBrown-2"], "撞号的实例记录先改号 (不再有两条 OliveBrown-1)");
+  assert.equal(store.get("chat:wrDUP#OliveBrown-1")!.name, "OliveBrown-2");
+  assert.equal(store.get("chat:wrDUP#OliveBrown-1")!.ordinal, 2);
   assert.equal(r1.rebound, 1, "绑定里的实例名改回类名");
   assert.equal(cfg.wrc.channel.steward.wrCH, "OliveBrown");
   assert.equal(r1.rooms, 1, "只修错的那个 room");
   assert.deepEqual(r1.left, [{ room: "chat:wrCH", target: "chat:wrD" }], "把 dhtpm 的实例请出去");
   assert.equal(r1.joined.length, 1);
   const localTarget = r1.joined[0]!.target;
-  assert.equal(localTarget, "chat:wrCH#OliveBrown-2", "建本 room 的实例 (序号 2)");
+  assert.equal(localTarget, "chat:wrCH#OliveBrown-3", "建本 room 的实例 (撞号那条占了 2)");
   const local = W(store.get(localTarget)!.uid!);
   assert.equal(store.get(localTarget)!.identity, "chat:wrD");
   assert.equal(ch.members.has(whoKey(S1)), false, "频道 room 里没有 OliveBrown-1");
@@ -141,7 +158,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   assert.equal(r2.rooms, 0);
   assert.deepEqual(r2.left, []);
   assert.equal(writes.length, before, "第二遍零写入");
-  assert.equal(classes.get("chat:wrD")!.nextOrdinal, 3, "没有多领号");
+  assert.equal(classes.get("chat:wrD")!.nextOrdinal, 4, "没有多领号");
   assert.equal(dhtpm.members.has(whoKey(S1)), true);
 }
 

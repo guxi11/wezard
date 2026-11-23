@@ -245,7 +245,14 @@ export const openInstance = (
   if (!cls) return undefined;
   const hit = store.all().find((w) => identityOf(w) === classId && baseOfKey(w.target) === base);
   if (hit) return hit.target;
-  const ordinal = store.classes!.allocOrdinal(classId);
+  // 存量类的 nextOrdinal 可能落后于已用序号 (迁移推不出来时落的是 1): 绝不发一个已经用掉的号,
+  // 否则会造出两个 "OliveBrown-1" (人 2026-11-23 现场就是这么来的)。
+  const usedMax = store.all().filter((w) => identityOf(w) === classId).reduce((n, w) => Math.max(n, w.ordinal ?? 0), 0);
+  let ordinal = store.classes!.allocOrdinal(classId);
+  if (ordinal <= usedMax) {
+    ordinal = usedMax + 1;
+    if (store.classes!.get(classId)!.nextOrdinal <= ordinal) store.classes!.upsert(classId, { nextOrdinal: ordinal + 1 });
+  }
   const name = instanceName(cls.name, ordinal);
   const taken = new Set(store.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)).filter(Boolean));
   const target = keyOf(base, uniqueTag(name, taken));
