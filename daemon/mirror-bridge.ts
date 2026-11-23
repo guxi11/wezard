@@ -1649,6 +1649,12 @@ const paneRunsShell = async (target: string): Promise<boolean> => {
   return r.ok && SHELL_RE.test(r.stdout.trim());
 };
 
+/** 没有绑定时 injectText 的判词。gone = 「重试也贴不进去」(会话真没了): 只有既没有绑定、
+ *  也不在出生窗口时才算。出生窗口 (newSession / cloneSession 还没 attach) 里稍后就有绑定,
+ *  报 gone 会让 room 泵给提问者写一条假的「没有会话 (已被结束)」—— 新群引导现场踩过。 */
+export const unattachedVerdict = (hasBinding: boolean, birthing: boolean): { ok: false; retryable: true; reason: string; gone?: true } =>
+  ({ ok: false, retryable: true, reason: "no mirror attached for target", ...(hasBinding || birthing ? {} : { gone: true as const }) });
+
 /** pane 还在吗 —— 三态。tmux 明确报「没有这个 pane / 没有 server」才算 `gone`; 超时
  *  (server 卡住) 和「问不出来」一律 `unknown`。把后者当 `gone` 就会凭空重生一个 pane ——
  *  而重生要换掉整个会话, 代价远大于「这一条晚一点到」: 2026-10-14 实测 7 分钟内重生 3 次,
@@ -5170,6 +5176,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 已 spawn、还没 attach 的 pane: 分身要先说开场白、等分叉文件才能绑定, 这段里它在
   // tmux 里活着却不在任何绑定上 —— 孤儿清扫必须认得它, 不能只靠进程年龄宽限。
   const spawningPanes = new Set<string>();
+  // 正在出生 (newSession / cloneSession 还没 attach) 的 target: 这段里 store 还没有绑定,
+  // injectText 的「no mirror attached」不能算 gone —— gone 的语义是「重试也贴不进去」,
+  // 而出生窗口只是还没生出来。room 泵会把 gone 写成一条进群的「没有会话 (已被结束)」诊断:
+  // 新群引导的 guide 先落账人话再起 pane, 泵在这几百毫秒里探到 gone 就误报了 (2026-11-23 现场)。
+  const birthInFlight = new Map<string, number>();
+  const beginBirth = (target: string): void => { birthInFlight.set(target, (birthInFlight.get(target) ?? 0) + 1); };
+  const endBirth = (target: string): void => {
+    const n = (birthInFlight.get(target) ?? 0) - 1;
+    if (n > 0) birthInFlight.set(target, n); else birthInFlight.delete(target);
+  };
+  const birthing = (target: string): boolean => (birthInFlight.get(target) ?? 0) > 0;
   const sidsClaimedByOthers = (principal: string): Set<string> => {
     const s = new Set<string>(inFlightSids);
     // 空白备用池里的会话 (以及刚被领走、attach 还没落定的那几秒) 同样不能认领:
@@ -5976,7 +5993,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return resumedStewardSpec(cfg, a.target, backendForPath(a.jsonlPath).name, a);
   };
 
-  const newSession = async (
+  const newSessionOnce = async (
     target: string,
     windowName?: string,
     opts?: {
@@ -6117,6 +6134,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     afterSpawn();
     return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning, effort: r.effort };
   };
+  /** 整段出生都记在 birthInFlight 上: 期间没有绑定, 但这不等于 gone (见那里的注释)。 */
+  const newSession: typeof newSessionOnce = async (target, windowName, opts) => {
+    beginBirth(target);
+    try { return await newSessionOnce(target, windowName, opts); } finally { endBirth(target); }
+  };
 
   // ── Clone ───────────────────────────────────────────────────────────
   // 分身 = `--resume <父 sid> --fork-session` 起的新 pane: CLI 把父亲的 transcript
@@ -6171,7 +6193,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return undefined;
   };
 
-  const cloneSession = async (args: {
+  const cloneSessionOnce = async (args: {
     parent: string;
     target: string;
     windowName?: string;
@@ -6301,6 +6323,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
     afterSpawn();
     return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true, model: r.model, modelWarning: r.modelWarning, effort: r.effort };
+  };
+  /** 分叉到 attach 之间同样是出生窗口 (store 里还没有这个 target 的绑定)。 */
+  const cloneSession: typeof cloneSessionOnce = async (args) => {
+    beginBirth(args.target);
+    try { return await cloneSessionOnce(args); } finally { endBirth(args.target); }
   };
 
   /** 一个会话此刻的硬事实 —— whoami / 交接判断要用的那几个数。 */
@@ -7818,8 +7845,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!permission()) return denied;
       const a = byTarget.get(target) ?? (await restoreFromStore(target, undefined, permission));
       if (!permission()) return denied;
-      // A missing binding cannot recover on retry; let receipts escalate.
-      if (!a) return { ok: false, retryable: true, reason: "no mirror attached for target", ...(deps.store.get(target) ? {} : { gone: true }) };
+      // A missing binding cannot recover on retry; let receipts escalate. 出生窗口例外 (unattachedVerdict)。
+      if (!a) return unattachedVerdict(!!deps.store.get(target), birthing(target));
       if (opts?.handoff && !(await verifyClearContext(target, opts.handoff))) return { ok: false, retryable: false, reason: "original cleared CLI process/session changed; handoff carry withheld" };
       const sid = a.sessionId;
       const generation = a.injectGen ?? 0;

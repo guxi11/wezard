@@ -26,8 +26,8 @@ console.log('workflow physical transport: guard after buffer load and before Ent
 
 // Real birth functions: revoke while tmux creation is awaiting, before binding
 // or fork bootstrap. Only the newly born empty pane is eligible for cleanup.
-const nsStart=source.indexOf('  const newSession = async ('),nsEnd=source.indexOf('  // ── Clone',nsStart);
-const nsCode=ts.transpileModule(source.slice(nsStart,nsEnd)+'\nreturn newSession;',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
+const nsStart=source.indexOf('  const newSessionOnce = async ('),nsEnd=source.indexOf('  // ── Clone',nsStart);
+const nsCode=ts.transpileModule(source.slice(nsStart,nsEnd)+'\nreturn newSessionOnce;',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
 let birthValid=true,bound=0,spawnCalls=0;const killed=[];
 const birthEnv={spawningPanes:new Set(),afterSpawn(){},windowLabel:(a,b)=>b||a,pushProjectInfo(){},createdAck:()=>'created',byTarget:new Map(),deps:{store:{get:()=>undefined}},chatCwdFallback:()=>({}),expandHome:s=>s,expandedDefaultCwd:'/tmp',baseOfKey:s=>s,
  resolveCliBackend:()=>({name:'claude'}),newStewardSpec:()=>({}),randomUUID:()=> 'fresh',inFlightSids:new Set(),cfg:{wrc:{}},
@@ -36,8 +36,8 @@ const birthEnv={spawningPanes:new Set(),afterSpawn(){},windowLabel:(a,b)=>b||a,p
 const newSession=new Function(...Object.keys(birthEnv),nsCode)(...Object.values(birthEnv));
 birthValid=false;assert.equal((await newSession('reserved','reserved',{guard:()=>birthValid})).ok,false);assert.equal(spawnCalls,0);
 birthValid=true;assert.equal((await newSession('reserved','reserved',{guard:()=>birthValid})).ok,false);assert.equal(bound,0);assert.deepEqual(killed,[['kill-pane','-t','%new']]);assert.equal(birthEnv.inFlightSids.size,0);
-const csStart=source.indexOf('  const cloneSession = async'),csEnd=source.indexOf('  /** 一个会话此刻的硬事实',csStart);
-const csCode=ts.transpileModule(source.slice(csStart,csEnd)+'\nreturn cloneSession;',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
+const csStart=source.indexOf('  const cloneSessionOnce = async'),csEnd=source.indexOf('  /** 一个会话此刻的硬事实',csStart);
+const csCode=ts.transpileModule(source.slice(csStart,csEnd)+'\nreturn cloneSessionOnce;',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
 let bootExecuted=0,guardSeen=false;
 const cloneEnv={...birthEnv,byTarget:new Map([['parent',{sessionId:'parent',jsonlPath:'/tmp/parent.jsonl',runningCwd:'/tmp'}]]),existsSync:()=>true,dirname:()=>'/tmp',listJsonls:()=>new Set(),backendForPath:()=>({name:'claude'}),lastModel:()=>'',parseEffort:()=>undefined,rememberInject:()=>{},
  inject:async a=>{guardSeen=typeof a.guard==='function';if(a.guard&&!a.guard('paste'))return {ok:false,reason:'withdrawn'};bootExecuted++;return {ok:true};}};

@@ -2043,7 +2043,8 @@ const main = async (): Promise<void> => {
     };
     const channelGuideSpawning = new Set<string>();
     /** 未绑定频道的人话: 起 (或续) 引导化身, 人话落频道 room 交给它。会话冷启动在后台做 ——
-     *  人话先落账 (起 pane 慢不能丢话), 泵贴不进去会把它重生。 */
+     *  人话先落账 (起 pane 慢不能丢话); 出生窗口里贴不进去 (还没绑定), 泵会退成可重试,
+     *  起来后这里踢一脚泵立刻投, 不会写成「没有会话 (已被结束)」。 */
     const channelGuideTurn = (turn: ChannelGuideTurn): void => {
       const store = wizardStore();
       if (!store) return;
@@ -2058,6 +2059,7 @@ const main = async (): Promise<void> => {
           .then((r) => {
             if (!r.ok) { roomLog.warn({ guide: turn.guide, reason: r.reason }, "onboarding: 频道引导会话起不来 (人话照样落账, 泵会再试)"); return; }
             m.armCharter(turn.guide, turn.first ? renderGuideOpening() : renderGuideRetry(""));
+            hub.kick(); // 人话在这之前已落账: pane 一绑上就投, 不等 30s 重踢
           })
           .catch((err: unknown) => roomLog.warn({ guide: turn.guide, err: errText(err) }, "onboarding: 频道引导会话起不来"))
           .finally(() => channelGuideSpawning.delete(turn.guide));

@@ -15,7 +15,7 @@ const extract = (file: string, start: string, end: string, name: string) => {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
 };
-const creation = extract("daemon/mirror-bridge.ts", "  const newSession = async (", "  // ── Clone", "newSession");
+const creation = extract("daemon/mirror-bridge.ts", "  const newSessionOnce = async (", "  // ── Clone", "newSessionOnce");
 const clear = extract("daemon/index.ts", "    const clearForHandoff = (target:", "    /** 交接自己", "clearForHandoff");
 const handoff = extract("daemon/index.ts", "    const handoffSelf = async (self: string, brief: string):", "    http.register(\"POST /handoff\"", "handoffSelf");
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, wrc: { defaultCli: "codex" }, models: {
