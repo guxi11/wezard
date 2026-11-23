@@ -221,8 +221,9 @@ export const emptyRoom = (id: string): RoomState => ({
 
 const slotOfWho = (w: Who): Slot => whoKey(w);
 
-/** 一条 msg 行开出的 duty (fold 与 judge 共用)。 */
-export const dutiesOpenedBy = (row: MsgRow): Array<Omit<Duty, "key">> => {
+/** 一条 msg 行开出的 duty (fold 与 judge 共用)。reAuthorOf = 按 msgId 查作者 (applyOp 传 byId 查询),
+ *  只给 activate 判决行定 asker 用: 那条 duty 的源头是 re 的原话人, 不是发判决的 monitor (查不到回落 row.author)。 */
+export const dutiesOpenedBy = (row: MsgRow, reAuthorOf?: (id: string) => Who | undefined): Array<Omit<Duty, "key">> => {
   const base = { msg: row.id, seq: row.seq, asker: row.author, at: row.at,
     ...(row.after?.length ? { after: row.after } : {}), ...(row.planId ? { planId: row.planId } : {}), ...(row.for ? { for: row.for } : {}) };
   if (row.kind === "ask" || row.kind === "task")
@@ -235,7 +236,9 @@ export const dutiesOpenedBy = (row: MsgRow): Array<Omit<Duty, "key">> => {
   // monitor 的 activate: 为 re 里那条人话在 to 名下开 duty (人话自己不再开 host 槽位)。to 为空 = 判定不回应。
   if (row.kind === "trigger" && row.sys === "activate") {
     const target = row.to?.[0];
-    return target && target.kind === "wizard" ? [{ ...base, msg: row.re?.[0] ?? row.id, slot: slotOfWho(target), kind: "human" as const }] : [];
+    if (!(target && target.kind === "wizard")) return [];
+    const asker = (row.re?.[0] ? reAuthorOf?.(row.re[0]) : undefined) ?? row.author;
+    return [{ ...base, asker, msg: row.re?.[0] ?? row.id, slot: slotOfWho(target), kind: "human" as const }];
   }
   // 绑定 room 里的人话: 点名开给被点名者; 交给 monitor 的不开 duty; 其余开给 host。
   if (row.author.kind === "human" && row.kind === "say" && isBoundRoom(row.room) && row.origin !== "migrate") {
@@ -293,7 +296,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
       s.msgs.push(op);
       s.byId.set(op.id, op);
       s.everMembers.set(whoKey(op.author), op.author);
-      for (const d of dutiesOpenedBy(op)) {
+      for (const d of dutiesOpenedBy(op, (id) => s.byId.get(id)?.author)) {
         const key = dutyKey(d.msg, d.slot);
         if (!s.duties.has(key)) s.duties.set(key, { ...d, key });
       }
@@ -707,6 +710,13 @@ const statusTag = (m: MsgRow): string => (m.status ? " [" + m.status + "]" : "")
  *  新行只存原话, 剥一遍是空操作。只有 inbound 行带过尾巴, 别的来源的 text 原样返回。 */
 export const rowText = (m: Pick<MsgRow, "text" | "origin">): string => (m.origin === "inbound" ? stripLegacyTail(m.text) : m.text);
 export const renderMsgLine = (m: MsgRow, n: RenderNames, max = 500): string => {
+  // monitor 的 activate 判决是系统行为, 不是 monitor 发言 (§2.2): 输出系统形态, 不以 monitor 名义出现。
+  // 只精确匹配 sys:"activate"; 其他 trigger (after-wake / overdue / 定时任务) 照旧按消息行渲染 (author 是 wezard, 带正文)。
+  if (m.kind === "trigger" && m.sys === "activate") {
+    const re = m.re?.length ? " (re " + m.re.join(",") + ")" : "";
+    const targets = (m.to ?? []).filter((t) => t.kind === "wizard").map(n.nameOf).join(", ");
+    return "[" + m.id + "] [" + n.nameOf(DAEMON) + "] monitor 判决: " + (targets ? "交给 " + targets + " 回应" : "不回应") + re;
+  }
   const to = m.to?.length ? " → " + m.to.map(n.nameOf).join(", ") : "";
   const re = m.re?.length ? " (re " + m.re.join(",") + ")" : "";
   const body = rowText(m).replace(/\s+/g, " ").trim();

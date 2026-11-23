@@ -1,6 +1,6 @@
 // 频道 / 帖子 room 的 monitor 纯核心 (§2.1): 成员角色、host 跳过、人话只激活、activate 行。
 import assert from "node:assert/strict";
-import { applyOp, hostOf, mirrors, openDuties, roomHost, say as _noop } from "../shared/room.js";
+import { applyOp, DAEMON, dutiesOpenedBy, hostOf, mirrors, openDuties, renderMsgLine, roomHost, say as _noop, type MsgRow, type Who } from "../shared/room.js";
 import { H, rejects, room as mkRoom, say, uid, W } from "./room-fixture.js";
 
 const A = W(uid(1)), B = W(uid(2)), M = W(uid(9)), H1 = H("u1");
@@ -66,7 +66,7 @@ const withMonitor = () => {
   assert.equal(ds[0]!.msg, human.id, "duty 挂在那条人话上, 不是 activate 行");
   assert.equal(ds[0]!.slot, "wizard:" + B.id);
   assert.equal(ds[0]!.kind, "human");
-  assert.deepEqual(ds[0]!.asker, M);
+  assert.deepEqual(ds[0]!.asker, H1, "duty 归属原话人, 不是发判决的 monitor");
   applyOp(s, { op: "seen", at: 3_000, room: s.id, who: B, seq: v.seq });
   const done = say(s, { author: B, kind: "reply", re: [human.id], status: "done", statusGiven: true, text: "我来" });
   assert.deepEqual(done.closes, [ds[0]!.key]);
@@ -116,4 +116,43 @@ const withMonitor = () => {
   assert.deepEqual(row.wake, [A.id]);
   assert.equal(row.monitor, undefined);
   assert.deepEqual(openDuties(s).map((d) => d.slot), ["host"]);
+}
+
+// ⑪ 渲染: activate 判决行走系统形态 (不以 monitor 名义), 其他 trigger 照旧
+{
+  const names = { nameOf: (w: Who) => w.kind === "wizard" ? "." + w.id : w.kind === "human" ? w.id : "wezard", roomLabel: (r: string) => r };
+  const s = withMonitor();
+  const human = say(s, { author: H1, kind: "say", text: "谁来接" });
+  const v = say(s, { author: M, kind: "trigger", sys: "activate", re: [human.id], to: [B], text: "" });
+  const line = renderMsgLine(v, names);
+  assert.match(line, /\[wezard\] monitor 判决: 交给 \.w/);
+  assert.ok(line.includes("(re " + human.id + ")"), "带 re 原话 id");
+  assert.ok(!line.includes("." + M.id), "不以 monitor 名义出现");
+  assert.equal(mirrors(v), false, "activate 判决行不进企微");
+
+  const human2 = say(s, { author: H1, kind: "say", text: "随便说说" });
+  const none = say(s, { author: M, kind: "trigger", sys: "activate", re: [human2.id], text: "" });
+  const noneLine = renderMsgLine(none, names);
+  assert.ok(noneLine.includes("monitor 判决: 不回应"), noneLine);
+  assert.ok(!noneLine.includes("." + M.id));
+
+  const wakeRow: MsgRow = {
+    op: "msg", at: 1, room: s.id, id: "chat:wrG#99", seq: 99, author: DAEMON, ord: 0, speak: "daemon",
+    kind: "trigger", text: "[wezard] 到点了", wake: [], origin: "daemon", sys: "after-wake",
+  };
+  assert.equal(renderMsgLine(wakeRow, names), "[chat:wrG#99] wezard: [wezard] 到点了", "其他 trigger 原样");
+}
+
+// ⑫ re 原话查不到时 asker 回落行作者 (旧账乱序保护); msg / slot / kind 不变
+{
+  const s = withMonitor();
+  const human = say(s, { author: H1, kind: "say", text: "谁来接" });
+  const v = say(s, { author: M, kind: "trigger", sys: "activate", re: [human.id], to: [B], text: "" });
+  const [noLookup] = dutiesOpenedBy(v);
+  assert.deepEqual(noLookup!.asker, M);
+  const [d] = dutiesOpenedBy(v, () => undefined);
+  assert.deepEqual(d!.asker, M);
+  assert.equal(d!.msg, human.id);
+  assert.equal(d!.slot, "wizard:" + B.id);
+  assert.equal(d!.kind, "human");
 }
