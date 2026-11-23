@@ -1131,6 +1131,14 @@
       '<span class="gs-dq"><b>#' + d.seq + '</b> ' + esc(safeName(d.askerName || '?')) + ' · ' + esc(DUTY_KIND[d.kind] || d.kind) + (d.last ? ' · ' + esc(d.last.status) : '') + ' · ' + esc(fmtAgo(d.at)) + '</span>' +
       (d.summary ? '<span class="gs-ds">' + esc(d.summary) + '</span>' : '') + '</button>';
   };
+  // <group-break>: 成员栏 human / wizard 两组之间的分割线落在哪一行 (= 第一个 wizard 的下标); 两组有一组为空就没有分割线 (-1)。
+  // 人在前、wizard 在后 (见排序), 所以只要首位是人、且后面有 wizard, 才有「两侧」。
+  var groupBreak = function (ordered) {
+    var firstWz = -1;
+    ordered.forEach(function (m, i) { if (firstWz < 0 && m.kind !== 'human') firstWz = i; });
+    return firstWz > 0 ? firstWz : -1;
+  };
+  // </group-break>
   var renderGraphSide = function () {
     if (!gside) return;
     if (!D.roomId || S.pane === 'plan' || !(D.members || []).length) { gside.hidden = true; gside.innerHTML = ''; S.gsSheet = false; gside.classList.remove('sheet'); return; }
@@ -1148,8 +1156,7 @@
       if (a.kind === 'human') return (b.lastAt || 0) - (a.lastAt || 0) || (a.name < b.name ? -1 : 1);
       return wzRank(a) - wzRank(b) || (b.lastAt || 0) - (a.lastAt || 0) || (a.name < b.name ? -1 : 1);
     });
-    var firstWz = -1;
-    ordered.forEach(function (m, i) { if (firstWz < 0 && m.kind !== 'human' && i > 0) firstWz = i; });
+    var firstWz = groupBreak(ordered);
     var rows = ordered.map(function (m, idx) {
       // 成员视图里的 id 是 uid / userid; 视角与点击用的是节点 id (target / uid:… / human:…)。
       var nid = nodeIdOf({ kind: m.kind, id: m.id }), me = isRoleId(nid), nd = nodeOf(nid), st = memberState(m, nd), cold = memberCold(m, nd);
