@@ -1,29 +1,22 @@
 // 频道（topic）桥: SDK 1.0.7 的 dispatch 表里没有 aibot_topic_event_callback，
-// 这一层在 SDK 丢掉帧之前接住它，把「频道里 @ 了机器人」翻译成一条普通的文本消息
-// 交给 inbound / mirror；出站再把 topic_id 的 markdown 换成频道的 send_post /
-// send_reply。群聊 / 单聊的路径完全不变。
+// 这一层在 SDK 丢掉帧之前接住它。
 //
-// 频道里没有被 @ 的新帖子 / 新回复也会进来（topic_event / topic_reply_event）。
-// 这些不直接答，先交给每个 bot 的「判官」：判官是一个只读最近几条消息的轻量 wizard，
-// 只回 JSON {respond, reason}；respond 才把原帖交给主 wizard。
-// P7-S3: strict 频道 (chatPolicy/首见判定) 里判官多一职 —— 无人点名的人话是否开义务、
-// 落给谁 (respond 即开义务, rewrite 句首点名即落人); 出站终句不再包装成评论 (sendPost)。
-import { spawn } from "node:child_process";
+// 2026-11-23 起频道 / 帖子都是 room (docs/room/channel-monitor.md):
+// - 频道 room id = chat:<topic_id>; 帖子 room id = chat:<opk…> (原生帧的 chatid)。
+// - 没被 @ 的新帖 / 还没配上 opk 的评论 → 频道 room 的一行人话 (带 post);
+//   配上 opk 之后的评论 → 帖子 room 的一行人话。
+// - @ 机器人的原生帧照旧由 inbound 送进帖子会话 (也就是帖子 room 的那条人话);
+//   同一句的 topic_at_bot 事件只用来学配对 (post_id ↔ opk ↔ topic_id) 与兜底。
+// - 判官 (一次性 JSON 判定) 已删: 每个 room 一个常驻 monitor 成员, 由它决定激活谁
+//   (shared/room.ts 的 activate 行); 这里只负责把话落进对的 room。
 import { join } from "node:path";
-import { generateReqId, type TextMessage, type WSClient, type WsFrame } from "@wecom/aibot-node-sdk";
+import { generateReqId, type WSClient, type WsFrame } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
-import { pickTier } from "../shared/model-tiers.js";
-import { resolveCliBackend } from "../shared/cli-backends.js";
-import { augmentedPath } from "../shared/exec-path.js";
-import { baseOfKey, keyOf, sameBot } from "../shared/session-label.js";
 import { sleep } from "../shared/std.js";
-import { identityOf, wizardStore } from "./wizard.js";
-import { stewardIdentityOf } from "./steward.js";
-import { learnChannelPost } from "./channel-posts.js";
+import { learnChannelPost, postBaseOf } from "./channel-posts.js";
 import { expandHome } from "../shared/paths.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
-import { formatChannelContext, pickQuery, wantsHistory, withoutMsg } from "./channel-context.js";
 
 const TOPIC_EVENT = "aibot_topic_event_callback";
 const CMD_POST = "aibot_topic_send_post";
@@ -33,34 +26,18 @@ const CMD_GET_REPLIES = "aibot_topic_get_reply_list";
 const CMD_SEARCH = "aibot_topic_search";
 const CMD_SEARCH_RESULT = "get_search_result";
 
-
-interface TopicCtx { topicId: string; postId: string; asker: string }
-
 /** 已知 topic_id。sendMessage 用它区分「频道」和普通群 chatid。 */
 const topics = new Set<string>();
 /** 把 topic_id 登记为已知频道 (onTopic 里自动做; 导出给测试 / 显式注册面用)。 */
 export const registerTopic = (topicId: string): void => { topics.add(topicId); };
-/** 入站事件 msgid → 它所属的帖子；replyStream 用 streamId 找回来。 */
-const byStream = new Map<string, TopicCtx>();
-/** topic 上最近一条帖子，主动消息尽量挂成它的评论。 */
-const lastPost = new Map<string, string>();
 /** 频道里最近一个说话的人；审批卡改投他的私聊，频道不支持按钮卡片。 */
 const lastAsker = new Map<string, string>();
 /** 事件可能重投；msgid 去重表有界。 */
 const seen = new Set<string>();
-/** 已经交给主 wizard 的 post / reply；判官与直接 @ 可能同时到，谁先到谁答。 */
-const dispatched = new Set<string>();
-/** post_id → 是否收到过 topic_at_bot。只有被 @ 过的帖子才能用 send_reply 评论；
- *  未被 @ 的新帖只能 send_post 主动发（官方“回复被@的内容” vs “主动发内容”）。 */
-const replyOk = new Map<string, boolean>();
-/** 判官串行：同一 topic 一次只跑一个判断，一次 -p 进程更不该并发抢占。 */
-const judgeQueues = new Map<string, Promise<unknown>>();
 /** 企微原生入站已带上的频道 @ (aibot_msg_callback, compat_info.source=channel): asker → 到达记录。
- *  企微现在把频道里 @ 机器人的话**两路**同时推: 原生帧 (chatid = 该帖子自己的 opk… 群 id) 与
- *  topic_at_bot 事件 (topic_id = 频道)。两路都投 = 同一句话由两个 wizard 各答一遍 —— 2026-11-17
- *  test1 频道实录: 帖子会话绑了管家, chat:<topic_id> 的默认会话也在答, 还经 lastPost 答进了别的帖子。
- *  原生帧由 inbound 记一笔, topic_at_bot 等一拍认领 (一帧只抵一个事件); 等不到 (企微没推原生帧)
- *  才由桥自己投 —— 兜底不丢话。 */
+ *  企微把频道里 @ 机器人的话**两路**同时推: 原生帧 (chatid = 该帖子自己的 opk… 群 id) 与
+ *  topic_at_bot 事件 (topic_id = 频道)。原生帧由 inbound 记一笔, topic_at_bot 等一拍认领
+ *  (一帧只抵一个事件); 等不到 (企微没推原生帧) 才由桥自己落一行, 兜底不丢话。 */
 const nativeFrames = new Map<string, Array<{ at: number; chat: string }>>();
 const NATIVE_WAIT_MS = 3000;
 /** 原生帧可能比事件先到: 认领窗口往前放这么多。 */
@@ -134,7 +111,7 @@ const backfilled = new Set<string>();
 const ensureStore = (cfg: Config): ChannelStore | undefined => {
   const h = cfg.wrc.channel.history;
   if (!h.enabled) return undefined;
-  const key = `${cfg.daemon.stateDir}|${h.keepDays}|${h.maxMessages}`;
+  const key = cfg.daemon.stateDir + "|" + h.keepDays + "|" + h.maxMessages;
   if (!store || storeKey !== key) {
     store = new ChannelStore({
       dir: join(expandHome(cfg.daemon.stateDir), "channels"),
@@ -156,7 +133,7 @@ const atOf = (t: unknown): number => {
 
 const authorOf = (creator: any): string => {
   const c = creator ?? {};
-  return Number(c.type) === 1 ? `bot:${String(c.aibotid ?? "?").slice(0, 10)}` : String(c.userid ?? "user");
+  return Number(c.type) === 1 ? "bot:" + String(c.aibotid ?? "?").slice(0, 10) : String(c.userid ?? "user");
 };
 
 const postMsg = (p: any): ChannelMsg | undefined => {
@@ -173,10 +150,9 @@ const replyMsg = (r: any, postId: string): ChannelMsg | undefined => {
   return { id, kind: "reply", postId: String(r?.post_id ?? postId), at: atOf(r?.create_time), author: authorOf(r?.creator), text };
 };
 
-/** 最近消息里活跃的其他机器人 (§6 邻居感知): bot:<id> → 条数, 自己 (selfBot) 已剔除。
- *  判官 prompt 的 others 段与主 wizard 的注入上下文共用这一份聚合。 */
+/** 最近消息里活跃的其他机器人 (§6 邻居感知): bot:<id> → 条数, 自己 (selfBot) 已剔除。 */
 export const botAuthors = (msgs: Array<ChannelMsg | undefined>, selfBot = ""): Array<{ id: string; n: number }> => {
-  const self = selfBot ? `bot:${selfBot.slice(0, 10)}` : "";
+  const self = selfBot ? "bot:" + selfBot.slice(0, 10) : "";
   const n = new Map<string, number>();
   for (const m of msgs) {
     const a = m?.author ?? "";
@@ -189,7 +165,7 @@ export const botAuthors = (msgs: Array<ChannelMsg | undefined>, selfBot = ""): A
     .map(([id, count]) => ({ id, n: count }));
 };
 
-/** 记一条进本地缓存: 判官上下文 / 主 wizard 上下文 / read_channel 共用这一份。 */
+/** 记一条进本地缓存: read_channel / 回填共用这一份。 */
 const record = async (cfg: Config, topicId: string, msg: ChannelMsg | undefined): Promise<void> => {
   if (!msg) return;
   await ensureStore(cfg)?.append(topicId, msg);
@@ -205,14 +181,6 @@ const backfill = async (client: WSClient, cfg: Config, log: Logger, topicId: str
   const posts = await fetchRecent(client, topicId, h.mainPosts, log);
   for (const m of posts.map(postMsg).filter((x): x is ChannelMsg => !!x)) await s.append(topicId, m);
   log.info({ topicId, n: posts.length }, "channel history backfilled");
-};
-
-/** 判官 / 上下文要看的最近帖子: 本地够用就不打接口。 */
-const recentPosts = async (client: WSClient, cfg: Config, log: Logger, topicId: string, limit: number): Promise<ChannelMsg[]> => {
-  const local = (await ensureStore(cfg)?.recentPosts(topicId, limit)) ?? [];
-  if (local.length >= Math.min(limit, 3)) return local;
-  const posts = await fetchRecent(client, topicId, limit, log);
-  return posts.map(postMsg).filter((m): m is ChannelMsg => !!m);
 };
 
 interface ChannelDeps { client: WSClient; cfg: Config; log: Logger }
@@ -253,295 +221,32 @@ const searchChannel = async (d: ChannelDeps, topicId: string, query: string, lim
   return [...local, ...remote].slice(0, limit);
 };
 
-/** 主 wizard 的上下文: 当前线程 + 最近 + (这句话有指代时才) 搜索命中。
- *  入站帧的身份 (topic / post / msgid) 永远写在首行 —— 即使 history 关掉、没有历史可带，
- *  主 agent 也必须能指回原始消息。 */
-const contextFor = async (
-  d: ChannelDeps,
-  topicId: string,
-  postId: string,
-  triggerId: string | undefined,
-  text: string,
-  extra: { reason?: string; intent?: string; msgid?: string; selfBot?: string } = {},
-): Promise<string> => {
-  const h = d.cfg.wrc.channel.history;
-  // 触发这条上下文的回复 id 与线程根不同 (评论) 时一并带上: 目标 agent 要能指回
-  // 那一句评论, 而不只是它所属的帖子。
-  const replyId = triggerId && triggerId !== postId ? triggerId : "";
-  const id = { topicId, postId, ...(replyId ? { replyId } : {}), ...(extra.msgid ? { msgid: extra.msgid } : {}) };
-  const s = ensureStore(d.cfg);
-  if (!s) return formatChannelContext({ ...id, budget: h.contextChars });
-  const thread = withoutMsg(await s.thread(topicId, postId, h.mainReplies), triggerId);
-  const recent = withoutMsg(await s.recentPosts(topicId, h.mainPosts), triggerId);
-  const query = h.searchLimit > 0 && wantsHistory(text) ? pickQuery(text) : "";
-  const hits = query ? (await searchChannel(d, topicId, query, h.searchLimit)).filter((m) => m.id !== triggerId) : [];
-  // 邻居感知: 从同一批历史里聚合其他机器人 (自己剔除), 让主 wizard 知道谁也在场。
-  const bots = botAuthors([...thread, ...recent, ...hits], extra.selfBot ?? "");
-  return formatChannelContext({
-    ...id,
-    thread,
-    recent,
-    hits,
-    ...(bots.length ? { bots } : {}),
-    ...(query ? { query } : {}),
-    ...(extra.reason ? { reason: extra.reason } : {}),
-    ...(extra.intent ? { intent: extra.intent } : {}),
-    budget: h.contextChars,
-  });
-};
-
 const stamp = (ms: number): string => {
   const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return hh + ":" + mm;
 };
 
-const renderLines = (list: ChannelMsg[]): string => list.map((m) => `[${stamp(m.at)}] ${m.author}: ${clip(m.text, 400)}`).join("\n");
+const renderLines = (list: ChannelMsg[]): string => list.map((m) => "[" + stamp(m.at) + "] " + m.author + ": " + clip(m.text, 400)).join("\n");
 
 export interface ChannelReadReq { topic: string; query?: string; limit?: number; since?: number; until?: number }
 
 /** read_channel 的守护进程侧: 本地缓存优先, 搜不到 / 没缓存才问官方。 */
 export const readChannel = async (d: ChannelDeps, req: ChannelReadReq): Promise<{ ok: boolean; text: string }> => {
   const topicId = req.topic.replace(/^chat:/, "").trim();
-  if (!topicId) return { ok: false, text: "给一个频道: `chat:<topic_id>` 或裸 topic_id" };
+  if (!topicId) return { ok: false, text: "给一个频道: chat:<topic_id> 或裸 topic_id" };
   const limit = Math.min(Math.max(Number(req.limit ?? 20) || 20, 1), 100);
   const query = (req.query ?? "").trim();
   if (query) {
     const hits = await searchChannel(d, topicId, query, limit);
-    return { ok: true, text: hits.length ? `频道 ${topicId} · 搜「${query}」· ${hits.length} 条\n${renderLines(hits)}` : `频道 ${topicId} 没搜到「${query}」` };
+    return { ok: true, text: hits.length ? "频道 " + topicId + " · 搜「" + query + "」· " + hits.length + " 条\n" + renderLines(hits) : "频道 " + topicId + " 没搜到「" + query + "」" };
   }
   const local = (await ensureStore(d.cfg)?.slice(topicId, { ...(req.since !== undefined ? { since: req.since } : {}), ...(req.until !== undefined ? { until: req.until } : {}), limit })) ?? [];
   const list = local.length
     ? local
     : (await fetchRecent(d.client, topicId, Math.min(limit, 20), d.log)).map(postMsg).filter((m): m is ChannelMsg => !!m);
-  return { ok: true, text: list.length ? `频道 ${topicId} · ${list.length} 条\n${renderLines(list)}` : `频道 ${topicId} 没有读到消息 (没见过这个频道, 或还没缓存)` };
-};
-
-const emptyFrame = (): WsFrame => ({ headers: { req_id: "" } } as WsFrame);
-
-const serial = <T>(key: string, job: () => Promise<T>): Promise<T> => {
-  const prev = judgeQueues.get(key) ?? Promise.resolve();
-  const next = prev.then(job, job);
-  judgeQueues.set(key, next.catch(() => undefined).finally(() => {
-    if (judgeQueues.get(key) === next) judgeQueues.delete(key);
-  }));
-  return next;
-};
-
-// 判官的输出契约。respond=false 时 intent / rewrite 一律不采信 (不要编造改写)；
-// respond=true 时 rewrite 是给主 agent 的正文，缺失或为空就退回原帖。
-// 只有 respond 决定放不放行，intent / rewrite 再差也不影响这次放行。
-type Verdict = { respond: boolean; reason: string; intent?: string; rewrite?: string };
-
-/** 逐个 `{` 数括号取 JSON 对象 (跳过字符串里的括号)，比非贪婪正则可容下 rewrite 里的代码块。 */
-const jsonObjects = (text: string): string[] => {
-  const out: string[] = [];
-  for (let i = 0; i < text.length; i += 1) {
-    if (text[i] !== "{") continue;
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let j = i; j < text.length; j += 1) {
-      const c = text[j];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (c === "\\") esc = true;
-        else if (c === '"') inStr = false;
-      } else if (c === '"') inStr = true;
-      else if (c === "{") depth += 1;
-      else if (c === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          out.push(text.slice(i, j + 1));
-          i = j;
-          break;
-        }
-      }
-    }
-  }
-  return out;
-};
-
-const asText = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
-
-/** 字段容错: 只认字符串 (对象 / 数组当没写)，并按第一个非空别名取值 —— 模型多吐、少吐都不炸。 */
-const asField = (o: Record<string, unknown>, keys: string[]): string =>
-  keys.map((k) => asText(o[k])).find(Boolean) ?? "";
-
-/** respond 也容忍模型写成字符串 "true" / "false"。 */
-const asReply = (v: unknown): boolean | undefined =>
-  typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : undefined;
-
-export const parseVerdict = (text: string): Verdict | undefined => {
-  for (const b of jsonObjects(text).reverse()) {
-    try {
-      const o = JSON.parse(b) as Record<string, unknown>;
-      const respond = asReply(o.respond);
-      if (respond === undefined) continue;
-      const intent = asField(o, ["intent", "意图"]);
-      const rewrite = asField(o, ["rewrite", "rewritten", "instruction", "改写"]);
-      return {
-        respond,
-        reason: asField(o, ["reason", "理由"]),
-        ...(respond && intent ? { intent } : {}),
-        ...(respond && rewrite ? { rewrite } : {}),
-      };
-    } catch { /* 不是这一块 */ }
-  }
-  const plain = text.trim();
-  if (/^yes\b/i.test(plain)) return { respond: true, reason: plain.slice(0, 120) };
-  if (/^no\b/i.test(plain)) return { respond: false, reason: plain.slice(0, 120) };
-  return undefined;
-};
-
-/** 判官放行后交给主 agent 的正文: 改写优先, 原文永远可回溯。
- *  改写缺失 / 为空 / 与原文相同 → 原样用原帖, 改写这一层坏了也不丢消息。 */
-const bodyFor = (text: string, verdict: Verdict): string => {
-  const rewrite = verdict.respond ? (verdict.rewrite ?? "").trim() : "";
-  if (!rewrite || rewrite === text.trim()) return text;
-  return `${rewrite}\n——\n原帖：${text}`;
-};
-
-export interface JudgeDeps { cfg: Config; log: Logger }
-
-/** 判官是一次性判定, 不是一个住下来的会话: 一个 `-p` 进程进, stdout 出一行 JSON。
- *  不落会话 (--no-session-persistence)、不给工具 (--tools "")、不带 --settings /
- *  --session-id —— 判官不该在 projects/ 里留痕被当成可镜像的会话, 也不该出审批卡。 */
-export const runJudgeOnce = (deps: JudgeDeps, prompt: string): Promise<string | undefined> => {
-  const { cfg, log } = deps;
-  const backend = resolveCliBackend(cfg.wrc);
-  if (!backend.oneShotArgs) {
-    log.warn({ backend: backend.name }, "channel judge: backend has no one-shot mode");
-    return Promise.resolve(undefined);
-  }
-  const pick = pickTier(cfg, cfg.wrc.channel.judge.tier, {});
-  const args = backend.oneShotArgs(prompt, {
-    ...(pick.ok && pick.model ? { model: pick.model } : {}),
-    ...(pick.ok && pick.effort ? { effort: pick.effort } : {}),
-  });
-  const timeoutMs = cfg.wrc.channel.judge.timeoutMs;
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const proc = spawn(backend.bin, args, {
-      cwd: expandHome(cfg.wrc.cwd),
-      env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    let errTail = "";
-    let settled = false;
-    const finish = (text: string | undefined, why: string): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const ms = Date.now() - started;
-      if (text) log.info({ ms, tier: pick.ok ? pick.tier : undefined, model: pick.ok ? pick.model : undefined }, "channel judge ran");
-      else log.warn({ ms, why, bin: backend.bin, stderrTail: errTail.slice(-200) }, "channel judge: no verdict");
-      resolve(text);
-    };
-    const timer = setTimeout(() => {
-      proc.kill("SIGKILL");
-      finish(undefined, `timeout ${timeoutMs}ms`);
-    }, timeoutMs);
-    proc.stdout?.on("data", (c: Buffer) => { out = (out + c.toString("utf8")).slice(-8000); });
-    proc.stderr?.on("data", (c: Buffer) => { errTail = (errTail + c.toString("utf8")).slice(-800); });
-    proc.on("error", (e: Error) => finish(undefined, `spawn ${e.message}`));
-    proc.on("close", (code) => {
-      if (code !== 0) return finish(undefined, `exit ${code}`);
-      finish(out.trim() || undefined, "empty output");
-    });
-  });
-};
-
-const askJudge = async (deps: JudgeDeps, prompt: string): Promise<Verdict | undefined> => {
-  const text = await runJudgeOnce(deps, prompt);
-  if (!text) return undefined;
-  const verdict = parseVerdict(text);
-  if (!verdict) deps.log.warn({ chars: text.length, head: text.slice(0, 200) }, "channel judge: unparsable output");
-  return verdict;
-};
-
-const botName = (cfg: Config): string => cfg.wrc.botNames.find(Boolean) ?? "wezard";
-
-export interface JudgePrompt {
-  topicId: string;
-  /** 线程根 (被回复的那条帖子)。 */
-  postId: string;
-  /** 触发这次判断的回复 id; 新帖时等于 postId。 */
-  triggerId: string;
-  /** 入站帧 id, 目标 agent 靠它去重 / 定位。 */
-  msgid: string;
-  recent: ChannelMsg[];
-  thread: ChannelMsg[];
-  latest: string;
-  latestAuthor: string;
-  /** 最近活跃的其他机器人 (bot:<id> → 条数, 自己已剔除; §6 邻居感知)。 */
-  bots?: Array<{ id: string; n: number }>;
-  /** P7-S3: strict 频道 —— 判官兼管「无人点名的人话是否开义务、落给谁」。 */
-  strict?: boolean;
-  /** strict 频道的成员名单 (裸名, 显示给判官选落给人)。 */
-  members?: string[];
-}
-
-/** 每条历史都带 id + 时刻: 判官只做判定不改身份, 但它引用的那一句必须能被
- *  目标 agent 直接指回去, 所以 id 不能被压缩成 "第 N 条"。 */
-const judgeLine = (m: ChannelMsg, mark = "  "): string =>
-  `${mark}${m.kind === "reply" ? "reply" : "post"}=${m.id} [${stamp(m.at)}] ${m.author}: ${clip(m.text, 300)}`;
-
-export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
-  const base = `chat:${i.topicId}`;
-  const me = botName(cfg);
-  // 职责取频道管家身份的描述 (绑定 > 频道默认会话; §6 频道也是「组团里的一个群」),
-  // 没绑也没会话的新频道回落全局管家, 再没有就退通用文案。
-  const store = wizardStore();
-  const stewardId = stewardIdentityOf(cfg, store, base);
-  const stewardRecs = stewardId ? (store?.all() ?? []).filter((w) => identityOf(w) === stewardId) : [];
-  // 新频道 (无绑定无默认会话): 接待它的是全局管家 (§6), 职责行回落到它的描述。
-  const globalRec = stewardId ? undefined : (store?.all() ?? [])
-    .filter((w) => w.kind === "global-steward" && sameBot(base, w.target))
-    .sort((a, b) => Number(a.target !== identityOf(a)) - Number(b.target !== identityOf(b)) || a.bornAt - b.bornAt)[0];
-  const job = stewardRecs.find((w) => w.target === stewardId)?.description
-    ?? stewardRecs[0]?.description
-    ?? store?.get(base)?.description
-    ?? globalRec?.description
-    ?? "这个频道的助手";
-  const others = (store?.all() ?? [])
-    .filter((w) => baseOfKey(w.target) === base && w.target !== base && w.target !== keyOf(base, "judge"))
-    .map((w) => `${w.name || w.target}${w.description ? `（${w.description}）` : ""}`)
-    .slice(0, 12);
-  const isReply = i.triggerId && i.triggerId !== i.postId;
-  return [
-    `你是 ${me} 的频道判官。判断最新一条消息是否应该由 ${me} 回应；该回应时，把它整理成一条给主 agent 的指令。`,
-    `定位：topic=${i.topicId} · thread post=${i.postId}${isReply ? ` · 本次消息 reply=${i.triggerId}` : ""} · msgid=${i.msgid}`,
-    `你的职责：${job}`,
-    others.length ? `频道里其他机器人：${others.join("、")}` : "",
-    i.bots?.length ? `频道里最近活跃的其他机器人：${i.bots.map((b) => `${b.id}（${b.n} 条）`).join("、")} —— 跨 bot 身份只认 bot:<id>，它们帖子里的 🧙‍♂️ name： 是自称名` : "",
-    i.thread.length ? "这条消息所在的线程（父帖 + 评论，都带 id）：" : "",
-    ...i.thread.map((m) => judgeLine(m, "  ")),
-    i.recent.length ? "最近的频道消息（旧→新）：" : "",
-    ...i.recent.map((m, k) => judgeLine(m, `[${k + 1}] `)),
-    `最新消息（${i.latestAuthor}）：${clip(i.latest, 600)}`,
-    "",
-    ...(i.strict ? [
-      "本频道是严格模式 (strict): 无人点名的每条人话默认开一条义务 —— respond 就等于「开义务」, respond=false 则这条不开 (闲聊 / 别人的事)。",
-      ...(i.members?.length ? ["频道成员 (义务只能落给成员): " + i.members.join("、") + "。"] : []),
-      "落给谁: 最新消息明显是找某个成员的, 就在 rewrite 的**句首**写它的点名 (.名字 空格开头, 名字用上面名单里的); 归属拿不准或找的是频道整体 → 不点名, 交给主 agent (默认接待)。",
-      ""] : []),
-    "规则：",
-    "- 最新消息 @ 了别的机器人、明显属于别人的职责、或只是闲聊 → respond=false",
-    "- 最新消息在向本频道求助、需要你回答 → respond=true",
-    "- 拿不准也 respond=false；不要重复别人已经回答的内容",
-    "- respond=false 时不要写 intent / rewrite，留空字符串",
-    "",
-    "respond=true 时还要给出两步（只整理，不回答）：",
-    "1. intent：一句话说清这条消息想要什么（问什么 / 要你做什么 / 报了什么故障）。",
-    "2. rewrite：把这条消息改写成一条主 agent 能直接执行的自洽指令 ——",
-    "   补全省略的主语和指代对象（必要时代上线程里被回复的那一句），把零散的一句压成一条完整指令；",
-    "   原文里的路径、命令、报错、数字、ID、链接一律原样保留，不添加原文没有的事实，不替用户补需求，不写答复内容；",
-    "   用与原文相同的语言，只写改写后的正文，不要加「改写：」之类的前缀。",
-    "",
-    "这是一次性请求：不要调用工具，不要回答用户，不要解释。只输出下面这一行 JSON（不要代码围栏）：",
-    '{"respond":true|false,"reason":"一句话判断依据","intent":"一句话意图（respond=false 时留空）","rewrite":"改写后给主 agent 的指令正文（respond=false 时留空）"}',
-  ].filter(Boolean).join("\n");
+  return { ok: true, text: list.length ? "频道 " + topicId + " · " + list.length + " 条\n" + renderLines(list) : "频道 " + topicId + " 没有读到消息 (没见过这个频道, 或还没缓存)" };
 };
 
 // 出站传输补丁必须早于 installResponseTracker 安装：tracker 会把当时的
@@ -550,43 +255,28 @@ export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
 export const isTopicChat = (base: string): boolean =>
   base.startsWith("chat:") && topics.has(base.slice("chat:".length));
 
-/** 工具面 (P7-S3: chat_say / chat_reply 的频道分支): 按 replyOk 选评论/新帖。
- *  msgid (频道消息信封上的 msg) 能定位到具体帖子时用它, 否则用该频道最近一条帖子;
- *  帖子没被 @ 过 (replyOk=false) 只能主动发新帖 (官方语义)。 */
-export const sendTopicContent = async (client: WSClient, log: Logger, topicId: string, content: string, msgid?: string): Promise<"reply" | "post"> => {
-  const ctx = msgid ? byStream.get(msgid) : undefined;
-  const postId = ctx?.postId ?? lastPost.get(topicId);
-  const asReply = !!postId && replyOk.get(postId) === true;
-  const body = await call(client, asReply ? CMD_REPLY : CMD_POST,
-    asReply ? { topic_id: topicId, post_id: postId, content } : { topic_id: topicId, content });
-  if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId, postId }, "channel tool send rejected");
-  else log.info({ topicId, via: asReply ? "reply" : "post", len: content.length }, "channel tool sent");
-  return asReply ? "reply" : "post";
+/** 频道 room 的出站: 一律发新帖 (send_post)。 */
+export const sendTopicPost = async (client: WSClient, log: Logger, topicId: string, content: string): Promise<"post"> => {
+  const body = await call(client, CMD_POST, { topic_id: topicId, content });
+  if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel tool post rejected");
+  else log.info({ topicId, via: "post", len: content.length }, "channel tool sent");
+  return "post";
 };
-export const installChannelTransport = (client: WSClient, log: Logger, cfg?: Config): void => {
+
+/** 帖子 room 的出站: 一律评论到根帖 (send_reply)。 */
+export const sendTopicReply = async (client: WSClient, log: Logger, topicId: string, postId: string, content: string): Promise<"reply"> => {
+  const body = await call(client, CMD_REPLY, { topic_id: topicId, post_id: postId, content });
+  if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId, postId }, "channel tool reply rejected");
+  else log.info({ topicId, postId, via: "reply", len: content.length }, "channel tool sent");
+  return "reply";
+};
+
+export const installChannelTransport = (client: WSClient, log: Logger): void => {
   log.info("channel transport installed");
-  const sendPost = (topicId: string, content: string): Promise<any> =>
-    call(client, CMD_POST, { topic_id: topicId, content })
-      .then((body) => {
-        if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel post rejected");
-        else log.info({ topicId, len: content.length }, "channel post sent");
-        const id = String(body?.post_id ?? ""); if (id) lastPost.set(topicId, id); return body;
-      })
-      .catch((e: Error) => { log.warn({ err: e.message, topicId }, "channel post failed"); return undefined; });
-
-  const sendReply = (ctx: TopicCtx, content: string): Promise<any> =>
-    call(client, CMD_REPLY, { topic_id: ctx.topicId, post_id: ctx.postId, content })
-      .then((body) => {
-        if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId: ctx.topicId }, "channel reply rejected");
-        else log.info({ topicId: ctx.topicId, postId: ctx.postId, len: content.length }, "channel reply sent");
-        return body;
-      })
-      .catch((e: Error) => { log.warn({ err: e.message, topicId: ctx.topicId }, "channel reply failed"); return undefined; });
-
-  // ── 出站：topic 不走群 chatid，改成频道帖子 / 评论 ──
+  // ── 出站：topic 不走群 chatid，改成频道新帖 ──
   const origSend = client.sendMessage.bind(client);
   (client as any).sendMessage = (chatid: string, body: any): Promise<any> => {
-    // mirror 有时把 “chat:<topic>” 原样递进来；topic 集合里存的是裸 topic_id。
+    // mirror 有时把 "chat:<topic>" 原样递进来；topic 集合里存的是裸 topic_id。
     const bare = String(chatid).replace(/^(user|chat|group):/, "");
     const topicId = topics.has(chatid) ? chatid : topics.has(bare) ? bare : "";
     if (!topicId) return origSend(chatid, body);
@@ -598,38 +288,40 @@ export const installChannelTransport = (client: WSClient, log: Logger, cfg?: Con
         return origSend(asker, body);
       }
       log.warn({ topicId }, "channel: template_card dropped (no asker)");
-      return Promise.resolve(emptyFrame());
+      return Promise.resolve({ headers: { req_id: "" } } as WsFrame);
     }
     const content = body?.msgtype === "markdown" ? String(body.markdown?.content ?? "") : "";
     if (!content) {
       log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
-      return Promise.resolve(emptyFrame());
+      return Promise.resolve({ headers: { req_id: "" } } as WsFrame);
     }
-    // room 口径 (fix-task §8.2): strict 频道分支已删, 自动出站统一走 replyOk 选择
-    // (被 @ 过的帖子评论, 否则新帖; 评论的主动权留给工具面)。
-    const postId = lastPost.get(topicId);
-    // 只有被 @ 过的帖子才能评论；未被 @ 的新帖只能主动发一条新帖。
-    return postId && replyOk.get(postId) === true
-      ? sendReply({ topicId, postId, asker: lastAsker.get(topicId) ?? "" }, content)
-      : sendPost(topicId, content);
-  };
-
-  // replyStream 的气泡只对群聊有意义；频道里把最终帧落成一条评论，中间帧丢掉。
-  const origStream = client.replyStream.bind(client);
-  (client as any).replyStream = (frame: any, streamId: string, content: string, finish = false, ...rest: any[]): Promise<any> => {
-    // 事件流里的 streamId 可能是 route eventId，而 fake frame 的 req_id 才是频道 msgid —— 两边都认。
-    const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
-    if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
-    if (!finish) return Promise.resolve(emptyFrame());
-    return replyOk.get(ctx.postId) === true ? sendReply(ctx, content) : sendPost(ctx.topicId, content);
+    // 频道 room 只发新帖; 帖子 room 不走这里 (chat:<opk…> 不在 topics, 由 index 的 roomMirror 走 send_reply)。
+    return sendTopicPost(client, log, topicId, content).then(() => ({ headers: { req_id: "" } } as WsFrame));
   };
 };
 
+export interface ChannelHuman {
+  /** 落进哪个 room: chat:<topic_id> (频道) 或 chat:<opk…> (帖子)。 */
+  room: string;
+  /** 频道 room 的行带它所属的帖子 id (帖子 room 的行不带 —— room 自己就是那个帖子)。 */
+  post?: string;
+  author: string;
+  text: string;
+  at: number;
+  msgid: string;
+  /** 人 @ 了机器人 (等同点名 host)。 */
+  mention?: "bot";
+}
+
 export interface ChannelFacts {
-  /** P7-S3: strict 频道判官要看的成员名单 (裸名); 不给 = 空名单 (判定照常)。 */
-  memberNamesOf?: (base: string) => string[];
   /** topic_at_bot 等原生帧认领的时长 (ms); 缺省 3000, 测试注入短值。 */
   nativeWaitMs?: number;
+  /** 人话落 room (入站写账本的唯一出口)。 */
+  ingest?: (e: ChannelHuman) => void;
+  /** 帖子 room 诞生 (第一次配上 opk): 建 room / host 进频道 room / 起 monitor。 */
+  postBorn?: (topicId: string, postBase: string) => void;
+  /** 频道第一次见到: 建频道 room + 起 monitor。 */
+  channelSeen?: (topicId: string) => void;
 }
 
 export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger, facts?: ChannelFacts): void => {
@@ -639,97 +331,14 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     return;
   }
 
-  const dispatch = (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number, allowReply: boolean): void => {
-    if (dispatched.has(postId)) return;
-    dispatched.add(postId);
-    if (dispatched.size > 3000) dispatched.delete(dispatched.values().next().value!);
-    replyOk.set(postId, allowReply);
-    if (replyOk.size > 3000) replyOk.delete(replyOk.keys().next().value!);
-    lastPost.set(topicId, postId);
-    byStream.set(msgid, { topicId, postId, asker: fromUser });
-    if (byStream.size > 3000) byStream.delete(byStream.keys().next().value!);
-    const fake = {
-      headers: { req_id: msgid },
-      body: {
-        msgid,
-        chattype: "group",
-        chatid: topicId,
-        from: { userid: fromUser },
-        create_time: at,
-        msgtype: "text",
-        text: { content: text },
-      },
-    } as WsFrame<TextMessage>;
-    log.info({ topicId, postId, msgid, len: text.length }, "channel rx");
-    client.emit("message.text", fake);
-  };
-
-  const mentions = (post: any): Array<{ type: number; bot?: string }> => {
-    const list = post?.inline_mention_list ?? post?.mention_list ?? [];
-    if (!Array.isArray(list)) return [];
-    return list.map((x: any) => {
-      const m = x?.member ?? x ?? {};
-      return { type: Number(m.type ?? 0), bot: typeof m.aibotid === "string" ? m.aibotid : undefined };
-    });
-  };
-
-  const judgeAndMaybe = async (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number, selfBot: string, triggerId: string): Promise<void> => {
-    if (!cfg.wrc.channel.judge.enabled) {
-      log.info({ topicId, postId }, "channel judge disabled");
+  /** 落一行人话; 没有 ingest (旧接线 / 测试桩) 就只记日志 —— 静默丢话是不允许的。 */
+  const ingest = (e: ChannelHuman): void => {
+    if (!facts?.ingest) {
+      log.warn({ room: e.room, post: e.post, msgid: e.msgid }, "channel: no room ingest wired, message not delivered");
       return;
     }
-    if (dispatched.has(postId)) {
-      log.info({ topicId, postId }, "channel judge skipped: already dispatched");
-      return;
-    }
-    const post = await fetchPost(client, topicId, postId, log);
-    const ms = mentions(post);
-    // 不能因为“提到自己”就跳过：回复/引用机器人时 inline_mention 也可能带上自己，
-    // 但这时不一定有 topic_at_bot。交给判官，dispatched 会保证不会双答。
-    if (ms.some((m) => m.type === 1 && m.bot === selfBot)) {
-      log.info({ topicId, postId }, "channel judge: self-mention, wait for topic_at_bot");
-      // 先等一拍：真有 topic_at_bot 就让直接 @ 路径答（评论）；没有才走判官。
-      await sleep(1200);
-      if (dispatched.has(postId)) {
-        log.info({ topicId, postId }, "channel judge skipped: self-mention handled by topic_at_bot");
-        return;
-      }
-    }
-    if (ms.some((m) => m.type === 1 && m.bot && m.bot !== selfBot)) {
-      log.info({ topicId, postId }, "channel judge skipped: addressed to another bot");
-      return;
-    }
-    const recent = await recentPosts(client, cfg, log, topicId, cfg.wrc.channel.judge.maxPosts);
-    const thread = withoutMsg((await ensureStore(cfg)?.thread(topicId, postId, 4)) ?? [], triggerId);
-    const prompt = buildJudgePrompt(cfg, {
-      topicId, postId, triggerId, msgid,
-      recent: withoutMsg(recent, triggerId),
-      thread,
-      latest: text,
-      latestAuthor: fromUser,
-      bots: botAuthors([...recent, ...thread], selfBot),
-    });
-    // 一次 -p 进程也串行：同一 topic 两条消息同时到不该各起一个, 判词会互相盖。
-    const verdict = await serial(`judge:${topicId}`, () => askJudge({ cfg, log }, prompt));
-    if (!verdict?.respond) {
-      // 超时 / 进程失败 / 输出解析不了都落在这里: 判官是个减噪层, 它的结论是「不回应」。
-      // 回落 = 不投递 (频道里不会有人收到这条), 但要留得下可查的一行 —— 不静默丢。
-      log.warn(
-        { topicId, postId, msgid, triggerId, reason: verdict?.reason ?? "timeout/unparsable" },
-        "channel judge: no dispatch (verdict absent or respond=false)",
-      );
-      return;
-    }
-    log.info({ topicId, postId, reason: verdict.reason, intent: verdict.intent, rewritten: !!verdict.rewrite }, "channel judge: yes");
-    // 判官说 YES 才拼展开版上下文: 线程 + 最近 + (这句话有指代时) 搜索命中。
-    // 入站帧的 msgid 随首行一起下去 —— 判官只加意图 / 改写，不替换身份。
-    const ctx = await contextFor({ client, cfg, log }, topicId, postId, triggerId, text, {
-      reason: verdict.reason,
-      msgid,
-      selfBot,
-      ...(verdict.intent ? { intent: verdict.intent } : {}),
-    });
-    dispatch(topicId, postId, msgid, fromUser, `${ctx}\n——\n${bodyFor(text, verdict)}`, at, false);
+    log.info({ room: e.room, post: e.post, msgid: e.msgid, len: e.text.length, mention: e.mention }, "channel rx");
+    facts.ingest(e);
   };
 
   const onTopic = async (frame: any): Promise<void> => {
@@ -738,15 +347,17 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     const topicId = String(body.topic_id ?? "");
     const from = body.from ?? {};
     const asker = String(from.userid ?? "");
-    const selfBot = String(body.aibotid ?? "");
     const at = Number(body.create_time ?? 0) * 1000 || Date.now();
     const recvAt = Date.now();
     if (!topicId) return;
     registerTopic(topicId);
     if (asker) lastAsker.set(topicId, asker);
+    facts?.channelSeen?.(topicId);
     // 第一次见到的频道从官方补最近 N 条 (reload / 断线空窗期的事件本地没有)。
     void backfill(client, cfg, log, topicId).catch((e: Error) => log.warn({ err: e.message, topicId }, "channel backfill failed"));
     log.info({ topicId, type: ev.eventtype, postId: ev.topic_event?.post_id ?? ev.topic_reply_event?.post_id ?? ev.topic_at_bot?.post_id, asker }, "channel event");
+
+    const channelRoom = "chat:" + topicId;
 
     if (ev.eventtype === "topic_at_bot") {
       const postId = String(ev.topic_at_bot?.post_id ?? "");
@@ -758,25 +369,28 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const native = await awaitNative(asker, recvAt - NATIVE_SKEW_MS, facts?.nativeWaitMs ?? NATIVE_WAIT_MS);
       if (native) {
-        // 原生帧已把这句话投给帖子会话; 桥只记账: 标 dispatched (判官别再接), 帖子照存本地缓存。
-        // 配上的这一对就是「帖子 → 频道」的唯一判据 (原生帧里没有频道标识), 落盘给管家绑定按频道判。
-        if (learnChannelPost(cfg, native, topicId)) log.info({ topicId, post: native }, "channel post learned");
-        dispatched.add(postId);
-        if (dispatched.size > 3000) dispatched.delete(dispatched.values().next().value!);
+        // 原生帧已把这句话投给帖子会话 (= 帖子 room 的那条人话); 桥只记账。
+        // 配上的这一对就是「帖子 → 频道」的唯一判据 (原生帧里没有频道标识)。
+        if (learnChannelPost(cfg, native, topicId, postId)) {
+          log.info({ topicId, post: native }, "channel post learned");
+          facts?.postBorn?.(topicId, native);
+        }
         log.info({ topicId, postId, msgid, nativeChat: native }, "channel at_bot: carried by native frame, bridge skip");
         await record(cfg, topicId, postMsg(await fetchPost(client, topicId, postId, log)));
         if (replyId) await record(cfg, topicId, replyMsg(await fetchReply(client, topicId, postId, replyId, log), postId));
         return;
       }
-      if (dispatched.has(postId)) return;
       const post = await fetchPost(client, topicId, postId, log);
       const reply = replyId ? await fetchReply(client, topicId, postId, replyId, log) : null;
       if (!post) log.warn({ topicId, postId }, "channel: post content not found");
       await record(cfg, topicId, postMsg(post));
       if (reply) await record(cfg, topicId, replyMsg(reply, postId));
       const text = cleanContent(reply?.content ?? post?.content) || "（在频道里 @ 了你，没有正文）";
-      const ctx = await contextFor({ client, cfg, log }, topicId, postId, replyId || postId, text, { msgid, selfBot });
-      dispatch(topicId, postId, msgid, asker, `${ctx}\n——\n${text}`, at, true);
+      // 兜底: 帖子已配对 → 帖子 room (它就是那个帖子); 没配对 → 频道 room, 标 mention:"bot" (直达 host)。
+      const paired = postBaseOf(cfg, topicId, postId);
+      ingest(paired
+        ? { room: paired, author: asker, text, at, msgid }
+        : { room: channelRoom, post: postId, author: asker, text, at, msgid, mention: "bot" });
       return;
     }
 
@@ -784,8 +398,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const postId = String(ev.topic_event?.post_id ?? "");
       const msgid = String(body.msgid ?? postId);
       if (!postId || !msgid) return;
-      if (seen.has(msgid) || dispatched.has(postId)) {
-        log.info({ topicId, postId, msgid }, "channel topic_event skipped: seen/dispatched");
+      if (seen.has(msgid)) {
+        log.info({ topicId, postId, msgid }, "channel topic_event skipped: seen");
         return;
       }
       if (!asker) {
@@ -798,8 +412,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       await record(cfg, topicId, postMsg(post));
       const text = cleanContent(post?.content);
       if (!text) return;
-      void judgeAndMaybe(topicId, postId, msgid, asker, text, at, selfBot, postId)
-        .catch((e: Error) => log.warn({ err: e.message, topicId, postId }, "channel judge failed"));
+      // 没被 @ 的新帖: 频道 room 的一行人话 (带 post); 不 @ 机器人就不过 host, 由 monitor 判激活。
+      ingest({ room: channelRoom, post: postId, author: asker, text, at, msgid });
       return;
     }
 
@@ -808,7 +422,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const replyId = String(ev.topic_reply_event?.reply_id ?? "");
       const msgid = String(body.msgid ?? replyId);
       if (!postId || !replyId || !msgid) return;
-      if (seen.has(replyId) || dispatched.has(replyId) || !asker) {
+      if (seen.has(replyId) || !asker) {
         log.info({ topicId, postId, replyId, msgid, asker }, "channel topic_reply_event skipped");
         return;
       }
@@ -818,8 +432,11 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       await record(cfg, topicId, replyMsg(reply, postId));
       const text = cleanContent(reply?.content);
       if (!text) return;
-      void judgeAndMaybe(topicId, postId, msgid, asker, text, at, selfBot, replyId)
-        .catch((e: Error) => log.warn({ err: e.message, topicId, postId }, "channel judge failed"));
+      // 评论: 帖子已配对 → 帖子 room; 还没配对 → 频道 room (带 post)。
+      const paired = postBaseOf(cfg, topicId, postId);
+      ingest(paired
+        ? { room: paired, author: asker, text, at, msgid }
+        : { room: channelRoom, post: postId, author: asker, text, at, msgid });
       return;
     }
 
@@ -837,5 +454,3 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     prev(frame);
   };
 };
-
-// 兼容入口：新代码应分别早装 transport、晚装 events。

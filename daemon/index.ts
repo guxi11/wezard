@@ -30,7 +30,8 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, rende
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
-import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
+import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicPost, sendTopicReply, type ChannelHuman } from "./channel.js";
+import { postRefOf } from "./channel-posts.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -113,6 +114,7 @@ import {
   identityEditRefusal,
   instancesOf,
   leadSettled,
+  monitorRefusal,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
@@ -183,6 +185,10 @@ const main = async (): Promise<void> => {
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
   // 记忆整理者的执行体, 同样只有 mirror 模式给得出 —— 赋值见 scheduledTaskInject 旁边。
   let stopPlanReminders = (): void => {};
+  // 频道入站的三条接线 (room 块在下面才立起来, 先留引用): 人话落 room / 频道首次见到 / 帖子 room 诞生。
+  let channelIngest: ((e: ChannelHuman) => void) | undefined;
+  let channelRoomSeen: ((topicId: string) => void) | undefined;
+  let channelPostBorn: ((topicId: string, postBase: string) => void) | undefined;
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
@@ -217,7 +223,7 @@ const main = async (): Promise<void> => {
   const ws = startMux(cfg, log);
   // 频道出站补丁必须先于 response-tracker：tracker 会把当时的 sendMessage /
   // replyStream 抓成 orig*，晚装就绕过了频道分支（终句会走成群消息）。
-  installChannelTransport(ws.client, log.child({ mod: "channel" }), cfg);
+  installChannelTransport(ws.client, log.child({ mod: "channel" }));
   // 切网 (换 WiFi / VPN 起停) 后原地重建 WS, 等价于自动做了一次 reload 的
   // 联通性部分 — 但保留全部内存态 (pending 长轮询、镜像绑定),
   // 也不依赖 launchd/systemd 的 respawn 策略 (nohup fallback 没有 supervisor)。
@@ -363,7 +369,9 @@ const main = async (): Promise<void> => {
   });
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), {
-    memberNamesOf: () => [], // room 模型: 频道判官的成员名单走 room 成员, 由 channel.ts 自行解析
+    ingest: (e) => (channelIngest ? channelIngest(e) : log.warn({ room: e.room, msgid: e.msgid }, "channel: room wiring not ready, 人话没落账本")),
+    channelSeen: (t) => channelRoomSeen?.(t),
+    postBorn: (t, b) => channelPostBorn?.(t, b),
   });
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
@@ -667,6 +675,14 @@ const main = async (): Promise<void> => {
       notifyChat(baseOfKey(target), "[wezard] 引导会话越权调用了 " + action + ", 已收掉; 请再发一次上一条, 引导会重新接上。");
       return true;
     };
+    /** monitor 的工具面硬限 (wizard.ts monitorRefusal): 审批层已全拒, 审批关掉时在这里兜一道。 */
+    const refuseMonitor = (res: import("node:http").ServerResponse, target: string, action: string): boolean => {
+      const reason = monitorRefusal(wizardStore()?.get(target), action);
+      if (!reason) return false;
+      json(res, 403, { ok: false, reason });
+      log.warn({ target, action }, "monitor tool surface refused");
+      return true;
+    };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
     // 那一段是路由信息 (`.name:` / 签名名 / role 链接头), parseTagHeader 靠它反解, 群里引用一条气泡
     // 就能直接跟那个 wizard 说话; 把它换成名字会把这条通路弄断。
@@ -677,13 +693,18 @@ const main = async (): Promise<void> => {
 
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
     const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self), text, "\n\n"));
-    /** P7-S3: 同 postAs, 但去到的是频道 (chat:<topic_id>) —— 按 replyOk 选评论/新帖
-     *  (chat_say / chat_reply 的频道分支); msgid (义务信封上的 msg) 能定位到具体帖子。 */
-    const postAsTopic = (self: string, dest: string, text: string, msgid?: string): void => {
+    /** 同 postAs, 但去到的是频道 room (chat:<topic_id>) —— 一律发新帖 (send_post)。 */
+    const postAsTopic = (self: string, dest: string, text: string): void => {
       const topicId = dest.replace(/^chat:/, "");
-      void sendTopicContent(ws.client, log.child({ mod: "channel" }), topicId,
-        linkTags(dest, headed(ownHead(self), text, "\n\n")), msgid)
+      void sendTopicPost(ws.client, log.child({ mod: "channel" }), topicId,
+        linkTags(dest, headed(ownHead(self), text, "\n\n")))
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
+    };
+    /** 帖子 room (chat:<opk…>) —— 一律评论到根帖 (send_reply)。 */
+    const postAsReply = (self: string, dest: string, channel: string, post: string, text: string): void => {
+      void sendTopicReply(ws.client, log.child({ mod: "channel" }), channel, post,
+        linkTags(dest, headed(ownHead(self), text, "\n\n")))
+        .catch((e: unknown) => log.warn({ channel, post, err: errText(e) }, "channel post reply failed"));
     };
     const retiringWizardTargets = new Set<string>();
     const plans: PlanStore = (() => {
@@ -1217,10 +1238,19 @@ const main = async (): Promise<void> => {
         return true;
       }
       if (isTopicChat(chat)) {
+        // 频道 room: 一律新帖。
         if (authorTarget) postAsTopic(authorTarget, chat, body);
-        else void sendTopicContent(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), linkTags(chat, md))
+        else void sendTopicPost(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), linkTags(chat, md))
           .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: topic 镜像失败"));
         return true; // 已交给传输; 异步失败由上面的 catch 记 warn
+      }
+      const postRef = postRefOf(cfg, chat);
+      if (postRef) {
+        // 帖子 room: 一律评论到根帖。
+        if (authorTarget) postAsReply(authorTarget, chat, postRef.channel, postRef.post, body);
+        else void sendTopicReply(ws.client, log.child({ mod: "room" }), postRef.channel, postRef.post, linkTags(chat, md))
+          .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: post 镜像失败"));
+        return true;
       }
       if (authorTarget) postAs(authorTarget, chat, body);
       else notifyChat(chat, md);
@@ -1542,6 +1572,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/open", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_open")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { with?: string[]; title?: string };
@@ -1578,6 +1609,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/name", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_name")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; name?: string; notice?: string };
@@ -1599,6 +1631,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/invite", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_invite")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; who?: string; history?: unknown };
@@ -1631,6 +1664,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/join", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_join")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; reason?: string };
@@ -1641,6 +1675,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/approve", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_approve")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { re?: string; accept?: boolean; history?: unknown };
@@ -1664,6 +1699,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/leave", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_leave")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; who?: string; why?: string };
@@ -1730,6 +1766,30 @@ const main = async (): Promise<void> => {
       });
       json(res, 200, { ok: true, applied: b.apply === true, keepRecentHours: keepRecentMs / 3600_000, rooms });
     }));
+    /** monitor 的判决: 为 re 那条人话在 to 名下开 duty (to 为空 = 判不回应)。
+     *  只有本 room 的 monitor 成员能写; 校验 (最后一条人话 / 重复激活 / to 是成员) 在 shared/room.ts 的 judge。 */
+    http.register("POST /room/activate", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { re?: string | string[]; to?: string };
+      const re = idList(b.re);
+      if (re.length !== 1) { json(res, 400, { ok: false, reason: "re 只收一条 (最后一条人话的消息 id)" }); return; }
+      const roomId = roomStore.roomOfMsg(re[0]!);
+      const s = roomId ? roomState(roomId) : undefined;
+      if (!roomId || !s) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re[0] }); return; }
+      if (s.members.get(whoKey(me))?.role !== "monitor") {
+        json(res, 403, { ok: false, reason: "只有本 room 的 monitor 能写 activate 判决" });
+        return;
+      }
+      const ref = (b.to ?? "").toString().trim();
+      const to = ref ? (whoRefOf(ref) ?? memberRefOf(s, ref)) : undefined;
+      if (ref && !to) { json(res, 400, { ok: false, reason: "认不出这个地址: " + ref }); return; }
+      const v = hub.append(roomId, { author: me, kind: "trigger", sys: "activate", text: "", re, origin: "tool", ...(to ? { to: [to] } : {}) });
+      if (v.ok) roomLog.info({ room: roomId, re: re[0], to: to ? roomNameOf(to) : "", woke: v.row.wake }, "monitor: activate");
+      roomReply(res, v);
+    });
     http.register("POST /room/read", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
@@ -1762,6 +1822,7 @@ const main = async (): Promise<void> => {
     http.register("POST /room/watch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_watch")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; on?: boolean };
@@ -1872,6 +1933,86 @@ const main = async (): Promise<void> => {
       if (founder) ops.push({ op: "join", at, room, who: { kind: "wizard", id: founder }, ord: 1, via: "founder", by: DAEMON });
       hub.write(room, ops);
       return room;
+    };
+    // ── 频道 / 帖子 room 与 monitor (§2.2 / §2.3) ───────────────────────
+    /** 一个 room 一个 monitor: 建身份 (kind "monitor", 档位可配) 并以 role:"monitor" 入座。
+     *  幂等; 已有 monitor 成员就直接返回。会话冷启动在后台做 (第一条人话也会把它冷启动)。 */
+    const monitorStarting = new Set<string>();
+    const ensureMonitor = (room: string): void => {
+      if (!cfg.wrc.channel.monitor.enabled) return;
+      const st0 = roomState(room);
+      if (!st0) return;
+      if ([...st0.members.values()].some((mm) => mm.role === "monitor")) return;
+      const target = keyOf(baseOfKey(room), "monitor");
+      const rec = wizards.get(target);
+      wizards.upsert(target, {
+        kind: "monitor",
+        ...(rec ? {} : { bornAt: Date.now(), identity: target }),
+        description: "本 room 的 monitor: 读账本, 决定这条人话该激活谁 (room_activate)",
+        parent: undefined,
+        lead: undefined,
+        leadOf: undefined,
+      });
+      const name = settleName(wizards, "monitor", target) || target;
+      const uid = wizards.get(target)?.uid;
+      if (!uid) return;
+      const st = roomState(room);
+      if (st && !st.members.has(whoKey({ kind: "wizard", id: uid })))
+        hub.write(room, [{ op: "join", at: Date.now(), room, who: { kind: "wizard", id: uid }, ord: st.nextOrd, via: "invite", by: DAEMON, role: "monitor" }]);
+      if (monitorStarting.has(target) || m.hasMirrorTarget(target)) return;
+      monitorStarting.add(target);
+      const pick = pickTier(cfg, cfg.wrc.channel.monitor.tier, {});
+      void m.newSession(target, name, { silent: true, ...(pick.ok && pick.model ? { model: pick.model } : {}), ...(pick.ok && pick.effort ? { effort: pick.effort } : {}) })
+        .catch((e: unknown) => roomLog.warn({ target, err: errText(e) }, "monitor: 冷启动失败 (第一条人话会再试)"))
+        .finally(() => monitorStarting.delete(target));
+    };
+    /** 频道 room 不存在就开一个 (频道管家已绑定就作 founder —— monitor 需要有人可激活)。 */
+    const ensureChannelRoom = (topicId: string): string => {
+      const room = "chat:" + topicId;
+      if (!roomState(room)) {
+        const at = Date.now();
+        const ops: RoomOp[] = [{ op: "open", at, room, kind: "wecom-group", by: DAEMON }];
+        try {
+          const stw = resolveSteward(cfg, wizardStore(), room, (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
+          const uid = stw.fresh ? wizards.get(stw.target)?.uid : undefined;
+          if (uid) ops.push({ op: "join", at, room, who: { kind: "wizard", id: uid }, ord: 1, via: "founder", by: DAEMON });
+        } catch { /* 没绑定: 只有 monitor 的频道 room, 等帖子 host 进来 */ }
+        hub.write(room, ops);
+      }
+      ensureMonitor(room);
+      return room;
+    };
+    /** 人话落 room: 频道 room / 帖子 room 都先保证存在; mention / post 原样写进行里。 */
+    channelIngest = (e) => {
+      if (!roomState(e.room)) {
+        roomLog.warn({ room: e.room, msgid: e.msgid }, "channel: room 不存在, 人话没落账本 (自愈: 下一条事件重建)");
+        return;
+      }
+      const v = hub.append(e.room, {
+        author: { kind: "human", id: e.author }, kind: "say", text: e.text, origin: "inbound",
+        ...(e.post ? { post: e.post } : {}), ...(e.mention ? { mention: e.mention } : {}),
+      });
+      if (!v.ok) roomLog.warn({ room: e.room, msgid: e.msgid, reason: v.reason }, "channel: 人话落行被拒");
+    };
+    channelRoomSeen = (topicId) => { ensureChannelRoom(topicId); };
+    /** 帖子 room 诞生: 建 room; 它的 host 同时是所属频道 room 的成员 (成员关系表达归属); 起两个 monitor。 */
+    channelPostBorn = (topicId, postBase) => {
+      const channelRoom = ensureChannelRoom(topicId);
+      if (!roomState(postBase)) {
+        const at = Date.now();
+        const ops: RoomOp[] = [{ op: "open", at, room: postBase, kind: "topic-post", by: DAEMON }];
+        const chState = roomState(channelRoom);
+        const founder = chState ? roomHost(chState) : undefined;
+        if (founder) ops.push({ op: "join", at, room: postBase, who: founder, ord: 1, via: "founder", by: DAEMON });
+        hub.write(postBase, ops);
+        roomLog.info({ room: postBase, channel: channelRoom, founder: founder && roomNameOf(founder) }, "channel: 帖子 room 诞生");
+      }
+      const ps = roomState(postBase);
+      const host = ps ? roomHost(ps) : undefined;
+      const cs = roomState(channelRoom);
+      if (host && cs && !cs.members.has(whoKey(host)))
+        hub.write(channelRoom, [{ op: "join", at: Date.now(), room: channelRoom, who: host, ord: cs.nextOrd, via: "invite", by: DAEMON }]);
+      ensureMonitor(postBase);
     };
     /** 定时任务 / plan 提醒的一枪 (cutmap G-1/G-2): kind:"trigger" 行 —— 不镜像, 只唤醒 owner。 */
     const fireTaskTrigger = (target: string, text: string, ext: string): void => {
@@ -2577,6 +2718,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/identity", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "wizard_identity")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { name?: string; description?: string; expertise?: string; to?: string };
@@ -2813,6 +2955,7 @@ const main = async (): Promise<void> => {
     http.register("POST /dispatch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "delegate")) return;
       if (refuseGuide(res, self, "delegate")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
@@ -2944,6 +3087,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/remember", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "wizard_remember")) return;
       const b = body as { note?: string; forget?: string; scope?: string };
       const note = (b.note ?? "").toString().trim();
       const forget = (b.forget ?? "").toString().trim();
@@ -3164,6 +3308,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "spawn_wizard")) return;
       if (refuseGuide(res, self, (body as { inherit?: boolean }).inherit ? "clone_wizard" : "spawn_wizard")) return;
       const r = await bearAs(self, body);
       // room? 参数 (契约 §3): 出生落地即入座 (via spawn, 免审)。
@@ -3186,6 +3331,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "stop_wizard")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { name?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
@@ -3275,6 +3421,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/model", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "set_model")) return;
       if (refuseGuide(res, self, "set_model")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
@@ -3372,6 +3519,7 @@ const main = async (): Promise<void> => {
     http.register("POST /tasks/schedule", guarded(async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseMonitor(res, self, "schedule_task")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; quiet?: boolean; id?: string };

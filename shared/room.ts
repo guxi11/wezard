@@ -132,6 +132,8 @@ export interface MsgRow extends OpBase {
   wake: string[];
   /** 入站显式给出: "bot" = 人 @ 了机器人 (等同点名 host, 由入站按事件写, 不从正文猜)。 */
   mention?: "bot";
+  /** 频道 room 里这一行属于哪个帖子 (post_id; 帖子 room 还没诞生时用它表达归属)。 */
+  post?: string;
   /** 人话交给了本 room 的 monitor (只唤醒 monitor, 不在 host 槽位开 duty)。judge 落定, 重放照旧。 */
   monitor?: true;
   /** 带 interrupt 投递 (先 Esc 打断再投)。 */
@@ -468,6 +470,8 @@ export interface Draft {
   statusGiven?: boolean;
   /** 入站显式给出: "bot" = 人 @ 了机器人 (等同点名 host)。 */
   mention?: "bot";
+  /** 频道 room 里这一行属于哪个帖子 (帖子 room 诞生前, 评论都记在频道 room 并带 post)。 */
+  post?: string;
   interrupt?: boolean;
   for?: string;
   after?: string[];
@@ -622,7 +626,7 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   const draftRow: MsgRow = {
     op: "msg", at: ctx.now, room: s.id, id: msgIdOf(s.id, seq), seq, author: d.author, ord: member?.ord ?? 0, speak,
     kind: d.kind, text: d.text, ...(to.length ? { to } : {}), ...(re.length ? { re } : {}), ...(status ? { status } : {}),
-    ...(d.mention ? { mention: d.mention } : {}), ...(toMonitor ? { monitor: true as const } : {}),
+    ...(d.mention ? { mention: d.mention } : {}), ...(d.post ? { post: d.post } : {}), ...(toMonitor ? { monitor: true as const } : {}),
     ...(closes.length ? { closes } : {}), wake: [], ...(d.interrupt ? { interrupt: true } : {}),
     ...(d.for ? { for: d.for } : {}), ...(d.after?.length ? { after: d.after } : {}), ...(d.planId ? { planId: d.planId } : {}),
     ...(d.files?.length ? { files: d.files } : {}), origin: d.origin, ...(d.ext ? { ext: d.ext } : {}),

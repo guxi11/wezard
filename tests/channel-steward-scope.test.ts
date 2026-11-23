@@ -25,14 +25,14 @@ const srcOf = (name: string) => { const p = join(ROOT, name + ".jsonc"); writeFi
 
 // ── ① 配对映射 ───────────────────────────────────────────────────────
 const cfg = cfgOf("s1");
-assert.equal(learnChannelPost(cfg, "chat:opkA", "T"), true, "新配对落盘");
-assert.equal(learnChannelPost(cfg, "chat:opkA", "T"), false, "同一对不重写");
-learnChannelPost(cfg, "chat:opkB", "T");
+assert.equal(learnChannelPost(cfg, "chat:opkA", "T", "pA"), true, "新配对落盘");
+assert.equal(learnChannelPost(cfg, "chat:opkA", "T", "pA"), false, "同一对不重写");
+learnChannelPost(cfg, "chat:opkB", "T", "pB");
 assert.equal(channelOfPost(cfg, "chat:opkA"), "T");
 assert.deepEqual(postsOfChannel(cfg, "T").sort(), ["chat:opkA", "chat:opkB"]);
 assert.equal(channelOf(cfg, "chat:T"), "T", "桥接帧 base chat:<topic_id> 本身就是频道");
 assert.equal(channelOf(cfg, "chat:wrGROUP"), "", "普通群不是频道");
-assert.deepEqual(JSON.parse(readFileSync(join(ROOT, "s1", "channel-posts.json"), "utf8")), { "chat:opkA": "T", "chat:opkB": "T" }, "映射持久化 (reload 后照认)");
+assert.deepEqual(JSON.parse(readFileSync(join(ROOT, "s1", "channel-posts.json"), "utf8")), { "chat:opkA": { channel: "T", post: "pA" }, "chat:opkB": { channel: "T", post: "pB" } }, "映射持久化 (新格式 {channel, post}; reload 后照认)");
 
 // ── ② 帖子里绑定 = 频道绑定, 其余帖子复用 ────────────────────────────
 const store = loadWizardStore(join(ROOT, "w1.json"));
@@ -54,8 +54,8 @@ assert.equal(needsOnboarding(cfg, loadWizardStore(join(ROOT, "w0.json")), "chat:
 
 // ── ③ 老数据收口: 帖子级绑定升格为频道级, 同频道只剩一个 ──────────────
 const cfg2 = cfgOf("s2", { "chat:opkC": { steward: "Old1" }, "chat:opkD": { steward: "Old2" }, "chat:wrX": { steward: "Keep" } });
-learnChannelPost(cfg2, "chat:opkC", "T2");
-learnChannelPost(cfg2, "chat:opkD", "T2");
+learnChannelPost(cfg2, "chat:opkC", "T2", "pC");
+learnChannelPost(cfg2, "chat:opkD", "T2", "pD");
 const store2 = loadWizardStore(join(ROOT, "w2.json"));
 store2.upsert("chat:opkC", { identity: "chat:opkC", name: "Old1", kind: "steward", bornAt: 5 });
 store2.upsert("chat:opkD", { identity: "chat:opkD", name: "Old2", kind: "steward", bornAt: 3 });
@@ -77,8 +77,8 @@ const dir3 = "s3";
 const cfg3 = cfgOf(dir3);
 mkdirSync(join(ROOT, dir3), { recursive: true });
 writeFileSync(join(ROOT, dir3, "onboarding.json"), JSON.stringify({ "chat:opkF": { step: "workspace" } }));
-learnChannelPost(cfg3, "chat:opkE", "T3");
-learnChannelPost(cfg3, "chat:opkF", "T3");
+learnChannelPost(cfg3, "chat:opkE", "T3", "pE");
+learnChannelPost(cfg3, "chat:opkF", "T3", "pF");
 const store3 = bindWizardStore(loadWizardStore(join(ROOT, "w3.json")));
 store3.upsert("user:home", { identity: "user:home", name: "gsw", kind: "global-steward", bornAt: 1 });
 store3.upsert("chat:opkF#guide", { identity: "chat:opkF#guide", name: "guide-2", kind: "worker", description: GUIDE_DESC, bornAt: 2 });

@@ -23,10 +23,10 @@ import {
 } from "../daemon/steward.js";
 import {
   botAuthors,
-  buildJudgePrompt,
   installChannelEvents,
   installChannelTransport,
   registerTopic,
+  type ChannelHuman,
 } from "../daemon/channel.js";
 import { formatChannelContext } from "../daemon/channel-context.js";
 import { installInboundRouter } from "../daemon/inbound.js";
@@ -85,30 +85,8 @@ assert.deepEqual(freshChannel.fresh, { identity: "user:home", name: "gsw", kind:
 assert.equal(isStewardTarget(cfgChannel, store, "chat:topicE#fix"), true, "绑定的频道化身 arm");
 assert.equal(isStewardTarget(cfgChannel, store, "chat:topicE"), false, "换绑后旧频道默认会话不 arm");
 
-// ── Part B: 判官邻居感知 ───────────────────────────────────────────────
-bindWizardStore(store);
-const judgeCfg = cfgOf({ topicE: "fix" });
-const jp = buildJudgePrompt(judgeCfg, {
-  topicId: "topicE", postId: "p1", triggerId: "p1", msgid: "m1",
-  recent: [], thread: [], latest: "x", latestAuthor: "user:b",
-  bots: [{ id: "bot:aaa", n: 2 }, { id: "bot:bbb12345", n: 1 }],
-});
-assert.ok(jp.includes("你的职责：修东西的工人"), "职责行取频道管家身份 (锚点) 的描述");
-assert.ok(jp.includes("bot:aaa（2 条）"), "others 段带 bot 作者计数");
-assert.ok(jp.includes("跨 bot 身份只认 bot:<id>"), "bot 身份映射口径进 prompt");
-// 未绑定的存量频道: 职责行回落频道默认会话描述 (行为不变)。
-const jpLegacy = buildJudgePrompt(cfgFree, {
-  topicId: "topicE", postId: "p1", triggerId: "p1", msgid: "m1",
-  recent: [], thread: [], latest: "x", latestAuthor: "user:b",
-});
-assert.ok(jpLegacy.includes("你的职责：旧频道默认会话"), "未绑定频道职责行 = 默认会话描述");
-assert.ok(!jpLegacy.includes("最近活跃的其他机器人"), "没有 bot 作者就不出机器人聚合行");
-// 全新频道 (连默认会话都没有): 职责行 = 全局管家描述。
-const jpNew = buildJudgePrompt(cfgFree, {
-  topicId: "topicNEW", postId: "p1", triggerId: "p1", msgid: "m1",
-  recent: [], thread: [], latest: "x", latestAuthor: "user:b",
-});
-assert.ok(jpNew.includes("你的职责：全局管家"), "新频道职责行 = 全局管家描述");
+// Part B (判官 prompt) 已随一次性判官一起删除 —— 频道里的判断改由 room 的 monitor 做
+// (shared/room.ts 的 activate 行, 见 tests/room-monitor.test.ts)。
 
 // ── Part C: 注入上下文的机器人活跃行 + botAuthors 聚合 ─────────────────
 const msg = (id: string, author: string, text = "t"): ChannelMsg => ({ id, kind: "post", postId: id, at: 0, author, text });
@@ -132,17 +110,16 @@ const mkClient = () => {
       calls.push({ via: "cmd", cmd, content: JSON.stringify(body) });
       return { body: cmd === "aibot_topic_get_post_list" ? { post_list: [postOf()] } : cmd === "aibot_topic_send_post" ? { post_id: "pnew" } : {} };
     },
-    emit: (ev: string, frame: unknown) => { calls.push({ via: "emit", content: ev + ":" + JSON.stringify((frame as any)?.body?.chatid) }); emitted.push(frame); },
     wsManager: { handleFrame: (_f: unknown) => { /* 原链路不需要 */ } },
   };
   return c;
 };
 const postOf = () => ({ post_id: "pE", content: "频道里求助: 帮我看个报错", creator: { type: 2, userid: "tester" }, create_time: 1700000000 });
-const emitted: unknown[] = [];
 const client = mkClient();
+const ingested: ChannelHuman[] = [];
 // transport 必须早于 events 装 (tracker 抓 orig 的顺序), 与 daemon 一致。
 installChannelTransport(client, log);
-installChannelEvents(client, cfgOf(), log, { nativeWaitMs: 0 }); // 无原生帧: 测桥兜底投递
+installChannelEvents(client, cfgOf(), log, { nativeWaitMs: 0, ingest: (e) => ingested.push(e) }); // 无原生帧: 测桥兜底投递
 
 // D1 纯传输面: 只有 markdown 正文会跨 bot 出去。
 registerTopic("topicD");
@@ -158,7 +135,7 @@ assert.ok(!calls.length, "非 markdown 出站丢弃");
 await client.sendMessage("chat:normal", { msgtype: "markdown", markdown: { content: "x" } });
 assert.ok(calls.some((c) => c.via === "send" && c.chatid === "chat:normal"), "非频道 chatid 原样放行 (不进频道分支)");
 
-// D2 事件 → 伪装群帧 → 频道出站: @ 事件直达 (不走判官), 合成 frame + 假 author。
+// D2 事件 → 人话落 room (ingest): 没有原生帧的 @ 事件兜底落频道 room 并标 mention:"bot"。
 calls.length = 0;
 const evFrame = {
   cmd: "aibot_topic_event_callback",
@@ -169,23 +146,12 @@ const evFrame = {
 };
 (client as any).wsManager.handleFrame(evFrame);
 await new Promise((r) => setTimeout(r, 50));
-assert.equal(emitted.length, 1, "@ 事件伪装成一条群消息交给 inbound");
-const fake = (emitted[0] as { body: any }).body;
-assert.equal(fake.chattype, "group");
-assert.equal(fake.chatid, "topicE", "chatid = 裸 topic_id → principal = chat:<topic_id> (频道即群)");
-assert.equal(fake.from.userid, "tester");
-assert.ok(fake.text.content.includes("频道里求助"), "正文带原帖");
-// 被回复的帖子 replyOk: 最终帧走 send_reply (跨 bot 出声), 中间帧丢。
-calls.length = 0;
-await client.replyStream(emitted[0], "msgE", "thinking...", false);
-assert.ok(!calls.length, "中间帧不出频道");
-await client.replyStream(emitted[0], "msgE", "🧙‍♂️ fix： 已处理", true);
-assert.ok(calls.some((c) => c.via === "cmd" && c.cmd === "aibot_topic_send_reply" && c.content?.includes("已处理")), "最终帧 → send_reply, 头是跨 bot 自称名");
-// 主动 markdown 到已 replyOk 的频道 → 评论而非新帖。
-calls.length = 0;
-await client.sendMessage("topicE", { msgtype: "markdown", markdown: { content: "补充" } });
-assert.ok(calls.some((c) => c.via === "cmd" && c.cmd === "aibot_topic_send_reply"), "replyOk 的帖子走评论");
-// 审批卡 → 改投问话人私聊, 永不进频道。
+assert.equal(ingested.length, 1, "@ 事件落一行成年人话 (不再伪造群帧)");
+assert.equal(ingested[0]!.room, "chat:topicE", "没配对: 频道 room");
+assert.equal(ingested[0]!.post, "pE");
+assert.equal(ingested[0]!.mention, "bot", "@ 了机器人 = 点名 host");
+assert.ok(ingested[0]!.text.includes("频道里求助"), "正文带原帖");
+// 审批卡 → 改投问话人私聊 (lastAsker 由事件记下), 永不进频道。
 calls.length = 0;
 await client.sendMessage("topicE", { msgtype: "template_card", template_card: {} });
 assert.ok(calls.some((c) => c.via === "send" && c.chatid === "tester"), "审批卡改投问话人 DM (lastAsker)");
