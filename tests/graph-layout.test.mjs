@@ -21,7 +21,7 @@ const load = (world, panel) => {
   const W = { rooms: world.rooms, nodes: world.nodes, uidTargets: world.uidTargets || {}, chatNames: world.chatNames || {}, names: world.names || {} };
   const S = { panelBox: { w: panel.w, h: panel.h } };
   const store = { getItem: () => null, setItem: () => {} };
-  const names = ["participants", "directPair", "graphModel", "reconcileGraph", "gStep", "gLayout"];
+  const names = ["participants", "directPair", "graphModel", "reconcileGraph", "gStep", "gLayout", "roomHasRole", "nodeIdOf"];
   const fn = new Function("W", "S", "D", "localStorage", "convsEl", "esc", "isRoleId",
     SRC.slice(a, b) + "\nreturn {" + names.map((n) => n + ":" + n).join(",") + "};");
   return { ...fn(W, S, { role: "", roomId: "" }, store, { querySelector: () => null }, String, () => false), W, S };
@@ -173,6 +173,21 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
   console.log(`graph-layout 三角形用例: ${g.nodes.length} 节点 ${g.links.length} 边 · 压边 ${oe} · 交叉 ${c}`);
   assert.ok(finite(g));
   assert.equal(oe, 0, `三角形用例: ${oe} 处节点压在别的边上`);
+}
+
+// 图里点 room 的选中规则用的「关联」判定 (web/chat.js roomHasRole, 与图上的边同一份成员表):
+// role 在 room 成员里 = 有关联 (点 room 保留 role); 不在 / room 不存在 = 无关联 (清掉旧 role 选中)。
+{
+  const L = load(WORLD, { w: 575, h: 690 });
+  const ids = Object.keys(WORLD.uidTargets);
+  const wiz = (i) => ({ who: { kind: "wizard", id: ids[i] } });
+  const room = { id: "dm:x", members: [wiz(0), wiz(1), { who: { kind: "human", id: "alice" } }] };
+  const is = (target) => (nid) => nid === target;
+  assert.equal(L.roomHasRole(room, is(L.nodeIdOf(wiz(0).who))), true, "wizard 成员 → 有关联");
+  assert.equal(L.roomHasRole(room, is("human:alice")), true, "人成员 → 有关联");
+  assert.equal(L.roomHasRole(room, is(L.nodeIdOf(wiz(2).who))), false, "不在 room 里的 wizard → 无关联");
+  assert.equal(L.roomHasRole({ id: "dm:y", members: [] }, is("human:alice")), false, "空 room → 无关联");
+  assert.equal(L.roomHasRole(null, is("human:alice")), false, "room 不存在 → 无关联");
 }
 
 console.log("graph-layout: ok");

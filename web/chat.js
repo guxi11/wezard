@@ -194,6 +194,10 @@
     var tail = s.replace(/^[a-z-]+:/, '').slice(-6);
     return tail ? kind + ' …' + tail : (s || 'room');
   };
+  // 「关联」只有一个口径 —— room 的成员表 (图上的边就是照它连的): role 在 room 里 = 有关联, 否则没有。图的选中规则 (graphToggleRoom / goRole) 与侧栏都问它。
+  var roomHasRole = function (r, isRole) {
+    return !!r && (r.members || []).some(function (m) { return isRole(nodeIdOf(m.who), m.who); });
+  };
   var roomById = function (id) {
     for (var i = 0; i < W.rooms.length; i++) if (W.rooms[i].id === id) return W.rooms[i];
     return null;
@@ -737,7 +741,7 @@
         d.hit.setAttribute('class', 'rv-hit');
         d.hit.setAttribute('data-link', l.room);
         d.hit.setAttribute('data-edge', l.key);
-        d.hit.onclick = function () { if (S.gmoved) return; toggleRoom(l.room); };
+        d.hit.onclick = function () { if (S.gmoved) return; graphToggleRoom(l.room); };
         layer('rv-ghits').appendChild(d.hit);
         dom.edges[l.key] = d;
       }
@@ -749,7 +753,7 @@
       var e = dom.nodes[n.id];
       if (!e) {
         e = document.createElementNS(SVGNS, 'g');
-        if (n.isRoom) { e.setAttribute('data-room', n.ref.id); e.onclick = function () { if (S.gmoved) return; toggleRoom(n.ref.id); }; }
+        if (n.isRoom) { e.setAttribute('data-room', n.ref.id); e.onclick = function () { if (S.gmoved) return; graphToggleRoom(n.ref.id); }; }
         else { e.setAttribute('data-node', n.ref.target); e.onclick = function () { if (S.gmoved) return; goRole(n.ref.target); }; }
         layer('rv-gnodes').appendChild(e);
         dom.nodes[n.id] = e;
@@ -2079,8 +2083,7 @@
     return true;
   };
   var isMemberOf = function (roomId, target) {
-    var r = roomById(roomId);
-    return !!r && (r.members || []).some(function (m) { return nodeIdOf(m.who) === target || ('uid:' + (m.who && m.who.id)) === target; });
+    return roomHasRole(roomById(roomId), function (nid, who) { return nid === target || ('uid:' + (who && who.id)) === target; });
   };
   // 选中 room (role 不变); 先 loadRoom (同步改选中态) 再重画图一次, 之前先画再 load, 取回来 renderRoom 又画一遍。
   var goRoom = function (id, limit) { pushNav(); setReading(true); markSeen(id); var p = loadRoom(id, limit, true); if (S.view === 'graph' && S.gdom) renderGraph(); return p; };
@@ -2109,6 +2112,12 @@
     var q = loadWizard(target, keepScroll);
     syncListSel(); if (S.view === 'graph' && S.gdom) renderGraph();
     return q;
+  };
+  // 图里点 room (节点 / 边): 当前视角 role 在这个 room 里 → 关联, 只加上 room 选中、role 保留; 不在 → 无关联, 清掉旧的 role 选中,
+  // 视角换成这个 room 自己的成员 (host → 第一个 wizard → 第一个 human, 同 pickRoleForRoom: 页面总得有个人站着看)。已选中的再点 = 取消选中, 不受此规则。
+  var graphToggleRoom = function (id) {
+    if (D.roomId !== id && D.role && !roomHasRole(roomById(id), isRoleId)) adoptRole(pickRoleForRoom(id, { id: D.role, uid: D.uid }));
+    return toggleRoom(id);
   };
   var tbBack = $('#tb-back');
   if (tbBack) tbBack.onclick = function () {

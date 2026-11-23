@@ -906,6 +906,46 @@ try {
   await pgD.close();
   globalThis.__extraRooms = []; globalThis.__extraNodes = [];
 
+  // ── 图里点 room 的选中规则: 视角 role 在该 room 里 = 有关联 (role 保留); 不在 = 无关联 (清旧 role 选中, 视角换成该 room 的成员) ──
+  {
+    const ZZ = "adhoc:zz0001";
+    globalThis.__extraRooms = [roomFact(ZZ, "adhoc", [
+      { who: who("wizard", B), name: "bob", via: "founder", since: 20, ord: 1, host: true },
+      { who: who("human", "U2"), name: "李四", via: "invite", since: 21, ord: 2, host: false },
+    ], who("wizard", B))];
+    globalThis.__extraNodes = [];
+    const pg = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+    await pg.addInitScript(() => localStorage.setItem("wezard.role.side", "graph"));
+    await pg.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+    await pg.waitForSelector('.rv-room[data-room="' + ZZ + '"]', { timeout: 5000 });
+    await pg.waitForTimeout(300);
+    const sel = () => pg.evaluate(() => ({
+      pov: [...document.querySelectorAll(".rv-person.on .rv-nm")].map((e) => e.textContent.trim()),
+      rooms: [...document.querySelectorAll(".rv-room.on")].map((e) => e.getAttribute("data-room")),
+    }));
+    const settle = async (pred, msg) => { try { await pg.waitForFunction(pred.fn, pred.arg, { timeout: 4000 }); } catch (e) { assert.fail(msg + ": " + JSON.stringify(await sel())); } };
+    const start = await sel();
+    assert.deepEqual(start.pov, ["alice"], "起点: 视角是 alice: " + JSON.stringify(start));
+    // role → room, 有关联 (alice 在群 G 里): role 保留, G 选中。
+    await pg.click('.rv-room[data-room="' + G + '"]');
+    await settle({ fn: (g) => document.querySelector('.rv-room.on[data-room="' + g + '"]'), arg: G }, "点 G 后 G 选中");
+    assert.deepEqual((await sel()).pov, ["alice"], "有关联: 视角 alice 保留");
+    // room → room, 无关联 (alice 不在 ZZ 里): 视角清掉换成 ZZ 的 host (bob), 只剩 ZZ 选中。
+    await pg.click('.rv-room[data-room="' + ZZ + '"]');
+    await settle({ fn: (z) => document.querySelector('.rv-room.on[data-room="' + z + '"]') && [...document.querySelectorAll(".rv-person.on .rv-nm")].some((e) => e.textContent.trim() === "bob"), arg: ZZ }, "点 ZZ 后视角换成 bob");
+    assert.deepEqual(await sel(), { pov: ["bob"], rooms: [ZZ] }, "无关联: alice 的选中被清掉, 只剩 ZZ + 它自己的成员");
+    // room → role, 有关联 (bob 在 ZZ 里就是视角本人; 点 ZZ 里的人 U2 → 人节点也是成员): room 保留。
+    await pg.click('.rv-person[data-node="human:U2"]');
+    await settle({ fn: () => [...document.querySelectorAll(".rv-person.on .rv-nm")].some((e) => e.textContent.trim() === "李四"), arg: null }, "点 ZZ 的成员 李四 后视角换成李四");
+    assert.deepEqual(await sel(), { pov: ["李四"], rooms: [ZZ] }, "有关联: 选中的 room 保留, 视角换成成员");
+    // room → role, 无关联 (alice 不在 ZZ 里): room 选中清掉, 只剩 alice。
+    await pg.click('.rv-person[data-node="uid:' + A + '"], .rv-person.wizard:has(.rv-nm:text-is("alice"))');
+    await settle({ fn: () => !document.querySelector(".rv-room.on") && [...document.querySelectorAll(".rv-person.on .rv-nm")].some((e) => e.textContent.trim() === "alice"), arg: null }, "点无关联的 alice 后 ZZ 选中被清");
+    assert.deepEqual(await sel(), { pov: ["alice"], rooms: [] }, "无关联: room 选中被清, 只剩 alice");
+    await pg.close();
+    globalThis.__extraRooms = []; globalThis.__extraNodes = [];
+  }
+
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {
