@@ -396,6 +396,8 @@ const ROUTED_MSGTYPES = new Set<string>(["text", "image", "mixed", "voice", "fil
 /** 不是人发的一句话, 不回「暂不支持」(stream 是流式刷新回调, event 正常走事件通道)。 */
 const NO_REPLY_MSGTYPES = new Set<string>(["stream", "event"]);
 const isGroup = (msg: BaseMessage): boolean => msg.chattype === "group" && !!msg.chatid;
+/** 企微原生帧的来源标记: "channel" = 频道帖子里的 @ (base 是帖子自己的 opk 群, 见 channel-posts.ts)。 */
+const sourceOf = (msg: BaseMessage): string => (msg as { compat_info?: { source?: string } }).compat_info?.source ?? "";
 const BUILTIN_BOT_NAMES = ["wezard"] as const;
 
 const maybeStripMentions = (names: readonly string[], msg: BaseMessage, text: string): string => {
@@ -430,6 +432,13 @@ const renderQuotePrefix = (body: string): string => {
   const quoted = body.split("\n").map((l) => `> ${l}`).join("\n");
   return `> [引用]\n${quoted}\n\n`;
 };
+// 频道 / 帖子里的「回复 (评论)」在企微回调里带的 quote 不是被回复的那一条, 而是**整篇帖子的
+// 摘要**: 频道名 / 发帖人 / 发帖时间 / 帖子正文 / 回复 1..N (含 bot 自己的每次回复) —— 实测
+// 2026-11-23 (daemon.log): 人的正文 17 字, quote 1803 字; 同一帖跟到第 21 条回复时 8753 字。
+// 这份摘要本来就在 room 账本里, 贴回 prompt 只是把整个帖子再抄一遍, 且越跟越长。
+const CHANNEL_POST_DIGEST = /^频道：[\s\S]*\n发帖人：/;
+const isChannelPostDigest = (msg: BaseMessage, body: string): boolean =>
+  sourceOf(msg) === "channel" || CHANNEL_POST_DIGEST.test(body);
 // Normalize for self-reply quote dedup: WeCom mangles formatting on its quote
 // bubble in unpredictable ways — strips backticks, swaps `-` bullets for `·`,
 // re-wraps whitespace, sometimes loses inline markdown. Reduce both sides to
@@ -494,13 +503,13 @@ const parseQuote = (q: QuoteContent | undefined): { tag: string; srcTag?: string
 /** 名字 → target ("" = 本聊天默认 wizard)。 */
 type Resolve = (base: string, name: string) => string;
 
-const composeInbound = (
+export const composeInbound = (
   msg: BaseMessage,
   rawBody: string,
   inContext: (target: string, quoted: string) => boolean,
   stripAt: (msg: BaseMessage, text: string) => string,
   resolve: Resolve,
-): { text: string; tag: string; promoted: boolean } => {
+): { text: string; tag: string; promoted: boolean; spoken: string } => {
   const { tag: typed, cleaned } = parseTag(rawBody);
   const q = parseQuote(msg.quote);
   const tag = typed || q?.tag || "";
@@ -509,16 +518,19 @@ const composeInbound = (
   // 的引用 / 改投)回退到路由目标。这修掉了「带引用新建/改投会话时原文被重复注入」。
   const dedupTag = q?.srcTag ?? tag;
   // 剥完头什么都不剩(折叠气泡这类纯 chrome 的引用)⇒ 没有可搬运的内容,只留路由。
-  const consumed = !q || !q.body.trim() || inContext(resolve(chatPrincipal(msg), dedupTag), q.body);
+  // 频道帖子摘要是账本的重排, 不是人引用的话 —— 和"已在 context 里"同一个处置: 不贴回。
+  const consumed = !q || !q.body.trim() || isChannelPostDigest(msg, q.body)
+    || inContext(resolve(chatPrincipal(msg), dedupTag), q.body);
+  // spoken = 人自己打的那部分 (不含引用/摘要): 账本人话行只存它, 进 prompt 的 text 才带引用。
   if (cleaned.trim()) {
-    return { text: consumed ? cleaned : `${renderQuotePrefix(q.body)}${cleaned}`, tag, promoted: false };
+    return { text: consumed ? cleaned : `${renderQuotePrefix(q.body)}${cleaned}`, tag, promoted: false, spoken: cleaned };
   }
   if (q && !consumed) {
     // 提成正文时也剥一次 @mention,让 "@wezard /usage" → "/usage" 命中命令路径。
     const p = parseTag(stripAt(msg, q.body).trim());
-    return { text: p.cleaned, tag: p.tag || tag, promoted: true };
+    return { text: p.cleaned, tag: p.tag || tag, promoted: true, spoken: "" };
   }
-  return { text: cleaned, tag, promoted: false };
+  return { text: cleaned, tag, promoted: false, spoken: cleaned };
 };
 
 const isAllowed = (allow: readonly string[], principals: string[]): boolean => {
@@ -1110,7 +1122,7 @@ export const installInboundRouter = (
     }
     return resolveName(base, name);
   };
-  const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string } => {
+  const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string; spoken: string } => {
     const c = composeInbound(msg, raw, quoteInContext, stripAt, resolve);
     return { ...c, who: resolve(chatPrincipal(msg), c.tag) };
   };
@@ -1135,7 +1147,6 @@ export const installInboundRouter = (
   };
   // 频道 (人 2026-11-17 拍板: 整个频道一个管家, 每个帖子复用): 原生帧的 base 是帖子群, 先等它与
   // 同句 topic_at_bot 配上对拿到频道键 (原生帧可能先到), 再把散落的帖子级绑定收口成频道一条。
-  const sourceOf = (msg: BaseMessage): string => (msg as { compat_info?: { source?: string } }).compat_info?.source ?? "";
   const settleChannelPost = async (base: string): Promise<void> => {
     const topicId = channelOfPost(cfg, base) || await awaitChannelOfPost(cfg, base, CHANNEL_PAIR_WAIT_MS);
     if (!topicId) { log.info({ base }, "channel post: 未配上频道 (没有同句 topic_at_bot), 按普通群判"); return; }
@@ -1229,7 +1240,8 @@ export const installInboundRouter = (
     await replySystem(frame, msg, "[wezard] 引导没接上 (" + (sent.reason ?? "未知原因") + ") — 稍后再发一句。");
     return true;
   };
-  const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
+  /** `text` 进 prompt (可带引用前缀); `spoken` = 人自己打的那部分, 账本人话行只存它。 */
+  const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = [], spoken = ""): Promise<void> => {
     // 账本行只存人的原话: 信封已删 (谁说的 = 行作者, 哪个群 = 行所在 room), 管家自查 / 点名提示 /
     // 名册增量这些提醒尾巴也不在这里拼 —— 它们在唤醒渲染那一刻才挂 (wake-tail.ts / room-hub)。
     const channel = chatPrincipal(msg);
@@ -1237,7 +1249,7 @@ export const installInboundRouter = (
     // room 模型: 人话行的去重键 = 企微 msgid (账本行 ext), 事件表已退役。
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body });
+      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: spoken || text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }
@@ -1264,7 +1276,7 @@ export const installInboundRouter = (
     const msg = frame.body;
     if (!msg) return;
     if (await guideGate(frame, msg, stripAt(msg, msg.text?.content ?? ""))) return;
-    const { text, tag, promoted, who } = route(msg, stripAt(msg, msg.text?.content ?? ""));
+    const { text, tag, promoted, who, spoken } = route(msg, stripAt(msg, msg.text?.content ?? ""));
     const known = bridge.hasMirrorTarget(who);
     log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted, chat: chatPrincipal(msg), who, known }, "rx text");
     // 落到一个没有任何会话的聊天时, 把原始回调也记一笔: 频道 / 群 / 单聊的 chatid
@@ -1272,7 +1284,7 @@ export const installInboundRouter = (
     if (!known) log.info({ body: msg }, "rx text — unknown chat (raw)");
     const { stop } = await gate(frame, msg, text, who, tag);
     if (stop) return;
-    await send(frame, msg, who, text);
+    await send(frame, msg, who, text, [], spoken);
   });
 
   client.on("message.image", async (frame: WsFrame<ImageMessage>) => {
@@ -1337,7 +1349,8 @@ export const installInboundRouter = (
     // Re-compose on the per-item stripped text: drops the routing `.name` (it was
     // consumed above; leaving it in would leak into Claude) and attaches the
     // quote only when it isn't already in the target's context.
-    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, resolve).text, images);
+    const composed = composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, resolve);
+    await send(frame, msg, who, composed.text, images, composed.spoken);
   });
 
   // 文件 / 视频 (企微只在单聊里推): 落进 inbox, 以一行 `[文件: 路径 (大小)]` 注入 —— 不走剪贴板,

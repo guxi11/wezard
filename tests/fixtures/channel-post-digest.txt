@@ -1,0 +1,28 @@
+频道：wezard channel
+发帖人：blandozhang(张园园)
+发帖时间：2026-11-23 22:16:44
+
+帖子正文：
+@trekzhang(trekzhang)后面我将在这channel里开发wezard
+
+回复：
+1. wezard 2026-11-23 22:17:06
+🧙‍♂️ wezard-16 https://bubble.top/role?id=tmwtcnofe24ny3n&role=chat%3ACiDQgsOUFiZKuq72eZjREUPiGDrHhSOAH3aSoMqVm3fklRAB%23wezard-16&forceInnerBrowser=1&ww_vw=1000&ww_vh=800&ww_uniq=wezard-16：
+
+好，已记下：本群之后用来开发 wezard（源码在 ~/develop/Guxi11/cc-wecom），派活都按这个仓来。我现在的工作区还是你刚绑的 wwdevplatformnjlogic，要不要切到 cc-wecom？
+
+2. blandozhang(张园园) 2026-11-23 22:18:47
+绑错了，切到cc-wecom
+
+3. wezard 2026-11-23 22:19:17
+🧙‍♂️ wezard-16 https://bubble.top/role?id=tmwtcq8mkq5cf2f&role=chat%3ACiDQgsOUFiZKuq72eZjREUPiGDrHhSOAH3aSoMqVm3fklRAB%23wezard-16&forceInnerBrowser=1&ww_vw=1000&ww_vh=800&ww_uniq=wezard-16：
+
+我自己切不过去：cc-wecom 已有管家身份 .rrsink https://bubble.top/role?id=cNOFDt0JzY32Lm9KX&role=chat%3Awezard-receipt-regress-sink&forceInnerBrowser=1&ww_vw=1000&ww_vh=800&ww_uniq=rrsink，系统不让第二个管家占同一目录，要求把本群绑给它。这正好和你说的「本 room 应有新的 host 实例」是同一件事，已交给 .LeoWhite https://bubble.top/role?id=tmwtcpk2q0c5ww7&role=chat%3ACiDQgsOUFiZKuq72eZjREUPiGDrHhSOAH3aSoMqVm3fklRAB%23LeoWhite&forceInnerBrowser=1&ww_vw=1000&ww_vh=800&ww_uniq=LeoWhite：在修复里按 cc-wecom 为本 room 起新 host 和 monitor 实例，替下我。
+
+4. blandozhang(张园园) 2026-11-23 22:20:22
+另外，monitor 应该使用 light tier，而非standard
+
+5. wezard 2026-11-23 22:20:58
+🧙‍♂️ wezard-16 https://bubble.top/role?id=tmwtcs9ax2q0dbz&role=chat%3ACiDQgsOUFiZKuq72eZjREUPiGDrHhSOAH3aSoMqVm3fklRAB%23wezard-16&forceInnerBrowser=1&ww_vw=1000&ww_vh=800&ww_uniq=wezard-16：
+
+收到。配置里没有 monitor 档位这一项（只有管家档 models.router），需要改代码：已派人把 monitor 的首建、重生、冷恢复都固定为 light。它和 .LeoWhite https://bubble.top/role?id=tmwtcpk2q0c5ww7&role=chat%3ACiDQgsOUFiZKuq72eZjREUPiGDrHhSOAH3aSoMqVm3fklRAB%23LeoWhite&forceInnerBrowser=1&ww_vw=1000&ww_vh=800&ww_uniq=LeoWhite 改的是同一段 monitor 分配代码，已提醒两边避开冲突。

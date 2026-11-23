@@ -3,7 +3,9 @@
 //
 // 企微频道里 @ 机器人的话以原生帧进来时 (compat_info.source=channel), chatid 是**每个帖子自己的**
 // opk… 群 id, 帧里没有频道标识 (实测原始帧: msgid/aibotid/chatid/chattype/from/msgtype/text/
-// quote/compat_info, quote 正文里只有频道的显示名)。频道标识 (topic_id) 只在同一句话的
+// quote/compat_info。注意 quote 不是被回复的那条, 而是整篇帖子摘要: 频道名 / 发帖人 / 发帖时间 /
+// 帖子正文 / 回复 1..N —— 里外都没有 topic_id, 也不能当引用用, inbound 按形状丢弃它)。
+// 频道标识 (topic_id) 只在同一句话的
 // topic_at_bot 事件里 —— channel.ts 按「同一发话人、事件前后几秒内」把两路配对, 配上一次就把
 // 帖子 base → {channel, post} 落进这里, 跟帖 room 的诞生 / 出站 / 管家绑定都据此判。
 //

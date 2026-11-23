@@ -340,7 +340,9 @@ const main = async (): Promise<void> => {
       if (st && !sameWho(roomHost(st), w)) to = [w];
     }
     // 图片以 @path 文本随行 (codebuddy 的唯一通道), 账本行同时记 files。
-    const text = a.text + (a.images?.length ? "\n" + a.images.map((p) => "@" + p).join(" ") : "");
+    // 账本行只存人的原话 (rawText): prompt 里为引用加的块不进正文 —— rolepage 与之后每次
+    // room_read / wake 都按行正文复读, 引用 (尤其频道帖子摘要) 进正文等于反复抄整帖。
+    const text = (a.rawText ?? a.text) + (a.images?.length ? "\n" + a.images.map((p) => "@" + p).join(" ") : "");
     const streamId = String(a.streamId ?? "");
     const expires = Date.now() + 6 * 60_000;
     // 占位气泡: frame 记表 (reload 后也能收口), 先挂 loading; 第一条 re 它的 reply 覆盖 (§3a)。
