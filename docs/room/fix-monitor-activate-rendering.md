@@ -49,7 +49,8 @@ shared/room.ts dutiesOpenedBy 的 activate 分支: `msg: row.re?.[0] ?? row.id` 
 
 ## 进度
 
-- [ ] ① renderMsgLine 系统形态 (仅 sys:"activate")
-- [ ] ② dutiesOpenedBy asker 取原话人 (applyOp 传查询, 回落保护)
-- [ ] 单测三组
-- [ ] tsc + build + 单测绿 + reload
+- [x] ① renderMsgLine 系统形态 (仅 sys:"activate") — 渲染为 `[id] [wezard] monitor 判决: 交给 X 回应 (re Y)` / `不回应`; after-wake 等 trigger 原样
+- [x] ② dutiesOpenedBy asker 取原话人 (applyOp 传 byId 查询, 查不到回落 row.author); msg/slot/kind 不变
+- [x] 单测三组 (tests/room-monitor.test.ts ⑪⑫; ⑤ asker 断言改为原话人)
+- [x] tsc + build + 相关单测绿 (room-monitor / monitor / room-after-wake / chat-record / inject-view / wake-tail / room-hub)
+- [ ] reload + 真机再触发一次 monitor activate 验收
