@@ -1339,7 +1339,7 @@ const main = async (): Promise<void> => {
       return undefined;
     };
     /** 名册里已经没有的身份只剩一条成员行 (迁移 / 实例结束留下, 迁移带进来的无名成员就是这样):
-     *  按地址找「本 room 的人」的路径 (room_leave / room_transfer) 要能认出它, 否则它永远移不掉。
+     *  按地址找「本 room 的人」的路径 (room_leave) 要能认出它, 否则它永远移不掉。
      *  只认本 room 现有的成员 —— uid (可带 uid: 前缀) 优先, 其次成员显示名。 */
     const memberRefOf = (s: RoomState, ref: string): Who | undefined => {
       const raw = stripSigil((ref ?? "").trim());
@@ -1730,37 +1730,6 @@ const main = async (): Promise<void> => {
       });
       json(res, 200, { ok: true, applied: b.apply === true, keepRecentHours: keepRecentMs / 3600_000, rooms });
     }));
-    http.register("POST /room/transfer", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (READ_ROOM_FAIL(res, self)) return;
-      const me = roomSelfOf(self);
-      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
-      const b = body as { re?: string; to?: string };
-      const re = (b.re ?? "").toString().trim();
-      const roomId = re ? roomStore.roomOfMsg(re) : undefined;
-      const s = roomId ? roomState(roomId) : undefined;
-      if (!roomId || !s || !s.byId.has(re)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re }); return; }
-      const to = whoRefOf((b.to ?? "").toString()) ?? memberRefOf(s, (b.to ?? "").toString());
-      if (!to) { json(res, 400, { ok: false, reason: "认不出这个地址: " + (b.to ?? "") }); return; }
-      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是这个 room 的成员" }); return; }
-      const ds = openDuties(s).filter((d) => d.msg === re);
-      if (!ds.length) { json(res, 409, { ok: false, reason: "这笔没有未决的 duty (从未开出 / 已全部关闭)" }); return; }
-      if (!s.members.has(whoKey(to))) {
-        const host = roomHost(s);
-        if (!(sameWho(host, me) || (to.kind === "wizard" && roomWizardOf(to.id)?.parentUid === me.id))) {
-          json(res, 400, { ok: false, reason: "接手方不是成员: 只有 host / 它的直属 parent 能把它带进来, 其余先 room_invite" });
-          return;
-        }
-        hub.write(roomId, [{ op: "join", at: Date.now(), room: roomId, who: to, ord: s.nextOrd, via: "transfer", by: me }]);
-      }
-      const at = Date.now();
-      const moves: RoomOp[] = ds.filter((d) => d.slot !== whoKey(to))
-        .map((d) => ({ op: "move" as const, at, room: roomId, duty: re, from: holderOf(s, d)!, to, by: me }));
-      if (moves.length) hub.write(roomId, moves);
-      // move 本身不唤醒: 一句 say 把接手方叫起来, 它按游标读到的就是这笔。
-      roomReply(res, hub.append(roomId, { author: me, kind: "say", to: [to],
-        text: "「" + clipLine(s.byId.get(re)!.text, 80) + "」已移交给你 (room_transfer), 用 chat_reply({re, text, status}) 交代", origin: "tool" }));
-    });
     http.register("POST /room/read", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;

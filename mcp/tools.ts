@@ -532,19 +532,6 @@ export const createWezardServer = (): McpServer => {
     async ({ room }) => unwrapText("room_members", await daemonPost("/room/members", { ...(room ? { room } : {}) })),
   );
   server.registerTool(
-    "room_transfer",
-    {
-      title: "Hand a duty over to another wizard",
-      description:
-        "把一条 duty 转给另一个 wizard (账本上写一行 move, 关账权随之过去)。`to` 不是成员时按 room_invite 的规则先入群。转出去之后这件事不再归你, 你也不需要再 chat_reply 它。",
-      inputSchema: currentAddressSchema({
-        re: z.string().describe("要转的那条 duty 的消息 id。"),
-        to: z.string().describe("转给谁 (wizard 名, 裸名)。"),
-      }),
-    },
-    async ({ re, to }) => unwrap("room_transfer", await daemonPost("/room/transfer", { re, to })),
-  );
-  server.registerTool(
     "room_read",
     {
       title: "Read a room's ledger",

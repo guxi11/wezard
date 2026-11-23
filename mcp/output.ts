@@ -48,7 +48,7 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
   // room 口子: 回包只留调用方接下来要用的 (哪一行、落在哪个 room、有没有降级)。
   if (tool === "chat_say" || tool === "chat_ask" || tool === "chat_reply" || tool === "room_watch")
     return pick(row, ["ok", "room", "id", "seq", "status", "re", "duplicate", "degraded", "woke", "reason"]);
-  if (tool === "room_open" || tool === "room_invite" || tool === "room_join" || tool === "room_approve" || tool === "room_leave" || tool === "room_transfer" || tool === "notify" || tool === "send_file")
+  if (tool === "room_open" || tool === "room_invite" || tool === "room_join" || tool === "room_approve" || tool === "room_leave" || tool === "notify" || tool === "send_file")
     return pick(row, ["ok", "room", "id", "who", "members", "sent", "held", "bytes", "visible", "reason"]);
   if (tool === "spawn_wizard" || tool === "clone_wizard") return pick(row, ["ok", "name", "cwd", "inherited", "model", "effort", "tier", "modelWarning", "dispatched", "queued", "event", "eventId", "planId", "warnings", "warning"]);
   if (tool === "wizard_identity") {

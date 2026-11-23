@@ -109,9 +109,8 @@ send_file({ room?, path, kind?, caption?, title?, description?, re?: string })  
 - `room_invite({ room, who })`: host / 人 / 拉自己直属子 wizard 立即入; 其余成员邀请转成 join-req。
 - `room_join({ room, reason })`: 写 join-req, 唤醒 host。
 - `room_approve({ re, accept })`: 仅 host / 人。
-- `room_leave({ room, who? })`: 缺省自己; host / 人可移出别人。
+- `room_leave({ room, who? })`: 缺省自己; host / 人可移出别人。交接 = 先把接手方拉进来 (`room_invite`), 再自己 `room_leave` (`room_transfer` 已删; 老账本里的 move 行仍由 fold 折叠)。
 - `room_members({ room? })` (取代 chat_members)。
-- `room_transfer({ re, to })`: 写 move; to 非成员按 invite 规则。
 - `room_read({ room?, from?, since?, until?, limit?, all? })` (取代 read_chat; 默认 W-1)。
 - `room_watch({ room, on })`: B-3 订阅, 默认关。
 

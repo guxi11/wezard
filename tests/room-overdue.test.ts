@@ -63,7 +63,7 @@ const seen = (s: S, who: Who, seq: number): void => { applyOp(s, { op: "seen", a
   say(s, { author: A, kind: "say", re: [ask.id], text: "补充" }, { now: 100 * MIN });
   assert.deepEqual(levels(s, 150 * MIN), [], "提问者的补充重置所有 holder");
 }
-// ⑤ room_transfer: move 算活动, 新 holder 重新收提醒
+// ⑤ 老账本里的 move 行 (room_transfer 已删, 读侧 fold 照常折叠): 算一次活动, 新 holder 重新收提醒
 {
   const { s, ask } = mk();
   daemonRow(s, "overdue-remind", 61 * MIN, ask.id, [B]);
