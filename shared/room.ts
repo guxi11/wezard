@@ -86,6 +86,8 @@ export const parseMsgId = (id: string): { hash: string; seq: number } | undefine
 // ── 账本行 ─────────────────────────────────────────────────────────────
 
 export type JoinVia = "founder" | "invite" | "approve" | "mention" | "spawn" | "transfer" | "inbound" | "migrate";
+/** 成员角色: "monitor" = 本 room 的监视者 —— 不发言、不当 host、不持有 duty, 只写 activate 行。 */
+export type MemberRole = "monitor";
 export type MsgKind = "say" | "ask" | "task" | "reply" | "file" | "join-req" | "system" | "trigger";
 export type ReplyStatus = "done" | "need" | "progress" | "passed" | "canceled" | "error";
 /** 关 duty 的终态。need / progress / error 不关。 */
@@ -105,7 +107,7 @@ export interface NameOp extends OpBase { op: "name"; title: string; by: Who }
 export interface NoticeOp extends OpBase { op: "notice"; text: string; by: Who }
 /** 公告正文上限 (字)。 */
 export const NOTICE_MAX = 500;
-export interface JoinOp extends OpBase { op: "join"; who: Who; ord: number; via: JoinVia; by: Who }
+export interface JoinOp extends OpBase { op: "join"; who: Who; ord: number; via: JoinVia; by: Who; role?: MemberRole }
 export interface LeaveOp extends OpBase { op: "leave"; who: Who; by: Who; why?: string }
 /** batch: true = 一次成功的唤醒投递写下的游标 (入座时的 history 游标不带) —— 「最近 N 次唤醒」的计数来源。 */
 export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number; batch?: true }
@@ -128,6 +130,10 @@ export interface MsgRow extends OpBase {
   closes?: string[];
   /** 本行实际唤醒的 wizard uid (预算降级的不在内)。 */
   wake: string[];
+  /** 入站显式给出: "bot" = 人 @ 了机器人 (等同点名 host, 由入站按事件写, 不从正文猜)。 */
+  mention?: "bot";
+  /** 人话交给了本 room 的 monitor (只唤醒 monitor, 不在 host 槽位开 duty)。judge 落定, 重放照旧。 */
+  monitor?: true;
   /** 带 interrupt 投递 (先 Esc 打断再投)。 */
   interrupt?: boolean;
   for?: string;
@@ -145,6 +151,8 @@ export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | Mo
 // ── fold ───────────────────────────────────────────────────────────────
 
 export interface Member { who: Who; ord: number; via: JoinVia; since: number; by: Who; seen: number; watch: boolean;
+  /** 加入时声明的角色 (monitor 跳过 host, 也不继承上一任的 role 变化)。 */
+  role?: MemberRole;
   /** 它最近几次成功唤醒批次的时刻 (SeenOp.batch 的 at, 去重、最多 BATCH_KEEP 个, 旧→新); 不是 batch 的 seen 不记。 */
   batches: number[] }
 
@@ -165,7 +173,7 @@ export interface Duty {
   after?: string[];
   planId?: string;
   for?: string;
-  /** 最近一次 room_transfer (move 行) 的时刻 —— 逾期计时把它当一次活动。 */
+  /** 老账本里最近一条 move 行的时刻 (room_transfer 已删, 只读侧折叠) —— 逾期计时把它当一次活动。 */
   movedAt?: number;
   /** 最近一条 holder 写的非终态 status (need / progress / error)。 */
   last?: { status: ReplyStatus; seq: number };
@@ -222,8 +230,14 @@ export const dutiesOpenedBy = (row: MsgRow): Array<Omit<Duty, "key">> => {
   if (row.kind === "reply" && row.status === "need" && row.author.kind === "wizard")
     return (row.to ?? []).filter((t) => t.kind === "human").map((t) => ({ ...base, slot: slotOfWho(t), kind: "need" as const }));
   if (row.kind === "join-req") return [{ ...base, slot: HOST_SLOT, kind: "join-req" }];
-  // 绑定 room 里的人话: 点名开给被点名者, 没点名开给 host。
+  // monitor 的 activate: 为 re 里那条人话在 to 名下开 duty (人话自己不再开 host 槽位)。to 为空 = 判定不回应。
+  if (row.kind === "trigger" && row.sys === "activate") {
+    const target = row.to?.[0];
+    return target && target.kind === "wizard" ? [{ ...base, msg: row.re?.[0] ?? row.id, slot: slotOfWho(target), kind: "human" as const }] : [];
+  }
+  // 绑定 room 里的人话: 点名开给被点名者; 交给 monitor 的不开 duty; 其余开给 host。
   if (row.author.kind === "human" && row.kind === "say" && isBoundRoom(row.room) && row.origin !== "migrate") {
+    if (row.monitor) return [];
     const named = (row.to ?? []).filter((t) => t.kind === "wizard");
     return named.length ? named.map((t) => ({ ...base, slot: slotOfWho(t), kind: "human" as const })) : [{ ...base, slot: HOST_SLOT, kind: "human" }];
   }
@@ -242,7 +256,9 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
       const k = whoKey(op.who);
       const prev = s.members.get(k);
       if (!prev) s.memberLog.push({ at: op.at, op: "join", who: op.who, by: op.by, via: op.via });
-      s.members.set(k, prev ? { ...prev, via: op.via, by: op.by } : { who: op.who, ord: op.ord, via: op.via, since: op.at, by: op.by, seen: 0, watch: false, batches: [] });
+      s.members.set(k, prev
+        ? { ...prev, via: op.via, by: op.by, ...(op.role ? { role: op.role } : {}) }
+        : { who: op.who, ord: op.ord, via: op.via, since: op.at, by: op.by, seen: 0, watch: false, batches: [], ...(op.role ? { role: op.role } : {}) });
       s.everMembers.set(k, op.who);
       s.nextOrd = Math.max(s.nextOrd, op.ord + 1);
       break;
@@ -297,14 +313,20 @@ export const foldRoom = (id: string, ops: readonly RoomOp[]): RoomState => ops.r
 
 // ── host ───────────────────────────────────────────────────────────────
 
-/** host = 当前 wizard 成员里加入序最小的那个; 人不参与; 每次读时算, 不落盘。
- *  undefined = 没有 wizard 成员 (人兜底 / 绑定 room 下一句人话触发 onboarding)。 */
-export const hostOf = (members: Iterable<{ who: Who; ord: number }>): Who | undefined => {
+/** host = 当前 wizard 成员里加入序最小的那个; 人不参与, monitor 也不当 host (它的活是激活, 不是回答)。
+ *  每次读时算, 不落盘。undefined = 没有 wizard 成员 (人兜底 / 绑定 room 下一句人话触发 onboarding)。 */
+export const hostOf = (members: Iterable<{ who: Who; ord: number; role?: MemberRole }>): Who | undefined => {
   let best: { who: Who; ord: number } | undefined;
-  for (const m of members) if (m.who.kind === "wizard" && (!best || m.ord < best.ord)) best = m;
+  for (const m of members) if (m.who.kind === "wizard" && m.role !== "monitor" && (!best || m.ord < best.ord)) best = m;
   return best?.who;
 };
 export const roomHost = (s: RoomState): Who | undefined => hostOf(s.members.values());
+
+/** 本 room 的 monitor 成员 (不发言、不当 host、不持有 duty)。 */
+export const monitorsOf = (s: RoomState): Who[] =>
+  [...s.members.values()].filter((m) => m.role === "monitor" && m.who.kind === "wizard").map((m) => m.who);
+export const hasMonitor = (s: RoomState): boolean =>
+  [...s.members.values()].some((m) => m.role === "monitor" && m.who.kind === "wizard");
 
 /** 起名 / 改名只有当前 host 能做 (人也不行 —— 人的意见走人话)。 */
 export const canRename = (s: RoomState, who: Who): boolean => sameWho(roomHost(s), who);
@@ -444,6 +466,8 @@ export interface Draft {
   status?: ReplyStatus;
   /** 是否显式给了 status (区分「没给」与默认)。 */
   statusGiven?: boolean;
+  /** 入站显式给出: "bot" = 人 @ 了机器人 (等同点名 host)。 */
+  mention?: "bot";
   interrupt?: boolean;
   for?: string;
   after?: string[];
@@ -505,15 +529,32 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   else if (member) speak = "member";
   else if (d.kind === "join-req") speak = "join-req";
   else return fail(403, "非成员: 先 room_join 申请入群 (或请 host / 人邀请你)");
-  if (!isDaemon && (d.kind === "system" || d.kind === "trigger")) return fail(403, d.kind + " 行只有 daemon 能写");
+  // activate 是 monitor 唯一能写的 trigger 行 (它的判决), 其余 trigger / system 只有 daemon 能写。
+  const activate = d.kind === "trigger" && d.sys === "activate";
+  if (!isDaemon && (d.kind === "system" || (d.kind === "trigger" && !activate))) return fail(403, d.kind + " 行只有 daemon 能写");
+  if (activate && member?.role !== "monitor") return fail(403, "activate 行只有本 room 的 monitor 能写");
   if (d.kind === "join-req" && member) return fail(409, "你已经是成员");
-  if (!d.text.trim() && d.kind !== "reply" && !d.files?.length) return fail(400, "text required");
+  // activate 可以不带正文 (判决 "不回应" 就是一行空话)。
+  if (!d.text.trim() && d.kind !== "reply" && !d.files?.length && !activate) return fail(400, "text required");
 
   // ② re 必须都在本 room
   const re = [...new Set(d.re ?? [])];
   const missing = re.filter((id) => !s.byId.has(id));
   if (missing.length) return fail(400, "re 不在这个 room: " + missing.join(", "));
   if (d.kind === "reply" && !re.length) return fail(400, "reply 必须带 re");
+
+  // activate 的合法形状: re 恰一条本 room 最后一条人话; to 至多一个 wizard; 同一条人话只激活一次。
+  if (activate) {
+    if (re.length !== 1) return fail(400, "activate 必须且只能带一条 re (最后一条人话的 id)");
+    const target = s.byId.get(re[0]!)!;
+    if (target.author.kind !== "human" || target.kind !== "say") return fail(400, "activate 的 re 必须是本 room 的人话: " + re[0]);
+    if (s.msgs.some((m) => m.seq > target.seq && m.author.kind === "human" && m.kind === "say"))
+      return fail(409, "activate 只能激活本 room 最后一条人话 (它之后还有人说话)");
+    if (s.msgs.some((m) => m.kind === "trigger" && m.sys === "activate" && (m.re ?? []).includes(target.id)))
+      return fail(409, "这条人话已经被激活过: " + target.id);
+    if ((d.to ?? []).length > 1) return fail(400, "activate 至多激活一个 wizard");
+    if ((d.to ?? []).some((t) => t.kind !== "wizard")) return fail(400, "activate 只能激活 wizard");
+  }
 
   // ③ status 写入权: 只有 holder (人超集; error 只有 daemon)
   let closes: string[] = [];
@@ -575,10 +616,13 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   if (dup && d.origin !== "inbound") return { ok: true, row: dup, duplicate: true, degraded: [] };
 
   // ⑧ 唤醒 + 回合预算
+  // 绑定 room 里没点名、也没 @ 机器人的人话: 交给 monitor 处置 (只唤醒它, 不在 host 槽位开 duty)。
+  const toMonitor = isHuman && d.kind === "say" && isBoundRoom(s.id) && d.mention !== "bot" && !to.some((t) => t.kind === "wizard") && hasMonitor(s);
   const seq = s.seq + 1;
   const draftRow: MsgRow = {
     op: "msg", at: ctx.now, room: s.id, id: msgIdOf(s.id, seq), seq, author: d.author, ord: member?.ord ?? 0, speak,
     kind: d.kind, text: d.text, ...(to.length ? { to } : {}), ...(re.length ? { re } : {}), ...(status ? { status } : {}),
+    ...(d.mention ? { mention: d.mention } : {}), ...(toMonitor ? { monitor: true as const } : {}),
     ...(closes.length ? { closes } : {}), wake: [], ...(d.interrupt ? { interrupt: true } : {}),
     ...(d.for ? { for: d.for } : {}), ...(d.after?.length ? { after: d.after } : {}), ...(d.planId ? { planId: d.planId } : {}),
     ...(d.files?.length ? { files: d.files } : {}), origin: d.origin, ...(d.ext ? { ext: d.ext } : {}),
@@ -616,8 +660,11 @@ export const wakeTargets = (s: RoomState, row: MsgRow, ctx: Pick<JudgeCtx, "clos
     case "trigger": named.forEach(add); break;
     default:
       named.forEach(add);
-      // 绑定 room 里没点名的人话 → host
-      if (row.author.kind === "human" && !named.length && isBoundRoom(row.room)) add(roomHost(s));
+      // 绑定 room 里没点名的人话 → monitor (有的话, 不开 duty) / host。@ 了机器人的直达 host。
+      if (row.author.kind === "human" && !named.length && isBoundRoom(row.room)) {
+        if (row.monitor) monitorsOf(s).forEach(add);
+        else add(roomHost(s));
+      }
   }
   // 订阅 (B-3): 只在人话 / 带终态的 reply 时唤醒订阅者
   const watchable = (row.author.kind === "human" && row.kind === "say") || (row.kind === "reply" && !!row.status && CLOSING.has(row.status));
