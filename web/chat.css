@@ -311,7 +311,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 
 /* ── 消息 ─────────────────────────────────────────────────────────── */
 .thread {
-  flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none;
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none;
   padding: 16px 20px 28px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
 }
 .thread-in { display: flex; flex-direction: column; gap: 14px }
