@@ -13,7 +13,8 @@ import { applyOp, DAEMON, leaveOps, roomHost, whoKey, type RoomState } from "../
 import { loadClassStore } from "../daemon/classes.js";
 import { identityWorkspaceOf, loadWizardStore, openInstance } from "../daemon/wizard.js";
 import { applyOnboarding, bindSteward, judgeOnboarding, loadOnboardingStore, rewriteStewardBindings } from "../daemon/onboarding.js";
-import { repairStewardInstances } from "../daemon/steward-repair.js";
+import { repairStewardInstances, unspawnedStewards } from "../daemon/steward-repair.js";
+import { baseOfKey } from "../shared/session-label.js";
 import { H, room as mkRoom, uid, W } from "./room-fixture.js";
 
 const dirOf = (tag: string): string => mkdtempSync(join(tmpdir(), "steward-inst-" + tag + "-"));
@@ -160,6 +161,35 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   assert.equal(writes.length, before, "第二遍零写入");
   assert.equal(classes.get("chat:wrD")!.nextOrdinal, 4, "没有多领号");
   assert.equal(dhtpm.members.has(whoKey(S1)), true);
+}
+
+// ── ⑤ 有记录没 pane 的管家实例: boot 兜底只收「记录在、pane 没有」的那个 ─────
+{
+  const dir = dirOf("spawn");
+  const classes = loadClassStore(join(dir, "classes.json"));
+  const store = loadWizardStore(join(dir, "wizards.json"), () => undefined, classes);
+  const ws = join(dir, "dhtpm");
+  mkdirSync(ws, { recursive: true });
+  classes.create({ id: "chat:wrD", bot: "", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
+  store.upsert("chat:wrD", { identity: "chat:wrD", ordinal: 1, name: "OliveBrown-1", kind: "steward", workspace: ws });
+  const CH = "chat:wrCH";
+  const chTarget = openInstance(store, CH, "chat:wrD")!;
+  const chWho = W(store.get(chTarget)!.uid!);
+  const dhtpmWho = W(store.get("chat:wrD")!.uid!);
+  const ch = mkRoom(CH, [chWho]);
+  const dhtpm = mkRoom("chat:wrD", [dhtpmWho]);
+  // 帖子的 room: 成员是频道管家 (同一实例) —— 不是它自己的实例, 不许按帖子再开一个。
+  const post = mkRoom("chat:opkCH", [chWho]);
+  const rooms = new Map<string, RoomState>([[CH, ch], ["chat:wrD", dhtpm], ["chat:opkCH", post]]);
+  const collect = (panes: Set<string>): string[] => unspawnedStewards({
+    store, rooms: [...rooms.keys()], stateOf: (room) => rooms.get(room),
+    boundClassOf: () => "chat:wrD",                 // 故意连帖子 room 也给类, 测「不重复收集」
+    hasPane: (t) => panes.has(t),
+  });
+  // dhtpm 的 OliveBrown-1 有 pane → 不收; 频道那个没 pane → 收; 帖子 room 去重。
+  assert.deepEqual(collect(new Set(["chat:wrD"])), [chTarget], "只收本 room 那个没 pane 的实例");
+  assert.deepEqual(collect(new Set([chTarget, "chat:wrD"])), [], "有 pane 就不再收 (幂等)");
+  assert.equal(store.all().filter((w) => baseOfKey(w.target) === "chat:opkCH").length, 0, "帖子 room 不另造实例");
 }
 
 console.log("steward-instance ok");

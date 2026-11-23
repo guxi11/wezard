@@ -86,6 +86,42 @@ export const duplicateInstanceRecords = (store: WizardStore | undefined): Wizard
   return losers;
 };
 
+/** 直绑 room 里「记录在、pane 没有」的管家实例 target —— boot 兜底 (人 2026-11-23 t7)。
+ *  room 里已有这个实例的成员、但 hasPane=false → 收进来, 调用方补起会话。自愈只写成员, 起不了
+ *  pane; 这一步管存量恢复 (频道那个 OliveBrown-2) 与今后任何 pane 丢失的漂移。
+ *  幂等: hasPane 为真就不收。同一实例被多个 room 看见 (频道 + 它的帖子 room) 只收一次;
+ *  帖子 room 里坐的是**频道**管家 (base 不是它) —— 那不是它的实例, 不在这里补。 */
+export const unspawnedStewards = (a: {
+  store: WizardStore | undefined;
+  rooms: readonly string[];
+  stateOf: (room: string) => RoomState | undefined;
+  boundClassOf: (room: string) => string;
+  hasPane: (target: string) => boolean;
+}): string[] => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  if (!a.store) return out;
+  for (const room of a.rooms) {
+    const classId = a.boundClassOf(room);
+    if (!classId) continue;
+    const s = a.stateOf(room);
+    if (!s) continue;
+    // 本 room 的实例必须已经在座 (成员) —— 缺成员是落定 (settle) 的事, 不在这里造记录。
+    const seated = [...s.members.values()].some((m) => {
+      if (m.who.kind !== "wizard") return false;
+      const rec = a.store!.byUid(m.who.id);
+      return !!rec && identityOf(rec) === classId && baseOfKey(rec.target) === room;
+    });
+    if (!seated) continue;
+    // 与落定路径同一把尺子解析 (成员已在座 → localManifestation 只会原样返回它, 不写盘)。
+    const local = localManifestation(a.store, room, classId);
+    if (!local || seen.has(local)) continue;
+    seen.add(local);
+    if (!a.hasPane(local)) out.push(local);
+  }
+  return out;
+};
+
 /** 跑一遍自愈 (幂等)。写回走调用方的 room write (daemon 的 hub), 本期不手改任何 JSONL。 */
 export const repairStewardInstances = (a: {
   store: WizardStore | undefined;

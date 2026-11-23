@@ -39,8 +39,11 @@ room-hub.ts:249 起注释: 没有活 pane ≠ 忙, 那是**冷会话** (曾有�
 
 ## 进度
 
-- [ ] 修法 1: settleBoundChannel 起 pane
-- [ ] 修法 2: unspawnedStewards 纯函数 + boot 接线
-- [ ] 修法 3: 单测
-- [ ] tsc + build + 单测绿
+- [x] 修法 1: settleBoundChannel 起 pane — 抽了 spawnStewardPane (与 guideSettleRoom 同构,
+  带 spawning 去重: 群落定先起过时频道这边不重复起)
+- [x] 修法 2: unspawnedStewards 纯函数 + boot 接线 — 只认「直绑 + 本 room 实例已在座 +
+  hasPane=false」; 帖子 room 坐的是频道管家, 不另造也不重复收; 收到就 spawnStewardPane
+- [x] 修法 3: 单测 — tests/steward-instance 第 ⑤ 组 (只收无 pane 的那个 / 有 pane 跳过 + 幂等 /
+  帖子 room 不另造实例)
+- [x] tsc + build + 单测绿
 - [ ] reload + 真机验证 OliveBrown-2 可响应
