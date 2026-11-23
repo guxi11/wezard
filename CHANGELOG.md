@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-11-23
+
 ### Added
 - **chatdetail 里成员进群 / 退出 / 被移除展示成系统通知 (admin「在chatdetail里，成员被邀请进群、成员退出、被移除都要展示系统通知」)**: 账本里 `join` / `leave` 是不占 seq 的 op, 以前前端根本看不到。现在 `RoomState.memberLog` 把真正的进出折出来 (已在座者再次 join 只改 via / by, 不算), `shared/room-view.ts` `memberNotes` 渲染成居中小号灰字: 「A 邀请了 B 进群」「A 批准了 B 入群」「A 拉起了 B 进群」「B 加入了群」「B 退出了群 (原因)」「B 被 A 移出群」(操作者是 daemon / 拿不到就省略「A」)。同动作 + 同操作者 + 5 分钟内 + 其间没人说话的连续变动折成一条 (「B、C、D 等 N 人」)。不报: 创建者自己 (`founder`)、迁移批量入座、人的隐式入座, 以及 dm 开房那一拍。room 页 `/api/room` 带 `notes`, 前端按时间插进已加载的消息里 (还有更早页时, 早于最早已加载消息的通知翻到那页才出现); wizard 页 (全部聊天记录) 时间轴带 `note` 行 (只含与该 wizard 有关的, 后缀 room 名)。bound 群与 dm / adhoc 都有; **不进企微** (`mirrors()` 没动, 只是 rolepage 展示)。测试 `tests/room-member-notes.test.ts`。
 - **chatdetail 底部居中浮一个「scroll to bottom」文字按钮 (admin「在chatdetail底部居中展示一个"scroll to bottom"的带背景的文本按钮」)**: 离底超过 80px 才显示 (scroll 事件 + rAF 合并, 内容变高由 ResizeObserver 补一次), 点击平滑滚到底, 到底 / 内容不足一屏即收起; 按钮挂在 `.thread` 外一层的 `.thread-box` 里、不进滚动内容, 所以不碰 `overflow-anchor:none` / 向上翻页补历史 / 贴底跟随的滚动逻辑; 切到日程时随 `.thread` 一起收。`tests/room-graph.dom.mjs` 加断言 (滚到中间浮出、点击到底收起)。
@@ -1553,7 +1555,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/guxi11/wezard/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/guxi11/wezard/compare/v2.9.0...v3.0.0
 [2.9.0]: https://github.com/guxi11/wezard/compare/v2.8.8...v2.9.0
 [2.8.8]: https://github.com/guxi11/wezard/compare/v2.8.7...v2.8.8
