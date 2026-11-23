@@ -56,6 +56,7 @@
 - [ ] 上下文成本: charter 体积。
 - [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `20764ff`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。 **线上复核 (06:20)**: 修后 2h BobZane 0 次 respawn; reap 照常工作 (修后已收 4 个, 当前 tmux 4 pane), 未被 `wake owed` 整体挡住。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
+- [ ] (进行中, DavidAdams light, adhoc:af00bd83 · 82c2ade2.1) daemon 日志降噪: 2026-11-23 当天 warn 主要是噪音 —— ① hub gone 警告按进程去重, 22 次 boot × 7 个早结束的 wizard = 154 条 → 只在 reportGone 真写了新 undelivered 行时 warn; ② deliver 「活着但忙」静默 return → 状态变化 info; ③ 死 pane resume 的 fork 迁移 watcher 当天 64 次 0 命中 (现行 CLI resume 原地续写), 10 条 timeout warn → 原文件长大则降 info。
 
 ## 待 admin 拍板
 
