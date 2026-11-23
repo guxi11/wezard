@@ -52,7 +52,7 @@
 - [x] 小清理: `daemon/room-overdue.ts` 未用的 `holderOf` import 已删。
 - [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
-- [ ] **进行中 (SamQuincy, light, ccb5eec5.1)**: 死 pane `--resume` 重生无条件重挂 charter → 同一会话上下文里叠多份 (~8.6k 字/份)。实证: OliveOwen transcript 18:19Z/20:19Z/22:19Z/00:19Z 各一份, 对上 4 次 idle reap → respawning, 其间无 /clear / 压缩。改: 重生路径复用 `charter-rearm` 判据 (最近一次上下文切断之后已送达就不挂)。
+- [x] resume 重生不再重复灌 charter (SamQuincy, `e7525ab`, 见已完成表)。遗留: reload 路径 `charterToRearm` 仍从文件头扫 (压缩后 reload 靠落盘 `charterOwed` 兜住, 实际不漏); `charterInContext` 重生时整读一次 transcript。
 - [ ] 上下文成本: charter 体积。
 - [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `20764ff`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。 **线上复核 (06:20)**: 修后 2h BobZane 0 次 respawn; reap 照常工作 (修后已收 4 个, 当前 tmux 4 pane), 未被 `wake owed` 整体挡住。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
@@ -100,6 +100,7 @@
 | 2026-11-23 | plan 闲时提醒抑制: owner 作为 asker 派出、带该 planId 未关的 duty 也算欠账 (`planHasOpenDuty` 纯函数 + `tests/plan-debt.test.ts`)。起因 FrankDavis 等交代时每改一次 revision 被提醒一次 (5 次), wezard-1 报。MayaKing (light); 我核 diff、重跑 plan-debt / room-overdue / room-hub + typecheck | `8f8e8ae` |
 | 2026-11-23 | 反问后原 duty 易被遗忘: hub `render` 的「你要交代」追加「我持有、last=need、提问人就是本批触发行作者」的 duty, 带「你反问过, 对方的答复可能就在上面」标注; `inject-view` 的 owe id 抽取对标注兼容 (按 `;` / ` (` 切)。OliveMiller (light); 我核 diff、重跑 7 个相关测试 + typecheck | `fdf3f96` |
 | 2026-11-23 | idle 回收 ↔ 唤醒重生死循环: BobZane 自 00 点起每 5 分钟 reap → 重生 → 注入没落地 → 再 reap (每小时白起 12 次 claude)。两个缺陷叠加: ① `e89db20` 后 reap 只信 transcript 末条记录, resume 的 pane 不写记录 → 刚生即判闲; ② 上个进程被杀时遗留的悬空 tool_use 被 `idleVerdict` 当成「停在审批卡」, requireIdle 永不过。修: `lastActiveOf` 并入 pane 出生时刻 (ps etime); reap veto「wake owed」; `openToolUses(jsonl, sinceMs)` 只数本 CLI 进程启动后的调用。线上 12 分钟 reaped:0, 积压 4.8h 的唤醒投进去。PaulNash (standard); 我核 diff、全量测试 123/126 (codex 两个本机无 codex; graph-layout 是 `ea07e52` 的回归, 已二分并转 wezard-1 d6977146.23) | `20764ff` |
+| 2026-11-23 | 死 pane `--resume` 重生不再无条件重挂 charter: 新 `charterInContext` (最近一次 compact_boundary 之后有 user 行带宪章块 = 已在上下文), 两处 respawn 改走 `charterOwedOnResume` (欠账 / 无转录 / 被压缩掉才挂)。实证起因: OliveOwen 4 次 reap→重生各叠一份 ~8.6k 字。SamQuincy (light); 我核 diff、重跑 charter-rearm / charter / pane-delivery / maintenance-scheduler + typecheck | `e7525ab` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
 
