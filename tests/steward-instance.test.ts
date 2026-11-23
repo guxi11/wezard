@@ -12,7 +12,7 @@ import { ConfigSchema } from "../shared/config.js";
 import { applyOp, DAEMON, leaveOps, roomHost, whoKey, type RoomState } from "../shared/room.js";
 import { loadClassStore } from "../daemon/classes.js";
 import { identityWorkspaceOf, loadWizardStore, openInstance } from "../daemon/wizard.js";
-import { applyOnboarding, bindSteward, judgeOnboarding, loadOnboardingStore, rewriteStewardBindings } from "../daemon/onboarding.js";
+import { applyOnboarding, bindSteward, judgeOnboarding, loadOnboardingStore, renderOnboardingDone, rewriteStewardBindings } from "../daemon/onboarding.js";
 import { repairStewardInstances, unspawnedStewards } from "../daemon/steward-repair.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { H, room as mkRoom, uid, W } from "./room-fixture.js";
@@ -69,6 +69,12 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   // 同一个 room 再落一次: 复用它, 不领新号。
   const b1again = applyOnboarding(store, loadOnboardingStore(cfg), "chat:wrNEW", v, bindOn("chat:wrNEW"), wsOf);
   assert.equal(b1again.instance, "OliveBrown-2", "本 room 已有实例 → 复用 (幂等)");
+  // 完成确认要分清「本 room 新建的实例」与「本 room 已有的实例」—— 人 2026-11-23 看到「已有的 .X」
+  // 以为绑的是别处那个实例。
+  assert.equal(b1.instanceOpened, true, "本 room 新领号 = 新建");
+  assert.match(renderOnboardingDone(b1), /\.OliveBrown-2 \(\.OliveBrown 类在本群新建的实例\)/, "完成确认说新建");
+  assert.equal(b1again.instanceOpened, undefined, "本 room 本来就有 → 不是新建");
+  assert.match(renderOnboardingDone(b1again), /已有的实例/, "完成确认说已有的");
   assert.equal(classes.get("chat:wrD")!.nextOrdinal, 4, "只领了 2 / 3 两个号");
 
   // ③ 人给实例名 / 类名 → 都落类名。
