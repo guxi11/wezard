@@ -18,6 +18,7 @@ import { copyFileSync, existsSync, statSync } from "node:fs";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
 import { loadAutoNames } from "./wizard-names.js";
+import { EXEC_SHELLS, execToolRefusal, shortToolOf } from "./exec-surface.js";
 import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
 import { CLASS_NAME_MAX, inClassSpace, instanceName, parseInstanceName, validClassName, type ClassRecord, type ClassStore } from "./classes.js";
 
@@ -37,18 +38,22 @@ export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker" 
  *  它不发言、不派活、不关账 —— 那条 append 闸在 room-hub (monitor 只能写 activate 行)。 */
 export const MONITOR_TOOLS: ReadonlySet<string> = new Set(["room_read", "read_channel", "wizard_roster", "room_activate", "handoff"]);
 
-/** mcp__wezard__room_read → room_read (内置工具名原样)。与 onboarding 的 shortToolOf 同义,
- *  在这里本地实现是为了避开 wizard ↔ onboarding 的模块环。 */
-const shortToolOf = (action: string): string => {
-  const i = action.lastIndexOf("__");
-  return i >= 0 ? action.slice(i + 2) : action;
-};
+/** monitor 的代码执行外壳 (REPL) 只许调白名单五件 —— 与引导同一份下钻 (daemon/exec-surface.ts)。 */
+const monitorExecRefusal = (what: string): string =>
+  "monitor 的代码执行外壳 (REPL) 里只许调 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (入参直接写对象字面量), 脚本里的其它调用 ("
+  + what + ") 一律拒 —— 你的活是读账本然后 room_activate 一条判决。";
 
-/** monitor 调了越界工具时的拒绝理由 ("" = 不是 monitor, 或用的是白名单里的那几件)。
- *  REPL / 代码执行外壳整个拒 (下钻脚本里能调什么本来就不是 approval 能逐条看清的)。 */
-export const monitorRefusal = (rec: WizardRecord | undefined, action: string): string => {
+/** monitor 调了越界工具时的拒绝理由 ("" = 不是 monitor, 或用的是白名单里的那五件)。
+ *  CodeBuddy 只把 REPL 暴露成直接工具, 真正的调用写在 code 脚本里: 代码执行外壳要下钻脚本
+ *  (每一次调用都必须是白名单那五件), 只看外层工具名会把工具面整个关死 (2026-11-23 .monitor-2 实录)。 */
+export const monitorRefusal = (rec: WizardRecord | undefined, action: string, toolInput?: unknown): string => {
   if (rec?.kind !== "monitor") return "";
-  if (MONITOR_TOOLS.has(shortToolOf(action))) return "";
+  const short = shortToolOf(action);
+  if (MONITOR_TOOLS.has(short)) return "";
+  if (EXEC_SHELLS.has(short)) {
+    const code = toolInput !== null && typeof toolInput === "object" ? (toolInput as { code?: unknown }).code : undefined;
+    return execToolRefusal(code, MONITOR_TOOLS, monitorExecRefusal);
+  }
   return "monitor 只有 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (" + action + " 被拒): 你的活是读账本然后 room_activate 一条判决, 不发言、不派活、不改文件。";
 };
 

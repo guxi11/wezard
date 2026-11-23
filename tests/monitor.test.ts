@@ -40,6 +40,19 @@ for (const t of ["chat_say", "chat_reply", "chat_ask", "notify", "send_file", "r
   assert.ok(monitorRefusal(rec("monitor"), t).length > 0, t + " 被拒");
 }
 assert.equal(monitorRefusal(rec("worker"), "chat_say"), "", "非 monitor 不受限");
+
+// ②b CodeBuddy 只暴露 REPL: 工具面下钻脚本 (白名单五件), 与引导同型 (2026-11-23 .monitor-2 实录)。
+const repl = (code: unknown) => monitorRefusal(rec("monitor"), "REPL", code === undefined ? undefined : { code });
+assert.equal(repl("const r = await mcp.wezard.room_read({ room: 'chat:x' }); return r;"), "", "REPL 调 room_read 放行");
+assert.equal(repl("await mcp.wezard.room_activate({ re: 'a.1', to: 'x' });"), "", "REPL 调 room_activate 放行");
+assert.equal(repl("const { room_read } = mcp.wezard; await room_read({});"), "", "解构别名按同一身份认");
+assert.ok(repl("await mcp.wezard.chat_say({ text: 'x' });").includes("chat_say"), "REPL 调 chat_say 拒");
+assert.ok(repl("await mcp.wezard.spawn_wizard({ inherit: false });").length > 0, "REPL 调 spawn_wizard 拒");
+assert.ok(repl("await fetchCommon();").length > 0, "认不出的调用拒");
+assert.ok(repl("await new Foo();").length > 0, "new 拒");
+assert.ok(repl("await mcp.wezard.room_read({").includes("解析不了"), "解析失败拒");
+assert.ok(repl(undefined).length > 0, "无 toolInput 的 REPL 拒");
+assert.ok(monitorRefusal(rec("monitor"), "REPL", { code: 42 }).length > 0, "code 不是字符串也拒");
 assert.deepEqual([...MONITOR_TOOLS].sort(), ["handoff", "read_channel", "room_activate", "room_read", "wizard_roster"]);
 
 // ③ hub 闸: monitor 写 say / reply / ask 一律 403; activate 判决照常落成 (并开 duty)。

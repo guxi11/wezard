@@ -2149,7 +2149,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       return;
     }
     // monitor 的工具面也是硬的 (§2.2): 与引导同层, 排在手闸与一切放行之前。
-    const monitorDeny = owner ? monitorRefusal(wizardStore()?.get(owner), toolName) : "";
+    const monitorDeny = owner ? monitorRefusal(wizardStore()?.get(owner), toolName, toolInput) : "";
     if (monitorDeny) {
       log.info({ toolName, sessionId, owner }, "monitor tool reject");
       json(res, 200, { decision: "deny", reason: monitorDeny } satisfies ApproveResp);
