@@ -2066,7 +2066,7 @@ const main = async (): Promise<void> => {
       learnChannelRoom(cfg, topicId);
       if (!roomState(room)) {
         const at = Date.now();
-        const ops: RoomOp[] = [{ op: "open", at, room, kind: "wecom-group", by: DAEMON }];
+        const ops: RoomOp[] = [{ op: "open", at, room, kind: "channel", by: DAEMON }];
         try {
           const stw = resolveSteward(cfg, wizardStore(), room, (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
           // 已有化身的才能作 founder (fresh = 记录还没落, 由入站接待自己开)。与 ensureBoundRoom 同一判法。

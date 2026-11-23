@@ -232,7 +232,7 @@ try {
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
   // 默认 2d: 3 天前的老 room 不在范围里 (ROOMS 有 3 间, 画 2 间)。
   // 两人 room (DM) 不画节点: alice—bob 之间直接一条可点的线, 点它 = 打开那个 room。
-  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 📢 / 帖子 📝 / 只有 wizard 的 room 🧙‍♂️ (图节点 + 图例); 类型文字只在 tooltip。
+  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 📌 / 只有 wizard 的 room 🧙‍♂️ (图节点 + 图例); 类型文字只在 tooltip。
   const icons = await page.evaluate(() => ({
     nodes: [...document.querySelectorAll(".rv-room text")].map((t) => t.textContent.trim().split(" ")[0]),
     tip: ((document.querySelector(".rv-room title") || {}).textContent || ""),
@@ -240,7 +240,7 @@ try {
   }));
   assert.deepEqual(icons.nodes, ["👥"], "群 G (多人群聊) 的节点图标 = 👥: " + JSON.stringify(icons));
   assert.match(icons.tip, /群聊 · 企微群/, "类型文字留在 tooltip: " + icons.tip);
-  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "📢", "📝", "🧙‍♂️"], "图例五种 room 图标 (群聊 / 单聊 / 频道 / 帖子 / wizard room): " + JSON.stringify(icons.legend));
+  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "#️⃣", "📌", "🧙‍♂️"], "图例五种 room 图标 (群聊 / 单聊 / 频道 / 帖子 / wizard room): " + JSON.stringify(icons.legend));
   assert.equal(counts.rooms, 1, "room 节点数 = 2d 内有动静的 ≥3 人 room 数 (两人 room 改成连线)");
   assert.deepEqual(counts.directLinks, [DM], "两人 room 画成成员之间的线");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
@@ -975,12 +975,12 @@ try {
     assert.equal(ch.monEdges, 1, "monitor 与所在 room 之间是虚线");
     assert.equal(ch.monHat, 0, "monitor 不戴 host 礼帽");
     assert.equal(ch.containers, 0, "room 节点不嵌套 (没有容器)");
-    assert.deepEqual([ch.icons[CH], ch.icons[P]], ["📢", "📝"], "频道 📢 / 帖子 📝, 与群聊 👥 分开: " + JSON.stringify(ch.icons));
+    assert.deepEqual([ch.icons[CH], ch.icons[P]], ["#️⃣", "📌"], "频道 #️⃣ / 帖子 📌, 与群聊 👥 分开: " + JSON.stringify(ch.icons));
     // 列表头像也换成频道 / 帖子图标 (有成员时不再画成员拼块)。
     await pg.click('[data-side="list"]');
     await pg.waitForSelector(".rv-list .ci", { timeout: 5000 });
     const avatars = await pg.evaluate(() => Object.fromEntries([...document.querySelectorAll(".rv-list .ci")].map((b) => [b.getAttribute("data-room"), (b.querySelector(".av") || {}).textContent])));
-    assert.deepEqual([avatars[CH], avatars[P]], ["📢", "📝"], "列表头像: 频道 📢 / 帖子 📝: " + JSON.stringify(avatars));
+    assert.deepEqual([avatars[CH], avatars[P]], ["#️⃣", "📌"], "列表头像: 频道 #️⃣ / 帖子 📌: " + JSON.stringify(avatars));
     await pg.close();
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
   }

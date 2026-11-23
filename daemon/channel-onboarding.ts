@@ -41,7 +41,7 @@ export const channelMonitorWanted = (cfg: Config, store: WizardStore | undefined
  *  已有就补一条 join。空数组 = 它已经在里面。它是最早加入者时自然当 host, 人话就落到它名下。 */
 export const channelGuideJoinOps = (s: RoomState | undefined, room: string, guide: Who, at: number): RoomOp[] => {
   if (!s) return [
-    { op: "open", at, room, kind: "wecom-group", by: DAEMON },
+    { op: "open", at, room, kind: "channel", by: DAEMON },
     { op: "join", at, room, who: guide, ord: 1, via: "founder", by: DAEMON },
   ];
   if (s.members.has(whoKey(guide))) return [];

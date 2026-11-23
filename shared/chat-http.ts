@@ -285,7 +285,11 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   // 没有 channel-posts 的进程 (独立 svr) 用快照里已有的指针 —— 端口/帖子的归属不会因重建而丢。
   const chFrom = (f: WorldFacts): ChannelOf => channelResolver ?? ((room) => {
     const r = (f.rooms ?? []).find((x) => x.id === room);
-    return r?.channel ? { channel: r.channel.id, post: r.rootPost ?? "" } : undefined;
+    if (!r) return undefined;
+    if (r.channel) return { channel: r.channel.id, post: r.rootPost ?? "" };
+    // 频道 room 在快照里没有 channel 指针 (它本身就是频道): kind 直接说明它是频道 ——
+    // 独立 svr 没有 channel-posts, 只看账本会把频道当成企微群 (图标/类型全错)。
+    return r.kind === "channel" ? { channel: room.replace(/^chat:/, ""), post: "" } : undefined;
   });
   const roomsNow = (f: WorldFacts): WorldFacts => {
     const rs = liveRooms();
