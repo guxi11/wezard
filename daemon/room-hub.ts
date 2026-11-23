@@ -87,6 +87,9 @@ export const createRoomHub = (p: HubPorts) => {
   const append = (room: string, d: Draft, extra: Partial<JudgeCtx> = {}): Verdict => {
     const s = state(room);
     if (!s) return { ok: false, status: 400, reason: "没有这个 room: " + room };
+    // monitor 的发言权是硬的 (§2.2): 只写 activate 判决行, 其余一律拒 —— 不发言、不派活、不关账。
+    if (s.members.get(whoKey(d.author))?.role === "monitor" && !(d.kind === "trigger" && d.sys === "activate"))
+      return { ok: false, status: 403, reason: "monitor 不发言 / 不派活 / 不关账: 只写 room_activate 的判决行" };
     const v = judge(s, d, {
       now: now(),
       isParent: (parent, child) => isDirectParent((u) => p.wizardOf(u)?.parentUid, parent, child),

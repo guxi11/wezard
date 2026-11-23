@@ -532,6 +532,19 @@ export const createWezardServer = (): McpServer => {
     async ({ room }) => unwrapText("room_members", await daemonPost("/room/members", { ...(room ? { room } : {}) })),
   );
   server.registerTool(
+    "room_activate",
+    {
+      title: "Activate a wizard for the last human message (monitor only)",
+      description:
+        "monitor 的判决: 把本 room 最后一条人话在 `to` 名下开成 duty 并唤醒它。不给 `to` = 判定不回应 (只记一行判决, 不开 duty、不投递)。同一条人话只能激活一次。只有 monitor 能调, 别的 wizard 一律 403。",
+      inputSchema: currentAddressSchema({
+        re: z.string().describe("最后一条人话的消息 id (账本行首方括号里的 id)。"),
+        to: z.string().optional().describe("激活谁 (wizard 名); 省略 = 不回应。"),
+      }),
+    },
+    async ({ re, to }) => unwrap("room_activate", await daemonPost("/room/activate", { re, ...(to ? { to } : {}) })),
+  );
+  server.registerTool(
     "room_read",
     {
       title: "Read a room's ledger",

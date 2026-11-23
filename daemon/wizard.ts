@@ -32,7 +32,26 @@ const renderApprenticeRules = (): string[] => [
 ];
 
 /** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
-export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker";
+export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker" | "monitor";
+/** monitor 的工具面 (硬限): 读账本 / 读频道 / 看名册 / 写一条 activate 判决 / 交接自己。
+ *  它不发言、不派活、不关账 —— 那条 append 闸在 room-hub (monitor 只能写 activate 行)。 */
+export const MONITOR_TOOLS: ReadonlySet<string> = new Set(["room_read", "read_channel", "wizard_roster", "room_activate", "handoff"]);
+
+/** mcp__wezard__room_read → room_read (内置工具名原样)。与 onboarding 的 shortToolOf 同义,
+ *  在这里本地实现是为了避开 wizard ↔ onboarding 的模块环。 */
+const shortToolOf = (action: string): string => {
+  const i = action.lastIndexOf("__");
+  return i >= 0 ? action.slice(i + 2) : action;
+};
+
+/** monitor 调了越界工具时的拒绝理由 ("" = 不是 monitor, 或用的是白名单里的那几件)。
+ *  REPL / 代码执行外壳整个拒 (下钻脚本里能调什么本来就不是 approval 能逐条看清的)。 */
+export const monitorRefusal = (rec: WizardRecord | undefined, action: string): string => {
+  if (rec?.kind !== "monitor") return "";
+  if (MONITOR_TOOLS.has(shortToolOf(action))) return "";
+  return "monitor 只有 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (" + action + " 被拒): 你的活是读账本然后 room_activate 一条判决, 不发言、不派活、不改文件。";
+};
+
 /** 缺省种类: 聊天的默认会话 (untagged target) 是那个群的管家, 其余都是工人。 */
 const defaultKindOf = (target: string): WizardKind => (tagOfKey(target) ? "worker" : "steward");
 
@@ -1035,10 +1054,53 @@ const renderStewardRules = (a: CharterArgs): string[] => {
   ];
 };
 
+/** monitor 的宪章 (kind "monitor"): 它只做一件事 —— 读账本, 决定最后一条人话激活谁。
+ *  这份宪章取代通用的 wizard 宪章 (编排 / 派活 / 发言那几节对它是纯噪音)。 */
+export const renderMonitorCharter = (a: CharterArgs): string => {
+  const me = a.self.address || a.self.name;
+  return [
+    "# 你是这个 room 的 monitor",
+    "",
+    "你是 wezard 里一个频道 / 帖子 room 的常驻 monitor。你不发言、不当 host、不持有 duty —— 读账本, 判断最后一条人话该由谁回应, 写一条判决, 就这一件事。",
+    "",
+    "## 我是谁",
+    bullet([
+      `名字: **\`${me || "(未命名)"}\`**`,
+      `home room: \`${a.principal}\`${a.chat ? " (" + a.chat + ")" : ""} —— 只有这个 room 的人话归你判`,
+      `工作区: \`${a.self.cwd || "(未设置)"}\``,
+    ]),
+    "",
+    ...(a.notice ? ["## 本群公告", "📌 " + a.notice, ""] : []),
+    "## 每轮只做三件事",
+    bullet([
+      "1. **读**: 唤醒你的账本行已经在输入框里; 需要更多上下文就 `room_read` (本 room) / `read_channel` (频道历史, 频道 room 才用得上)。",
+      "2. **判**: 只看**最后一条用户消息**。它需要一个成员来回应吗? 找人的依据是 `wizard_roster` 与账本里出现过的人 (职责 / 最近说了什么)。",
+      "3. **写判决**: `room_activate({re: \"<那条人话的消息 id>\", to: \"<名字>\"})` —— 这一条就在它名下开成 duty。",
+    ]),
+    "",
+    "不需要回应 (闲聊 / 与职责无关 / 别人已经在答 / 拿不准) → `room_activate({re: \"<id>\"})`, 不给 `to`: 只记一行判决, 不开 duty、不投递。",
+    "",
+    "## 规矩",
+    bullet([
+      "**只有最后一条人话能激活**; 更早的消息不要补激活, 同一条人话只能激活一次。",
+      "**只激活本 room 的成员** (名字从 wizard_roster / 账本里取); 帖子的 host、频道管家都在成员里。",
+      "**不发言**: 你没有 chat_say / chat_reply; 被激活者按自己的游标读上下文, 不需要你转写或写意图。",
+      "**判不了就给空 to** —— 不投递比乱点人好。",
+      "**工具面是硬的**: room_read / read_channel / wizard_roster / room_activate / handoff, 其余一律被拒 (含 REPL 下钻、改文件、开子 agent)。",
+      "**你不持有 duty**: 这一轮结束就结束, 不关账、不交代。",
+    ]),
+    "",
+    "## 自我管理",
+    "ctx 大了 (见 wizard_whoami 的 handoffSuggested) 就 `handoff({brief})` 压成简报原地重开: 你的全部记忆就是「这个 room 在聊什么、谁合适」, 写进 brief 就够。",
+    "",
+  ].join("\n");
+};
+
 /** 开局宪章 —— spawn 时停在 `charters/<sid>.md`, 由 `charterPending` 作为 preamble 前置到首条注入。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / room 是唯一的沟通对象。 */
 export const renderCharter = (a: CharterArgs): string => {
+  if (a.self.kind === "monitor") return renderMonitorCharter(a);
   const me = a.self.address || a.self.name;
   const parts: string[] = [
     "# 你是一个 wizard",

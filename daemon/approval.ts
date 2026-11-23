@@ -44,6 +44,7 @@ import { isStewardTarget } from "./steward.js";
 import { wizardStore } from "./wizard.js";
 import { makeStewardGuard } from "./steward-guard.js";
 import { guideRefusal } from "./onboarding.js";
+import { monitorRefusal } from "./wizard.js";
 import { sessionNameFor } from "./session-name.js";
 import { reachable } from "./reach.js";
 
@@ -2145,6 +2146,13 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     if (guideDeny) {
       log.info({ toolName, sessionId, owner }, "onboarding guide tool reject");
       json(res, 200, { decision: "deny", reason: guideDeny } satisfies ApproveResp);
+      return;
+    }
+    // monitor 的工具面也是硬的 (§2.2): 与引导同层, 排在手闸与一切放行之前。
+    const monitorDeny = owner ? monitorRefusal(wizardStore()?.get(owner), toolName) : "";
+    if (monitorDeny) {
+      log.info({ toolName, sessionId, owner }, "monitor tool reject");
+      json(res, 200, { decision: "deny", reason: monitorDeny } satisfies ApproveResp);
       return;
     }
     // 管家手闸只看 role (wiring B: 出站门已废, 契约 §7 改由 role 触发)。

@@ -87,6 +87,8 @@ const expandSlashForms = (text: string) =>
 const charterExempt: Record<string, string> = {
   // 只给新群引导化身用, 见 daemon/onboarding.ts GUIDE_TOOLS
   onboard_bind: "onboarding guide only",
+  // 只给 room 的 monitor 用, 见 daemon/wizard.ts MONITOR_TOOLS + renderMonitorCharter
+  room_activate: "room monitor only",
 };
 {
   const registered = await toolNames();
