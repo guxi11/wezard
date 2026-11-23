@@ -89,9 +89,9 @@
 - CHANGELOG [Unreleased]: Removed 写 room_transfer 和一次性判官, Added 写 monitor 与频道 / 帖子 room。都是 **BREAKING**。
 
 ## 进度 (执行者维护)
-- [ ] 2.1 纯核心 + 单测
+- [x] 2.1 纯核心 + 单测
 - [ ] 2.2 monitor 身份 / 工具面 / 失败重试
 - [ ] 2.3 频道传输入站 / 出站 / 配对
-- [ ] 2.4 删 room_transfer
+- [x] 2.4 删 room_transfer
 - [ ] 2.5 读模型 + graph
 - [ ] 3 验收
