@@ -70,7 +70,12 @@
 - [x] ② 落定解析: 本 room 化身, 无则 fresh spawn (群 + 频道两路) — steward.localManifestation
   (类是 openInstance 领号, 非类身份是本 room 又一条同身份记录), applyOnboarding 统一解析
 - [x] ③ 既有错误绑定纠正 (幂等) — daemon/steward-repair.ts + boot 自愈 (不是独立闸门脚本):
-  绑定实例名→类名 (chatPolicy + 频道表), 只修**直绑**的 room, 帖子 room / 群里的频道管家不动
+  绑定实例名→类名 (chatPolicy + 频道表), 只修**直绑**的 room, 帖子 room / 群里的频道管家不动。
+  追加 (现场 reload 后才发现): 存量类的 nextOrdinal 落后 (落的是 1) → 领号发了第二个
+  OliveBrown-1; 已修 openInstance (领号取 max(allocOrdinal, 已用最大+1)) + 自愈先治撞号
+  (同 (类,序号) 多条记录留锚点那条, 其余就地改号, 记录/uid/会话不动)。真机结果:
+  频道 room host = OliveBrown-2 (target 的 tag 仍是旧 #OliveBrown-1, 只影响地址字符串),
+  dhtpm 群 host = OliveBrown-1, 两张绑定表都存类名 OliveBrown。
 - [x] ④ 单测四组 — tests/steward-instance.test.ts (目录命中类 / 第二个 room 新序号 + 同 room 复用 /
   实例名与类名入口 / 自愈幂等 + 帖子 room 与 dhtpm 原样)
 - [x] ⑤ typecheck + build + reload + kickstart + 交代
