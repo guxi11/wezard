@@ -113,7 +113,8 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const dhtpm: RoomState = mkRoom("chat:wrD", [S1]);
   const ch: RoomState = mkRoom("chat:wrCH", [S1]);
   applyOp(ch, { op: "join", at: 2_000, room: ch.id, who: M, ord: ch.nextOrd, via: "invite", by: DAEMON, role: "monitor" });
-  // 帖子的 room: 成员是**频道管家** (同一个实例), 成员关系表达归属 —— 这不是绑错, 不许换。
+  // 帖子的 room: 老口径把频道 room 的实例坐进来 (同一个实例) —— 现在这也是绑错 (人 2026-11-23:
+  // 不同的 room 要用不同的实例), 帖子的 room 也要换成本 room 自己的实例。
   const post: RoomState = mkRoom("chat:opkCH", [S1]);
   const rooms = new Map<string, RoomState>([["chat:wrD", dhtpm], ["chat:wrCH", ch], ["chat:opkCH", post]]);
   const writes: Array<{ room: string; ops: unknown[] }> = [];
@@ -121,9 +122,9 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
     store, rooms: [...rooms.keys()], stateOf: (room) => rooms.get(room),
     write: (room, ops) => { writes.push({ room, ops }); for (const o of ops) applyOp(rooms.get(room)!, o); },
     rewriteBindings: (aliases) => rewriteStewardBindings(cfg, src, aliases),
-    // 直绑: 频道表按裸 topic 只对频道 room 自己 (帖子 room 用频道管家不算错)。
+    // 直绑按频道表 / chatPolicy; 帖子 room 按它所属的频道 (生产上走 channel-posts 的映射)。
     boundClassOf: (room) => {
-      const bare = room.startsWith("chat:") ? room.slice(5) : "";
+      const bare = room === "chat:opkCH" ? "wrCH" : room.startsWith("chat:") ? room.slice(5) : "";
       const name = cfg.wrc.channel.steward?.[bare] ?? cfg.chatPolicy?.[room]?.steward ?? "";
       return name ? (classes.byName(name)?.id ?? "") : "";
     },
@@ -136,21 +137,26 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   assert.equal(store.get("chat:wrDUP#OliveBrown-1")!.ordinal, 2);
   assert.equal(r1.rebound, 1, "绑定里的实例名改回类名");
   assert.equal(cfg.wrc.channel.steward.wrCH, "OliveBrown");
-  assert.equal(r1.rooms, 1, "只修错的那个 room");
-  assert.deepEqual(r1.left, [{ room: "chat:wrCH", target: "chat:wrD" }], "把 dhtpm 的实例请出去");
-  assert.equal(r1.joined.length, 1);
+  assert.equal(r1.rooms, 2, "频道 room 与帖子的 room 都修");
+  assert.deepEqual(r1.left, [{ room: "chat:wrCH", target: "chat:wrD" }, { room: "chat:opkCH", target: "chat:wrD" }],
+    "把 dhtpm 的实例从频道 room 和帖子的 room 里都请出去");
+  assert.equal(r1.joined.length, 2, "两个 room 各领一个本 room 的实例");
   const localTarget = r1.joined[0]!.target;
-  assert.equal(localTarget, "chat:wrCH#OliveBrown-3", "建本 room 的实例 (撞号那条占了 2)");
+  assert.equal(localTarget, "chat:wrCH#OliveBrown-3", "建频道 room 的实例 (撞号那条占了 2)");
+  const postTarget = r1.joined[1]!.target;
+  assert.equal(postTarget, "chat:opkCH#OliveBrown-4", "帖子的 room 也另开一个 (不是频道 room 那个)");
   const local = W(store.get(localTarget)!.uid!);
   assert.equal(store.get(localTarget)!.identity, "chat:wrD");
   assert.equal(ch.members.has(whoKey(S1)), false, "频道 room 里没有 OliveBrown-1");
   assert.equal(ch.members.has(whoKey(local)), true);
   assert.deepEqual(roomHost(ch), local, "本 room 的实例当 host (monitor 不抢)");
-  assert.deepEqual(writes.map((w) => w.room), ["chat:wrCH"]);
-  // dhtpm 群原样不动; 帖子 room 的频道管家实例也不动。
+  assert.deepEqual(writes.map((w) => w.room), ["chat:wrCH", "chat:opkCH"]);
+  // dhtpm 群原样不动; 帖子的 room 换成本 room 那个实例当 host。
   assert.deepEqual([...dhtpm.members.keys()], [whoKey(S1)]);
   assert.deepEqual(roomHost(dhtpm), S1);
-  assert.deepEqual([...post.members.keys()], [whoKey(S1)]);
+  const postLocal = W(store.get(postTarget)!.uid!);
+  assert.equal(post.members.has(whoKey(S1)), false, "帖子的 room 里不再坐频道那个实例");
+  assert.deepEqual(roomHost(post), postLocal, "帖子的 room 自己的实例当 host");
 
   // 幂等: 第二遍无操作 (不领新号、不写 room、不再改绑定)。
   const before = writes.length;
@@ -159,7 +165,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   assert.equal(r2.rooms, 0);
   assert.deepEqual(r2.left, []);
   assert.equal(writes.length, before, "第二遍零写入");
-  assert.equal(classes.get("chat:wrD")!.nextOrdinal, 4, "没有多领号");
+  assert.equal(classes.get("chat:wrD")!.nextOrdinal, 5, "没有多领号");
   assert.equal(dhtpm.members.has(whoKey(S1)), true);
 }
 
@@ -178,7 +184,8 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const dhtpmWho = W(store.get("chat:wrD")!.uid!);
   const ch = mkRoom(CH, [chWho]);
   const dhtpm = mkRoom("chat:wrD", [dhtpmWho]);
-  // 帖子的 room: 成员是频道管家 (同一实例) —— 不是它自己的实例, 不许按帖子再开一个。
+  // 帖子的 room: 里面坐的是频道那个实例 (base 不是它) —— 那不是本 room 的实例, 这里既不算「已坐」
+  // 也不在 boot 兜底里造记录 (等第一次唤醒冷启动); 这里只验证去重。
   const post = mkRoom("chat:opkCH", [chWho]);
   const rooms = new Map<string, RoomState>([[CH, ch], ["chat:wrD", dhtpm], ["chat:opkCH", post]]);
   const collect = (panes: Set<string>): string[] => unspawnedStewards({
@@ -189,7 +196,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   // dhtpm 的 OliveBrown-1 有 pane → 不收; 频道那个没 pane → 收; 帖子 room 去重。
   assert.deepEqual(collect(new Set(["chat:wrD"])), [chTarget], "只收本 room 那个没 pane 的实例");
   assert.deepEqual(collect(new Set([chTarget, "chat:wrD"])), [], "有 pane 就不再收 (幂等)");
-  assert.equal(store.all().filter((w) => baseOfKey(w.target) === "chat:opkCH").length, 0, "帖子 room 不另造实例");
+  assert.equal(store.all().filter((w) => baseOfKey(w.target) === "chat:opkCH").length, 0, "boot 兜底不替帖子的 room 造记录");
 }
 
 console.log("steward-instance ok");

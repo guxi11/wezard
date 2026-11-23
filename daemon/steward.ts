@@ -35,6 +35,10 @@ export const appointedChannelSteward = (cfg: Config, base: string): string => {
 export const stewardIdentityOf = (cfg: Config, store: WizardStore | undefined, base: string): string | undefined => {
   const name = appointedChannelSteward(cfg, base) || appointedSteward(cfg, base);
   if (name) {
+    // 绑定存的是**类名** (人 2026-11-23) —— 类名不在 wizard 名册里 (名册里是 <类名>-<序号> 的实例),
+    // 先问类表, 再回落到普通身份名。
+    const cls = store?.classes?.byName(name);
+    if (cls && cls.bot === botOfKey(base)) return cls.id;
     const rec = store?.byName(name);
     if (rec && sameBot(base, rec.target)) return identityOf(rec);
   }
@@ -154,6 +158,10 @@ export const stewardRoute = (
   };
   const bound = appointedChannelSteward(cfg, base) || appointedSteward(cfg, base);
   if (bound) {
+    // 绑的是类名 (人 2026-11-23): 类名不在 wizard 名册里, 先问类表 —— 本 room 没有化身时
+    // open() 给的是 fresh 描述子 (classId), 调用方领号新开, 不会拉别的 room 的实例。
+    const cls = store.classes?.byName(bound);
+    if (cls && cls.bot === botOfKey(base)) return open(cls.id);
     const rec = store.byName(bound);
     if (rec && sameBot(base, rec.target)) return open(identityOf(rec));
   }

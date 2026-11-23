@@ -331,6 +331,9 @@ export interface OnboardingBound {
   classId?: string;
   /** 有类时本 room 实例的名字 (类名-序号)。 */
   instance?: string;
+  /** 本 room 的实例是这次绑定**新领号开的** (false / 缺省 = 本 room 本来就有这个身份的化身)。
+   *  完成确认据此说「新建」而不是「已有的」—— 人 2026-11-23 看到「已有的 .wezard-16」以为复用了别的 room。 */
+  instanceOpened?: boolean;
 }
 
 /** 落定一个绑定 verdict: 新建 = 本群 untagged 锚点落 kind:steward + workspace (身份级) 并领一个
@@ -351,6 +354,8 @@ export const applyOnboarding = (
   if (verdict.kind === "bind-existing") {
     const identity = verdict.identity ?? "";
     const cls = identity ? store.classes?.get(identity) : undefined;
+    // 本 room 是否本来就有这个身份的化身 (要在 localManifestation 之前判 —— 它会顺手开一条)。
+    const had = !!identity && store.all().some((w) => identityOf(w) === identity && baseOfKey(w.target) === base);
     const local = localManifestation(store, base, identity);
     const target = local || verdict.target;
     const rec = store.get(target);
@@ -361,6 +366,7 @@ export const applyOnboarding = (
       fresh: false,
       ...(cls ? { classId: cls.id } : {}),
       ...(cls && rec?.name ? { instance: rec.name } : {}),
+      ...(cls && !had ? { instanceOpened: true } : {}),
     });
   }
   // 类世界 (人 2026-11-18): 新建管家 = 建一个类 (id = 本群锚点 target, 名 = want / 自动中性名)
@@ -507,7 +513,8 @@ export const renderGuideRetry = (reason: string): string =>
 export const renderOnboardingDone = (b: OnboardingBound): string =>
   b.fresh
     ? "[wezard] ✅ 引导完成: 本群管家 ." + b.name + " 已就位 (工作区 " + b.workspace + ")。之后直接在群里说话就是找它; 想改名 / 改职责对它说一声即可。"
-    // 绑的是类: 说清本 room 用的是哪个实例 —— 同一个类在别的 room 是别的实例, 人按实例点名。
-    : "[wezard] ✅ 引导完成: 本群管家绑定为已有的 ." + (b.instance || b.name)
-      + (b.classId ? " (." + b.name + " 在本群的实例)" : "")
+    // 绑的是类: 说清本 room 用的是哪个实例, 以及它是不是这次新开的 —— 同一个类在别的 room 是别的实例,
+    // 别让人以为「绑定的是别处那个」。「已有的」只用于本 room 本来就有这个身份的化身。
+    : "[wezard] ✅ 引导完成: 本群管家 ." + (b.instance || b.name)
+      + (b.classId ? " (." + b.name + " 类在本群" + (b.instanceOpened ? "新建的实例" : "已有的实例") + ")" : "")
       + " (工作区跟身份走: " + (b.workspace || "身份未记录工作区") + ")。之后直接在群里说话就是找它。";

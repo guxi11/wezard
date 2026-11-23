@@ -7,7 +7,10 @@
 1. **频道和帖子都是 room**, 类似 Slack 的 channel 和 thread。
    - 频道 room id = chat:<topic_id>, kind = channel。账本一行就是频道里的一个顶层帖子。
    - 帖子 room id = chat:opk…, kind = topic-post。账本是这个帖子下的评论。
-   - graph 里两者都是普通 room 节点, 不画容器/包含关系; 帖子 room 的 host 默认也是所属频道 room 的成员 (成员关系表达归属)。
+   - graph 里两者都是普通 room 节点, 不画容器/包含关系; 归属由 channel 指针表达 (不做成员关系)。
+   - **每个 room 的 host 是它自己的实例** (人 2026-11-23 二次拍板): 频道绑的是类 / 身份, 频道 room 与
+     每个帖子 room 各自解析**本 room** 的化身 (类 = 领号新开), 互不共用 —— 老口径「帖子 room 坐频道
+     那个实例」已废。帖子 room 的实例不预起 pane, 第一次被唤醒时冷启动。
 2. **帖子 room 在帖子第一次被 @ 时诞生 (方案 i)**。这时 topic_at_bot 事件和原生帧配上对, 才拿得到帖子的 opk 群 id。诞生之前, 这个帖子下的评论都记在频道 room 里: 那一行带 post 字段, 指向根帖。
 3. **每个频道 room、每个帖子 room 各有一个 monitor** (原来的 judge 改名而来)。
    - 是 room 成员, 有连续会话, 可以自己 handoff。
@@ -58,7 +61,8 @@
   - 评论 (topic_reply_event): 这个帖子已经配上 opk 的 → 帖子 room 的一行人话; 还没配上的 → 频道 room 的一行人话 (带 post);
   - topic_at_bot: 原生帧照旧进帖子 room (点名 host)。原生帧没到的兜底: 如果帖子已配对, 写进帖子 room; 没配对就写频道 room 并标 mention:"bot"。
 - **配对**: learnChannelPost 同时记下 post_id ↔ opk ↔ topic_id (channel.ts:760 那一刻三个 id 都在手里)。channel-posts.json 的值从 topic_id 扩成 {channel, post}, 读侧兼容旧格式 (只有 topic_id 的字符串)。
-- **帖子 room 诞生**: 被点名成为帖子 room host 的管家默认同时加入所属频道 room —— 成员关系表达归属, 不靠 graph 容器; 这些成员一般不在频道 room 里说话。
+- **帖子 room 诞生**: 帖子的 room 自己领一个**本 room** 的管家实例当 host (不拉频道 room 那个); 已绑定
+  频道里归属由 channel 指针表达, 不再把帖子 host 加进频道 room。
 - **出站** (2026-11-23 补, 人报「帖子下评论提问却发了一条新帖」; 选择编码在动作里, 不加工具参数):
   - 频道 room: `chat_reply` 且 re 指向的原话行带 `post` (帖子下的人话) → `send_reply` 评论回那个帖子; 其余 (`chat_say` 主动说 / re 的不是评论) → `send_post` 发新帖。频道 room 的人话行两个来源 (topic_event 新帖 / 未配对的 topic_reply_event 评论) 都带 `post`, 所以对一条新帖正文的回话同样回在它下面;
   - 帖子 room 一律 send_reply, 评论到根帖下面 (不变)。
