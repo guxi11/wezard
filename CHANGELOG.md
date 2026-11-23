@@ -6,6 +6,12 @@
 
 ### Added
 - **新群引导一句话办完三件: 工作区 + 新管家名 + 群名 (人 2026-11-23「给当前群聊命名为 tpmtest，并绑定workspace为 …/dhtpm，然后给新的host命名 tpm」)**: `onboard_bind` 加可选 `roomName` (本群显示名, ≤60 字, 交接时引导还是 host 就先落一条 `name` op) 与新的 `name` 语义 —— **与 `workspace` 同给 = 给新建的管家起名** (类世界写类名, 实例 `<name>-1`; 全机唯一, 撞名 409 / 形状非法 400, 回绝里带原因让人换), 只给 `name` 仍是绑已有管家; 目录上已有管家时另起的名字 400 并点名已有的那个。引导的话术 (宪章 / retry) 写明「一次调用办完, 不要甩给后来的管家」。测试 `tests/onboarding.test.ts`。
+- **频道 / 帖子成为两种 room, 每个频道 room 与帖子 room 一个常驻 monitor (人 2026-11-23 拍板; docs/room/channel-monitor.md)** — **BREAKING**: 频道 room id = `chat:<topic_id>` (kind channel), 帖子 room id = 原生帧的 `chat:<opk…>` (kind topic-post); 两者都是普通 room 节点, 不画容器, 帖子的归属用 `channel` 指针 (rolepage 上一条弱连线 + 节点 tooltip 的频道名) 表达。没 @ 机器人的新帖 / 还没配上 opk 的评论落频道 room 的一行人话 (带 `post`), 配上之后落帖子 room; 出站频道 room 一律 `send_post`、帖子 room 一律 `send_reply`。每个 room 自动建一个 `kind:"monitor"` 成员 (不发言 / 不当 host / 不持有 duty, 工具面只有 room_read / read_channel / wizard_roster / room_activate / handoff), 人话只唤醒它, 由它写一条 `sys:"activate"` 判决 (新 MCP 工具 `room_activate({re, to?})`, `to` 为空 = 判定不回应) 决定激活谁; 判决只针对最后一条人话、同一条只能激活一次。monitor 没收到 = 不投递、游标不动、泵重试 (不回落 host、不写 undelivered)。配置 `wrc.channel.monitor {enabled, tier=light}`。测试 `tests/room-monitor.test.ts` / `tests/monitor.test.ts` / `tests/channel-room-view.test.ts`。
+
+### Removed
+- **`room_transfer` 退役 (交接 = 把接手方拉进 room, 再自己 `room_leave`)** — **BREAKING**: 删 MCP 工具 `room_transfer`、`POST /room/transfer`、charter 工具清单与 `mcp/output.ts` 的渲染分支; 老账本里的 `move` 行仍由 fold 读侧折叠 (逾期计时照算活动), 新群引导的 duty 交接不走它。docs/room/contract.md 与 技术说明.md 同步。
+- **频道一次性判官退役** — **BREAKING**: 删 `wrc.channel.judge` 配置、`runJudgeOnce` / `askJudge` / `buildJudgePrompt` / `parseVerdict` / `judgeAndMaybe` 与 `tests/channel-judge.test.ts` —— 频道里是否回应改由 room 的 monitor 判 (上面的 activate 行), 频道事件也不再伪造 `chatid=topic_id` 的群帧进 inbound。
+
 
 ### Fixed
 - **新群引导在 CodeBuddy (REPL / PTC) 下没有任何工具可用 —— 每次调用都被拒, 绑定与回复全失败 (.guide-3 实录, 2026-11-23)**: 引导的工具白名单按**外层工具名**判, 而 CodeBuddy 只把 `REPL` 暴露成直接工具, `chat_reply` / `onboard_bind` 都写在它的 `code` 脚本里 (`mcp.wezard.x` / `mcp_wezard.x` / `tools.mcp__wezard__x`), 名字永远对不上 → 一律 deny。现在 `guideRefusal` 接 `toolInput`, 对 `REPL` 由 `guideExecRefusal` (acorn) **下钻脚本**: 每一次调用必须解析成白名单那三件之一 (另加纯计算 `JSON.*` / `String` / `Promise.all` … 与 REPL 自己的 `searchTools` / `describeTools`), 认不出的调用 / `new` / `import` / 解析失败全拒 (fail-closed); 别名 (`const tp = mcp.wezard.chat_reply` / 解构) 按同一身份认。人手开的同名 `.guide` 不受限。管家手闸 (`steward-guard`) 早已下钻 REPL, 其余受限会话无同款问题。契约见 `docs/room/contract.md` §4b。
