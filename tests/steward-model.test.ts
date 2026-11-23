@@ -63,4 +63,19 @@ for (const internal of [INTERNAL_BASE, `${INTERNAL_BASE}#steward`]) {
   assert.deepEqual(newStewardSpec(cfg, internal, "claude", { model: "task", effort: "high" }), want);
   assert.deepEqual(resumedStewardSpec(cfg, internal, "claude", { model: "recorded", effort: "high" }), want);
 }
-console.log("Steward models: router fixed across creation/resume, backend mapping and ordinary wizard overrides passed");
+// room 的 monitor 固定吃 wrc.channel.monitor.tier (默认 light), 首建 / 冷恢复都不落 CLI 默认;
+// 显式 model / 记录值同样不覆盖。管理员的 router 档与它无关。
+const mon = `${target}#monitor`;
+const monCfg = ConfigSchema.parse({ bot, wrc: { defaultCli: "codebuddy" }, models: {
+  router: "hard",
+  backends: { codebuddy: { tiers: { mini: { model: "tiny", effort: "low" }, light: { model: "flash", effort: "low" }, hard: { model: "glm", effort: "high" } } } },
+} });
+const monLight = { model: "flash", effort: "low" };
+assert.deepEqual(newStewardSpec(monCfg, mon, "codebuddy"), monLight);
+assert.deepEqual(newStewardSpec(monCfg, mon, "codebuddy", { model: "explicit", effort: "high" }), monLight);
+assert.deepEqual(resumedStewardSpec(monCfg, mon, "codebuddy", { model: "recorded", effort: "high" }), monLight);
+monCfg.wrc.channel.monitor.tier = "mini";
+const monMini = { model: "tiny", effort: "low" };
+assert.deepEqual(newStewardSpec(monCfg, mon, "codebuddy"), monMini);
+assert.deepEqual(resumedStewardSpec(monCfg, mon, "codebuddy", {}), monMini);
+console.log("Steward models: router fixed across creation/resume, monitor fixed on its own tier, backend mapping and ordinary wizard overrides passed");
