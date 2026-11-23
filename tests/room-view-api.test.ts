@@ -112,6 +112,17 @@ const run = async (): Promise<void> => {
   assert.ok(Array.isArray(w1.sessions), "session 分段仍给 (改名 /clear 之后按它切)");
   assert.equal(w1.landingRoom, "chat:wrG", "票据落点 room: turn 的 channel (chat:wrG#guide → chat:wrG)");
 
+  // 前端 wizard 视图只画 stream: msgs=0 不传分页消息; 名册 / room 表只认 /api/world, 不随名片重复; sbefore 只回那一页的时间轴
+  const w3 = await get(routes.wizard, "id=t-ticket&role=alice&msgs=0");
+  assert.ok(!("msgs" in w3) && !("rooms" in w3) && !("names" in w3) && Array.isArray(w3.stream));
+  const wAll = w1.stream as { ts: number }[];
+  const wPage = await get(routes.wizard, "id=t-ticket&role=alice&slimit=1");
+  assert.equal(wPage.stream.length, Math.min(1, wAll.length), "slimit 限一页");
+  assert.equal(wPage.streamEarlier !== undefined, wAll.length > 1, "还有更早的才给游标");
+  const wBefore = await get(routes.wizard, "id=t-ticket&role=alice&sbefore=" + (wAll.length ? wAll[wAll.length - 1]!.ts : 0));
+  assert.deepEqual(Object.keys(wBefore).sort(), ["at", "ok", "stream", ...("streamEarlier" in wBefore ? ["streamEarlier"] : [])].sort(), "sbefore 只回时间轴那一页");
+  assert.ok(wBefore.stream.every((r: { ts: number }) => r.ts < wAll[wAll.length - 1]!.ts));
+
   // ── /api/wizard?card=1: 只回名片 (room 视角下左上角仍是 role) ───────
   const card = await get(routes.wizard, "id=t-ticket&role=alice&card=1");
   assert.equal(card.ok, true);

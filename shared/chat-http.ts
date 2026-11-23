@@ -32,6 +32,7 @@ import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, typ
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
+import { streamPage } from "./stream-page.js";
 import { isInjection, noteRow, renderTurnBox, roomDeco, spokenTurn, wireMsg, withNotes, wizardStream } from "./role-render.js";
 import { searchRooms } from "./room-search.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
@@ -418,11 +419,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const streamMsgs = uid && states.length
         ? wizardMessages(states, uid, { limit: 0 }, n).msgs.filter((m) => m.at >= since).map(wire).map(linked)
         : [];
-      json(res, 200, {
-        ...card,
-        msgs: hist.msgs.map(wire).map(linked),
-        // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
-        stream: withNotes(wizardStream(records, role, dir, now, {
+      // 时间轴只回最近一页 (见 stream-page.ts); sbefore = 往前翻的游标, 带它时只回那一页的行, 名片 / 消息 / 名册一概不重复。
+      const sb = url.searchParams.get("sbefore"), sl = url.searchParams.get("slimit");
+      const page = streamPage(
+        withNotes(wizardStream(records, role, dir, now, {
           span,
           msgs: streamMsgs,
           woke: uid ? wokeRows(states, uid, since, n).map(wire) : [],
@@ -432,10 +432,19 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
           lookup: lx.lookup,
           roomFrom: lx.roomFrom,
         }), uid ? states.flatMap((s) => memberNotes(s, n, uid).map((m) => noteRow(m, n.roomLabel(s.id)))) : []),
+        { ...(sb !== null && Number.isFinite(Number(sb)) ? { before: Number(sb) } : {}), ...(sl !== null && Number.isFinite(Number(sl)) ? { limit: Number(sl) } : {}) },
+      );
+      if (sb !== null) { json(res, 200, { ok: true, at: now, stream: page.rows, ...(page.earlier !== undefined ? { streamEarlier: page.earlier } : {}) }); return; }
+      json(res, 200, {
+        ...card,
+        // msgs=0: 前端 wizard 视图只画 stream, 这 60 条分页消息 (~80KB) 是白传; 缺省仍给, 老调用方 / 无 stream 的降级路径要用。
+        ...(url.searchParams.get("msgs") === "0" ? {} : { msgs: hist.msgs.map(wire).map(linked) }),
+        // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
+        stream: page.rows,
+        ...(page.earlier !== undefined ? { streamEarlier: page.earlier } : {}),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
-        rooms: f.rooms ?? [],
-        names: f.names ?? {},
+        // rooms / names 不再随名片重复一份: 前端的名册与 room 表只认 /api/world (每次切视角省 ~75KB 原文)。
       });
     });
   });

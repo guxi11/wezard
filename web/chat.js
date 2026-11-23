@@ -23,7 +23,7 @@
   var gside = $('#gside'), chWho = $('#ch-who'), chActs = $('#ch-acts');
 
   var W = { at: 0, rooms: [], nodes: [], uidTargets: {}, chatNames: {}, names: {}, degraded: false };
-  var D = { mode: '', roomId: '', role: '', uid: '', at: 0, msgs: [], notes: [], total: 0, earlier: '', room: null, label: '', members: [], duties: [], wizard: null, sessions: [], session: 'all', ledger: true, plans: [], schedules: [], charterBrief: null, stream: null, streamSig: '', stats: null };
+  var D = { mode: '', roomId: '', role: '', uid: '', at: 0, msgs: [], notes: [], total: 0, earlier: '', room: null, label: '', members: [], duties: [], wizard: null, sessions: [], session: 'all', ledger: true, plans: [], schedules: [], charterBrief: null, stream: null, streamOld: [], streamMore: false, streamSess: '', streamSig: '', stats: null };
   var S = { openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
   var SIDE_KEY = 'wezard.role.side';
   try { if (localStorage.getItem(SIDE_KEY) === 'graph') S.view = 'graph'; } catch (e) { /* 隐私模式 */ }
@@ -1014,24 +1014,45 @@
         (un ? '<b class="ub" title="' + esc('未读 ' + un + ' 条' + (r.openDuties ? ' · 未决 duty ' + r.openDuties + ' 件' : '')) + '">' + (un > 99 ? '99+' : un) + '</b>' : '') + '</span>' +
       '</span></button>';
   };
+  var bindRoomItem = function (e) { e.onclick = function () { toggleRoom(e.getAttribute('data-room')); }; };
   var renderList = function () {
     gStop();
     var rooms = scopedRooms();
     var groups = rooms.filter(isPeopleRoom), convs = rooms.filter(function (r) { return !isPeopleRoom(r); });
+    var its = {};
+    rooms.forEach(function (r) { its[r.id] = roomItem(r); });
     // 照 main: 分组标题「群聊 N」「会话 N」, 开关挂在第一个标题的右端; 空着的那一组不画。
-    var sec = function (title, tip, list) {
-      return list.length ? '<h2 title="' + esc(tip) + '"><span>' + title + '</span><span>' + list.length + '</span></h2>' + list.map(roomItem).join('') : '';
+    var sec = function (title, tip, list, item) {
+      return list.length ? '<h2 title="' + esc(tip) + '"><span>' + title + '</span><span>' + list.length + '</span></h2>' + list.map(item).join('') : '';
     };
-    var body = sec('群聊', '有人参与: 企微群 / 单聊 / topic, 或有人发过话的 room', groups) +
-      sec('会话', '只有 wizard: dm / adhoc', convs) || '<h2><span>群聊</span><span>0</span></h2>';
-    var html = '<div class="rv-list">' + body.replace('</h2>', sideTools() + '</h2>') + '</div>';
+    var wrap = function (item) {
+      var body = sec('群聊', '有人参与: 企微群 / 单聊 / topic, 或有人发过话的 room', groups, item) +
+        sec('会话', '只有 wizard: dm / adhoc', convs, item) || '<h2><span>群聊</span><span>0</span></h2>';
+      return '<div class="rv-list">' + body.replace('</h2>', sideTools() + '</h2>') + '</div>';
+    };
+    var html = wrap(function (r) { return its[r.id]; });
+    // 骨架 = 标题 / 开关 / room 的顺序, 条目内容留空: 骨架没变时只有个别条目的内容 (未读角标 / 预览 / 时间) 变了。
+    var skel = wrap(function (r) { return '\u0001' + r.id + '\u0002'; });
     // 没变就不碰 DOM: 定时刷新会把列表的滚动与焦点蹭掉。
     if (convsEl._html !== html) {
-      var top = convsEl.querySelector('.rv-list') ? convsEl.scrollTop : 0;
-      convsEl._html = html; convsEl.innerHTML = html;
-      convsEl.scrollTop = top;
-      bindHead();
-      convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { toggleRoom(e.getAttribute('data-room')); }; });
+      if (convsEl._html && convsEl._skel === skel && convsEl._its) {
+        // 换视角时未读数跟着换, 但只波及几个 room: 逐条换掉变了的, 不整张重建 (整张重建 + 读 scrollTop 的强制布局在 100+ 个 room 上 130~200ms)。
+        rooms.forEach(function (r) {
+          if (convsEl._its[r.id] === its[r.id]) return;
+          var el = convsEl.querySelector('.ci[data-room="' + cssEsc(r.id) + '"]');
+          if (!el) return;
+          el.outerHTML = its[r.id];
+          var ne = convsEl.querySelector('.ci[data-room="' + cssEsc(r.id) + '"]');
+          if (ne) bindRoomItem(ne);
+        });
+      } else {
+        var top = convsEl.querySelector('.rv-list') ? convsEl.scrollTop : 0;
+        convsEl.innerHTML = html;
+        convsEl.scrollTop = top;
+        bindHead();
+        convsEl.querySelectorAll('[data-room]').forEach(bindRoomItem);
+      }
+      convsEl._html = html; convsEl._skel = skel; convsEl._its = its;
     }
     syncListSel();
   };
@@ -1961,10 +1982,11 @@
     renderUsage();
     if (plan) { renderPlan(); return; }  // 正文在日程栏里, 时间轴的 DOM 原样留着
     if (skipBody) return;  // 时间轴没变: 头更新了, 正文留给 DOM (展开态 / 滚动位置不受打扰)
-    var older = '';
+    var older = D.stream && D.streamMore ? '<button class="rv-older" id="rv-older">‹ 更早</button>' : '';
     var note = D.ledger ? '' : '<div class="rv-note">这个部署没有 room 账本 — 只能看名片, 看不到消息 (要历史请打开 daemon 的 rolepage)。</div>';
     var ot = openTools();
-    inner.innerHTML = note + older + (D.stream ? streamHTML(D.stream) : listHTML(D.msgs, true)) + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
+    inner.innerHTML = note + older + (D.stream ? streamHTML(D.streamOld.concat(D.stream)) : listHTML(D.msgs, true)) + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
+    var ob = $('#rv-older'); if (ob) ob.onclick = function () { olderPage(); };
     fillMd(inner);
     applyFold(inner);
     reopenTools(ot);
@@ -2038,17 +2060,24 @@
     // 换一个人 = 换一段对话: 日程栏 / 宪章只属于刚才那个人, 收回对话面。
     if (role && role !== D.role) { S.charter = null; resetPane(); }
     D.mode = 'wizard'; D.role = role || D.role; D.roomId = ''; syncUrl();
-    return api('api/wizard', { role: role, session: D.session === 'all' ? '' : D.session, limit: 60 }).then(function (r) {
+    return api('api/wizard', { role: role, session: D.session === 'all' ? '' : D.session, limit: 60, msgs: '0' }).then(function (r) {
       if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; return false; }
       // 回包回来时已经换成选中 room / 换了别人: 这一份作废 (定时刷新的那一发常这样迟到)。
       if (D.mode !== 'wizard' || (role && D.role !== role && !(r.role && D.role === r.role.id))) return false;
       var rid = (r.role && r.role.id) || D.role;
-      var same = D.mode0 === 'wizard' && D.role0 === rid && !!D.stream && D.streamSig === streamSig(r.stream);
+      // 同一个人 / 同一段会话的轮询: 已翻出来的更早页留着。服务端每次只回尾页, 上一份里滑出尾页的行并进 streamOld (不留缺口)。
+      var keepOld = D.mode0 === 'wizard' && D.role0 === rid && D.streamSess === (r.session || 'all');
+      var same = keepOld && !!D.stream && D.streamSig === streamSig(r.stream);
       D.mode0 = 'wizard'; D.role0 = rid;
       // 没在 URL 里指定视角的老链接 / 只有 id 的票据 / 用名字点进来的: 认下规范身份并回写 URL。
       if (rid !== D.role) { D.role = rid; syncUrl(); }
       D.msgs = r.msgs || []; D.total = r.total || 0; D.earlier = r.earlier || '';
-      D.stream = r.stream || null; D.streamSig = streamSig(r.stream);
+      var tail = r.stream || null;
+      if (keepOld && D.stream && tail && tail.length) {
+        var cut = tail[0].ts;
+        D.streamOld = D.streamOld.concat(D.stream.filter(function (x) { return x.ts < cut; }));
+      } else if (!keepOld) { D.streamOld = []; D.streamMore = !!r.streamEarlier; }
+      D.stream = tail; D.streamSig = streamSig(tail); D.streamSess = r.session || 'all';
       D.session = r.session || 'all'; applyCard(r);
       D.members = []; D.duties = []; D.createdAt = 0;
       var st = scrollState();   // 替换 DOM 的那一刻现取, 不是发请求前
@@ -2151,7 +2180,22 @@
     var top = S.stack[S.stack.length - 1];
     if (top && top.k === 'list') history.back(); else setReading(false);
   };
+  // wizard 视图的「更早」: 时间轴服务端只回最近一页 (shared/stream-page.ts), 往前翻按已加载那段最早一行的 ts 取上一页。
+  var olderStream = function () {
+    var all = D.streamOld.concat(D.stream || []);
+    if (!D.streamMore || !all.length || S.streamBusy) return Promise.resolve();
+    var role = D.role, prevH = thread.scrollHeight, prevTop = thread.scrollTop;
+    S.streamBusy = true;
+    return api('api/wizard', { role: role, session: D.session === 'all' ? '' : D.session, sbefore: all[0].ts }).then(function (r) {
+      if (!r.ok || D.mode !== 'wizard' || D.role !== role) return;
+      D.streamOld = (r.stream || []).concat(D.streamOld);
+      D.streamMore = !!r.streamEarlier;
+      redraw();
+      thread.scrollTop = prevTop + (thread.scrollHeight - prevH);
+    }).catch(function () { /* 下次再点 */ }).then(function () { S.streamBusy = false; });
+  };
   var olderPage = function () {
+    if (!D.roomId && D.stream) return olderStream();
     if (!D.earlier) return;
     var before = D.earlier, prevH = thread.scrollHeight, prevTop = thread.scrollTop;
     var p = D.roomId
