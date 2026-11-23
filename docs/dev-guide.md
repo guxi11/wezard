@@ -28,7 +28,7 @@
 
 - 审批: [shared/allow-rules.ts](../shared/allow-rules.ts) `isWezardMcpTool` 对 `mcp__wezard__*` 内置豁免, 不发卡。
 - 管家手刹: [daemon/steward-guard.ts](../daemon/steward-guard.ts) 对名字含 `wezard` 的一律 `free`。
-- 引导化身: [daemon/onboarding.ts](../daemon/onboarding.ts) `GUIDE_TOOLS` 是白名单 (`chat_reply` / `chat_say` / `onboard_bind`), 新工具**默认被拒**, 符合预期。
+- 引导化身: [daemon/onboarding.ts](../daemon/onboarding.ts) `GUIDE_TOOLS` 是白名单 (`chat_reply` / `chat_say` / `onboard_bind`), 新工具**默认被拒**, 符合预期。CodeBuddy 的 REPL (PTC) 由 `guideExecRefusal` 下钻脚本判内层调用 (只认同样的三件 + 纯计算), 白名单外的内层调用整条拒 —— 给白名单加工具时不用额外改, 它会自动放行新名字。
 - 按会话注入的 MCP 配置 ([shared/session-mcp.ts](../shared/session-mcp.ts)) 不列工具名。
 
 **rolepage 上显示成「提示行」(可选)**: 工具若是「派活 / 发话」性质, 在 [shared/tool-hints.ts](../shared/tool-hints.ts) `HINT_TOOL` 正则加名字, 并在 [shared/detail-render.ts](../shared/detail-render.ts) `hintOf` 的 `switch` 加一支。不加也能用, 只是过程框里是普通工具调用。

@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+- **新群引导一句话办完三件: 工作区 + 新管家名 + 群名 (人 2026-11-23「给当前群聊命名为 tpmtest，并绑定workspace为 …/dhtpm，然后给新的host命名 tpm」)**: `onboard_bind` 加可选 `roomName` (本群显示名, ≤60 字, 交接时引导还是 host 就先落一条 `name` op) 与新的 `name` 语义 —— **与 `workspace` 同给 = 给新建的管家起名** (类世界写类名, 实例 `<name>-1`; 全机唯一, 撞名 409 / 形状非法 400, 回绝里带原因让人换), 只给 `name` 仍是绑已有管家; 目录上已有管家时另起的名字 400 并点名已有的那个。引导的话术 (宪章 / retry) 写明「一次调用办完, 不要甩给后来的管家」。测试 `tests/onboarding.test.ts`。
+
+### Fixed
+- **新群引导在 CodeBuddy (REPL / PTC) 下没有任何工具可用 —— 每次调用都被拒, 绑定与回复全失败 (.guide-3 实录, 2026-11-23)**: 引导的工具白名单按**外层工具名**判, 而 CodeBuddy 只把 `REPL` 暴露成直接工具, `chat_reply` / `onboard_bind` 都写在它的 `code` 脚本里 (`mcp.wezard.x` / `mcp_wezard.x` / `tools.mcp__wezard__x`), 名字永远对不上 → 一律 deny。现在 `guideRefusal` 接 `toolInput`, 对 `REPL` 由 `guideExecRefusal` (acorn) **下钻脚本**: 每一次调用必须解析成白名单那三件之一 (另加纯计算 `JSON.*` / `String` / `Promise.all` … 与 REPL 自己的 `searchTools` / `describeTools`), 认不出的调用 / `new` / `import` / 解析失败全拒 (fail-closed); 别名 (`const tp = mcp.wezard.chat_reply` / 解构) 按同一身份认。人手开的同名 `.guide` 不受限。管家手闸 (`steward-guard`) 早已下钻 REPL, 其余受限会话无同款问题。契约见 `docs/room/contract.md` §4b。
+
 ## [3.0.1] - 2026-11-23
 
 ### Added

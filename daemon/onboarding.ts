@@ -16,9 +16,10 @@ import { ChatPolicy, type Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { expandHome } from "../shared/paths.js";
 import { baseOfKey, botOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
-import { instanceName } from "./classes.js";
+import { parse } from "acorn";
+import { instanceName, validClassName } from "./classes.js";
 import { appointedChannelSteward, appointedSteward, stewardsAt } from "./steward.js";
-import type { WizardRecord, WizardStore } from "./wizard.js";
+import { foldName, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf, postsOfChannel } from "./channel-posts.js";
 import { DAEMON, applyOp, holderOf, leaveOps, msgIdOf, openDuties, sameWho, whoKey, type MsgRow, type RoomOp, type RoomState, type Who } from "../shared/room.js";
 
@@ -79,11 +80,108 @@ export const shortToolOf = (action: string): string => {
   return i >= 0 ? action.slice(i + 2) : action;
 };
 
-/** 引导化身调了某个工具 / 路由时的拒绝理由 ("" = 不是引导化身, 或用的是白名单里的那三件)。 */
-export const guideRefusal = (rec: WizardRecord | undefined, action: string): string =>
-  isGuideManifestation(rec) && !GUIDE_TOOLS.has(shortToolOf(action))
-    ? "引导会话只有 chat_reply / chat_say (本群 room) / onboard_bind 三件工具 (" + action + " 被拒): 话用 chat_reply / chat_say 说进 room, 目录与绑定用 onboard_bind 交给 daemon, 不要调别的工具或命令。"
-    : "";
+// ── 代码执行外壳 (CodeBuddy REPL / PTC) ────────────────────────────────
+// CodeBuddy 只把 REPL 暴露成一个直接工具, chat_reply / onboard_bind 都写在它的 code 脚本里
+// (mcp.wezard.x / mcp_wezard.x / tools.mcp__wezard__x)。只按外层工具名判 = 引导的工具面整个
+// 关死 (2026-11-23 .guide-3 实录: 每次 REPL 调用都被拒, 绑定与回复全失败); 只认 REPL 这个名字
+// 又等于把工具面全开。所以下钻脚本: **每一次调用**都必须是白名单那三件 (或纯计算 / REPL 自己的
+// 工具发现), 认不出的一律拒 —— 放行方向 fail-closed。
+export const EXEC_SHELLS: ReadonlySet<string> = new Set(["REPL"]);
+
+/** 脚本里允许的纯计算调用 (不碰工作区 / 不碰会话): 序列化与拼装回包用得上。 */
+const SAFE_CALLS: ReadonlySet<string> = new Set([
+  "JSON.stringify", "JSON.parse", "String", "Number", "Boolean",
+  "Object.keys", "Object.values", "Object.entries", "Array.isArray",
+  "Promise.all", "console.log", "console.warn", "console.error",
+]);
+/** REPL 自带的工具发现 (只读, 无副作用)。 */
+const SHELL_META: ReadonlySet<string> = new Set(["REPL.searchTools", "REPL.describeTool", "REPL.describeTools"]);
+
+type Ast = { type: string; [k: string]: any };
+
+/** 静态成员链 (`mcp.wezard.chat_reply` / `mcp["wezard"].x`); 调用结果 / 下标变量认不出 → undefined。 */
+const memberPath = (n: Ast | undefined): string | undefined => {
+  if (!n) return undefined;
+  if (n.type === "Identifier") return n.name as string;
+  if (n.type !== "MemberExpression") return undefined;
+  const head = memberPath(n.object as Ast);
+  const key = n.computed
+    ? n.property?.type === "Literal" && typeof n.property.value === "string" ? n.property.value as string : undefined
+    : n.property?.type === "Identifier" ? n.property.name as string : undefined;
+  return head === undefined || key === undefined ? undefined : head + "." + key;
+};
+/** 记进脚本的工具调用拼写 → 归一 (与 shared/tool-hints.ts 同一组拼写)。 */
+const TOOL_SPELLINGS = ["mcp__wezard__", "mcp_wezard.", "mcp.wezard."] as const;
+const toolNameOfPath = (path: string): string | undefined => {
+  if (path.startsWith("tools.")) return path.slice("tools.".length);
+  const spelling = TOOL_SPELLINGS.find((s) => path.startsWith(s));
+  return spelling === undefined ? undefined : "mcp__wezard__" + path.slice(spelling.length);
+};
+
+const execRefusal = (what: string): string =>
+  "引导会话的代码执行外壳 (REPL) 里只许调 chat_reply / chat_say (本群 room) / onboard_bind 三件工具 (入参直接写对象字面量), 脚本里的其它调用 ("
+  + what + ") 一律拒 —— 要说话用 chat_reply / chat_say, 定目录 / 起名用 onboard_bind。";
+
+/** 一个 REPL 脚本是否只调了引导的白名单工具 ("" = 可以放; 否则 = 拒的理由)。
+ *  fail-closed: 解析不了 / 有认不出的调用 / new / import / 标签模板 —— 全拒。 */
+export const guideExecRefusal = (code: unknown): string => {
+  if (typeof code !== "string" || !code.trim()) return execRefusal("没有可读的脚本");
+  let ast: Ast;
+  try {
+    ast = parse(code, { ecmaVersion: "latest", sourceType: "module", allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as unknown as Ast;
+  } catch { return execRefusal("脚本解析不了"); }
+  const aliases = new Map<string, string>();
+  const expand = (path: string): string => {
+    const [head, ...rest] = path.split(".");
+    const base = aliases.get(head!);
+    return base === undefined ? path : [base, ...rest].join(".");
+  };
+  let bad = "";
+  const walk = (n: Ast): void => {
+    if (bad) return;
+    if (n.type === "VariableDeclarator") {
+      const id = n.id as Ast; const init = n.init as Ast | null;
+      const binding = memberPath(init ?? undefined);
+      if (binding !== undefined) {
+        if (id.type === "Identifier") aliases.set(id.name as string, binding);
+        else if (id.type === "ObjectPattern") for (const p of (id.properties as Ast[]) ?? []) {
+          const v = p.value as Ast;
+          if (p.type !== "Property" || p.computed || p.kind !== "init" || v?.type !== "Identifier") continue;
+          aliases.set(v.name as string, expand(binding + "." + String((p.key as Ast)?.name ?? (p.key as Ast)?.value)));
+        }
+      }
+    } else if (n.type === "ImportExpression") {
+      bad = "import(...)"; return;
+    } else if (n.type === "CallExpression" || n.type === "NewExpression" || n.type === "TaggedTemplateExpression") {
+      const callee = n.type === "TaggedTemplateExpression" ? n.tag as Ast : n.callee as Ast;
+      const path = memberPath(callee);
+      const full = path === undefined ? "" : expand(path);
+      const tool = full ? toolNameOfPath(full) : undefined;
+      const ok = n.type === "CallExpression"
+        && ((tool !== undefined && GUIDE_TOOLS.has(shortToolOf(tool))) || (path !== undefined && (SAFE_CALLS.has(full) || SHELL_META.has(full))));
+      if (!ok) { bad = (path ? full + "()" : n.type === "NewExpression" ? "new ..." : "认不出的调用"); return; }
+    }
+    for (const v of Object.values(n)) {
+      if (Array.isArray(v)) v.forEach((x) => { if (x && typeof x === "object" && typeof (x as Ast).type === "string") walk(x as Ast); });
+      else if (v && typeof v === "object" && typeof (v as Ast).type === "string") walk(v as Ast);
+    }
+  };
+  walk(ast);
+  return bad ? execRefusal(bad) : "";
+};
+
+/** 引导化身调了某个工具 / 路由时的拒绝理由 ("" = 不是引导化身, 或用的是白名单里的那三件)。
+ *  toolInput 只在代码执行外壳 (EXEC_SHELLS) 下用得上 —— 那时放行与否看脚本里实际调了什么。 */
+export const guideRefusal = (rec: WizardRecord | undefined, action: string, toolInput?: unknown): string => {
+  if (!isGuideManifestation(rec)) return "";
+  const short = shortToolOf(action);
+  if (GUIDE_TOOLS.has(short)) return "";
+  if (EXEC_SHELLS.has(short)) {
+    const code = toolInput !== null && typeof toolInput === "object" ? (toolInput as { code?: unknown }).code : undefined;
+    return guideExecRefusal(code);
+  }
+  return "引导会话只有 chat_reply / chat_say (本群 room) / onboard_bind 三件工具 (" + action + " 被拒): 话用 chat_reply / chat_say 说进 room, 目录与绑定用 onboard_bind 交给 daemon, 不要调别的工具或命令。";
+};
 
 // ── 在途状态 ──────────────────────────────────────────────────────────
 // <stateDir>/onboarding.json 只记**还没走完**的群; 走完的凭据是 config 里的绑定,
@@ -301,8 +399,8 @@ export interface OnboardingBound {
 }
 
 /** 落定一个绑定 verdict: 新建 = 本群 untagged 锚点落 kind:steward + workspace (身份级) 并领一个
- *  自动中性名; 已有 = 只绑名字 (工作区跟身份走)。bind 写 chatPolicy (调用方包宪章守卫), 最后
- *  finish 关掉状态机与出站豁免 —— 返回之后 needsOnboarding 恒为 false。 */
+ *  名字 (want 给了就用它, 否则自动中性名); 已有 = 只绑名字 (工作区跟身份走)。bind 写 chatPolicy
+ *  (调用方包宪章守卫), 最后 finish 关掉状态机与出站豁免 —— 返回之后 needsOnboarding 恒为 false。 */
 export const applyOnboarding = (
   store: WizardStore,
   onboarding: OnboardingStore,
@@ -310,47 +408,75 @@ export const applyOnboarding = (
   verdict: Exclude<OnboardingVerdict, { kind: "retry" }>,
   bind: (name: string) => void,
   workspaceOf: (target: string) => string,
+  want = "",
 ): OnboardingBound => {
   const done = (b: OnboardingBound): OnboardingBound => { bind(b.name); onboarding.finish(base); return b; };
   if (verdict.kind === "bind-existing") return done({ name: verdict.name, target: verdict.target, workspace: workspaceOf(verdict.target), fresh: false });
-  // 类世界 (人 2026-11-18): 新建管家 = 建一个类 (id = 本群锚点 target, 名 = 自动中性名)
+  // 类世界 (人 2026-11-18): 新建管家 = 建一个类 (id = 本群锚点 target, 名 = want / 自动中性名)
   // + 它的第 1 个实例 (记录名 `类名-1`); 绑定写**类名** —— 人点类名就落本群这个实例。
+  // want 是人类指定给管家的名字 (人 2026-11-23: 引导一句话里连名字一起定, 不要甩给后来的管家)。
   const classes = store.classes;
-  const auto = store.nextName();
+  const name = want || store.nextName();
   if (classes) {
-    classes.create({ id: base, bot: botOfKey(base), name: auto, role: "steward", workspace: verdict.workspace });
-    store.upsert(base, { kind: "steward", workspace: verdict.workspace, identity: base, ordinal: 1, name: instanceName(auto, 1) });
-    return done({ name: auto, target: base, workspace: verdict.workspace, fresh: true });
+    classes.create({ id: base, bot: botOfKey(base), name, role: "steward", workspace: verdict.workspace });
+    store.upsert(base, { kind: "steward", workspace: verdict.workspace, identity: base, ordinal: 1, name: instanceName(name, 1) });
+    return done({ name, target: base, workspace: verdict.workspace, fresh: true });
   }
   store.upsert(base, { kind: "steward", workspace: verdict.workspace });
-  return done({ name: store.claim(base, store.nextName()), target: base, workspace: verdict.workspace, fresh: true });
+  return done({ name: store.claim(base, name), target: base, workspace: verdict.workspace, fresh: true });
 };
 
-/** onboard_bind 的全部判定 (不落盘): 谁能调 / 参数形状 / 目录还是名字 / verdict。
- *  纯函数 (create 那一步会 mkdir), 路由只负责把结果写进配置并交接 room。 */
+export interface OnboardPlan {
+  ok: true;
+  verdict: Exclude<OnboardingVerdict, { kind: "retry" }>;
+  /** 给**新建的**管家指定的类名 (不给 = daemon 自动中性名; 实例名 = <类名>-1)。 */
+  name?: string;
+  /** 顺手给本群 room 起的名字 (rolepage 的显示名)。 */
+  roomName?: string;
+}
+
+/** onboard_bind 的全部判定 (不落盘): 谁能调 / 参数形状 / 目录还是名字 / 新管家与群名 / verdict。
+ *  纯函数 (create 那一步会 mkdir, nameTaken 只读), 路由只负责把结果写进配置并交接 room。
+ *  `name` 的身份按 workspace 分: 同给 = 给新管家起名 (目录上已有管家时不许另起); 只给 = 绑已有管家。 */
 export const planOnboardBind = (a: {
   caller: WizardRecord | undefined;
   onboarding: boolean;
   workspace?: unknown;
   create?: unknown;
   name?: unknown;
+  roomName?: unknown;
+  /** 新管家名字是否已被占用 (类名 / 实例名 / 自由名共一个全机名字空间)。 */
+  nameTaken?: (name: string) => boolean;
   judge: (input: Exclude<OnboardingInput, { kind: "command" | "sentence" }>) => OnboardingVerdict;
-}): { ok: true; verdict: Exclude<OnboardingVerdict, { kind: "retry" }> } | { ok: false; status: 400 | 403 | 409; reason: string } => {
+}): OnboardPlan | { ok: false; status: 400 | 403 | 409; reason: string } => {
   if (!isGuideManifestation(a.caller)) return { ok: false, status: 403, reason: "onboard_bind 只有新群引导会话能调" };
   if (!a.onboarding) return { ok: false, status: 409, reason: "本群已经绑过管家, 引导应当结束" };
   const ws = String(a.workspace ?? "").trim();
   const nm = String(a.name ?? "").trim();
-  if (!ws === !nm) return { ok: false, status: 400, reason: "workspace 与 name 给一个: 目录给 workspace (要建就带 create:true), 已有管家给 name" };
-  let input: Exclude<OnboardingInput, { kind: "command" | "sentence" }>;
-  if (ws) {
-    const v = validateOnboardingWorkspace(ws, { create: a.create === true });
-    if (!v.ok) return { ok: false, status: 400, reason: v.reason };
-    input = { kind: "workspace", path: v.abs };
-  } else {
-    input = { kind: "names", names: [nm] };
+  const roomName = String(a.roomName ?? "").trim().replace(/\s+/g, " ");
+  if (roomName.length > 60) return { ok: false, status: 400, reason: "群名太长 (最多 60 字): " + roomName.slice(0, 20) + "…" };
+  if (!ws && !nm) return { ok: false, status: 400, reason: "workspace 与 name 至少给一个: 目录给 workspace (要建就带 create:true), 已有管家给 name; 给新管家起名要跟 workspace 一起给" };
+  if (!ws) {
+    const verdict = a.judge({ kind: "names", names: [nm] });
+    return verdict.kind === "retry" ? { ok: false, status: 400, reason: verdict.reason }
+      : { ok: true, verdict, ...(roomName ? { roomName } : {}) };
   }
-  const verdict = a.judge(input);
-  return verdict.kind === "retry" ? { ok: false, status: 400, reason: verdict.reason } : { ok: true, verdict };
+  const v = validateOnboardingWorkspace(ws, { create: a.create === true });
+  if (!v.ok) return { ok: false, status: 400, reason: v.reason };
+  const verdict = a.judge({ kind: "workspace", path: v.abs });
+  if (verdict.kind === "retry") return { ok: false, status: 400, reason: verdict.reason };
+  const rest = roomName ? { roomName } : {};
+  if (verdict.kind === "bind-existing") {
+    // 目录上已有管家: 名字跟身份走, 不能另起。给的是它自己就算了, 别的名字要如实回绝。
+    if (nm && foldName(nm) !== foldName(verdict.name))
+      return { ok: false, status: 400, reason: "目录 " + v.abs + " 上已有管家 ." + verdict.name + " —— 绑它就不要给 name; 要给新名字请换一个还没有管家的目录" };
+    return { ok: true, verdict, ...rest };
+  }
+  if (nm) {
+    if (!validClassName(nm)) return { ok: false, status: 400, reason: "名字 " + nm + " 不能用作管家名 (1-28 个字母 / 数字 / _ / -, 不以 -数字 结尾)" };
+    if (a.nameTaken?.(nm)) return { ok: false, status: 409, reason: "名字 ." + nm + " 已被占用 (名字全机唯一), 换一个" };
+  }
+  return { ok: true, verdict, ...(nm ? { name: nm } : {}), ...rest };
 };
 
 // ── 引导落定: 把 room 交给管家 (契约 §4) ──────────────────────────────
@@ -373,12 +499,14 @@ export const guideClosedHumanLines = (s: RoomState, guide: Who): MsgRow[] => {
  *  guide 不在这个 room 里 (老流程 / 没走过 room) = 没有可交的, 返回 []; 调用方自己回一句。 */
 export const guideHandoffOps = (
   s: RoomState,
-  a: { guide: Who; steward: Who; text: string; now: number },
+  a: { guide: Who; steward: Who; text: string; now: number; roomName?: string },
 ): RoomOp[] => {
   if (!s.members.has(whoKey(a.guide))) return [];
   const ops: RoomOp[] = [];
   let cur = s;
   const push = (list: RoomOp[]): void => { ops.push(...list); cur = list.reduce(applyOp, cur); };
+  // 引导还是 host: 顺手把群名定下来 (人 2026-11-23: 一句话里给的群名由引导办, 不甩给管家)。
+  if (a.roomName) push([{ op: "name", at: a.now, room: cur.id, title: a.roomName, by: a.guide }]);
   if (!cur.members.has(whoKey(a.steward)))
     push([{ op: "join", at: a.now, room: cur.id, who: a.steward, ord: cur.nextOrd, via: "invite", by: a.guide }]);
   const mine = openDuties(cur).filter((d) => sameWho(holderOf(cur, d), a.guide));
@@ -406,17 +534,23 @@ export const guideHandoffOps = (
 // peerMentions 当成点名标注。
 
 export const renderGuideOpening = (): string =>
-  "你是这个新群的引导者 (wezard 被拉进新群后的初始化流程)。你只有三件工具: chat_reply / chat_say (只在本群 room) 和 onboard_bind。"
-  + "这一轮要做的事只有一件 —— 定下本群管家的工作目录。\n"
-  + "- 人话里点名了目录 (例如「在 X 下建 Y」「工作区设为 X」): 直接 onboard_bind({workspace:\"X/Y\", create:true}); 目录已存在就别带 create; 只是让你用某个已有管家: onboard_bind({name:\"…\"})。\n"
+  "你是这个新群的引导者 (wezard 被拉进新群后的初始化流程)。你只有三件工具: chat_reply / chat_say (只在本群 room) 和 onboard_bind"
+  + " —— 代码执行外壳 (CodeBuddy 的 REPL) 里也只调这三件 (写 mcp.wezard.chat_reply / mcp.wezard.onboard_bind, 入参直接写对象字面量); Bash / Read / 别的工具一律被拒。\n"
+  + "这一轮要做的事只有一件 —— 定下本群管家的工作目录; 人顺带给的管家名 / 群名在同一次调用里一起办完, 不要留给后来的管家。\n"
+  + "- 人话里点名了目录 (例如「在 X 下建 Y」「工作区设为 X」): 直接 onboard_bind({workspace:\"X/Y\", create:true}); 目录已存在就别带 create; 只是让你用某个已有管家: onboard_bind({name:\"…\"}).\n"
+  + "- 人同时给了新管家的名字 (例如「给管家起名 tpm」「新 host 叫 tpm」): 在同一个调用里加 name:\"tpm\" —— 跟 workspace 一起给才是给**新**管家起名 (只给 name 是绑已有管家); 名字全机唯一, 撞名 / 不合法会 400/409, 如实回报人让他换一个。\n"
+  + "- 人同时给了群名 (例如「把这个群命名为 tpmtest」): 同一个调用里加 roomName:\"tpmtest\".\n"
+  + "- 这三件 (workspace + name + roomName) 一次 onboard_bind 就够, 不要拆成多次调用。\n"
   + "- 拿不准该建还是该绑: 用 chat_reply({re, status:\"need\", text:\"…\"}) 一句话问人, 不要猜、不要替人决定。\n"
   + "- 句子里绑定之外的要求 (例如「在里面初始化 codebuddy.md」) 不要自己做、也不要答应 —— 绑定后这条 duty 连原话一起交给管家。\n"
   + "- 绑定成功之前不要 done 关人的那条; 成功之后这一轮就结束, 不要再说话、不要自己做别的。\n"
   + "不闲聊、不回答与引导无关的问题, 每次一两句话。";
 
 export const renderGuideRetry = (reason: string): string =>
-  "人刚才那句还不足以定下管家" + (reason ? " (" + reason + ")" : "") + "。你只有 chat_reply / chat_say (本群 room) / onboard_bind 三件工具; "
+  "人刚才那句还不足以定下管家" + (reason ? " (" + reason + ")" : "") + "。你只有 chat_reply / chat_say (本群 room) / onboard_bind 三件工具"
+  + " (REPL 里也只调这三件; 别的调用被拒); "
   + "用一句话向人说明, 并请他给一个目录 (绝对路径, 可 ~ 开头) 或一个已有管家的名字 —— 他答对了就 onboard_bind 绑定; 有歧义就用 chat_reply(status:\"need\") 问清楚。"
+  + "他给了新管家的名字 / 群名, 就与 workspace 放在同一次 onboard_bind 里。"
   + "绑定之外的任何要求都不要自己做, 绑定后随原话交给管家。";
 
 export const renderOnboardingDone = (b: OnboardingBound): string =>

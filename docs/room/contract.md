@@ -181,6 +181,13 @@ export const hostOf = (members: readonly { who: Who; ord: number }[]): string | 
   - **pane 忙 → 只 warn 不纠偏** (带 busyForMs + openDuties)。理由: 卡死与长活在外部不可分, 猜错就是打断正在干的活; 卡死由人 stop_wizard。
 - pane cap 清扫误杀导致的 pane 消失属于 spawn 侧问题, 单独开活, 不进看门狗。
 
+## 4b. 新群引导 (guide)
+
+- 引导化身 = `<base>#guide` (被占就 `#guide-N`), 职责标记 `新群引导`; 它只表达, 判定 / 校验 / 落盘全在 daemon (`daemon/onboarding.ts` + `guideGate`)。
+- **工具面只有三件**: `chat_reply` / `chat_say` (本群 room) / `onboard_bind`; 其余一律拒 (`guideRefusal`), 审批层 (pre-tool-use) 与 daemon 路由层各把一道。CodeBuddy 把一切调用包进 `REPL` 的 `code` (`mcp.wezard.x` / `mcp_wezard.x` / `tools.mcp__wezard__x`), 所以 `REPL` 由 `guideExecRefusal` **下钻脚本**: 每一次调用都必须是这三件 (另加纯计算 `JSON.*` / `String` / `Promise.all` … 与 REPL 自己的 `searchTools` / `describeTools`), 认不出的调用 / `new` / `import` / 脚本解析失败一律拒 —— 放行方向 fail-closed。人手开的同名 `.guide` 没有职责标记, 不受限。
+- `onboard_bind({workspace?, create?, name?, roomName?})`: `workspace` = 管家目录 (`create` 只建最后一级, 父目录须已在, 必须在 `$HOME` 下); 目录上已有管家 (`<role, workspace>` 唯一) 就绑它。`name` 与 `workspace` **同给** = 给新建的管家起名 (类名; 实例 `<name>-1`, 全机唯一, 冲突 409 / 非法 400); 只给 `name` = 绑已有管家。`roomName` = 顺手给本群起显示名 (≤60 字), 交接时由引导 (此时还是 host) 先落一条 `name` op。
+- 成功 = 绑定落盘 + room 交接 (`guideHandoffOps`): 管家 join → 引导名下 duty 全部 move 给它 (人的原话因此跟到管家手上) → 引导 leave → 完成系统行; 引导已经被它自己先关掉的人话另开一条 task 转交原话。之后引导被收尸 (`reapGuideAfterTurn`)。
+
 ## 5. 终句与提醒 (F-1)
 
 - 终句只进 turn store / rolepage, 不进任何 room, 不关任何 duty。mirror 的流式终句投递整段删除。

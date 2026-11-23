@@ -8,6 +8,7 @@ import { chatPolicyOf } from "../daemon/chat-name.js";
 import { makeApproveHandler } from "../daemon/approval.js";
 import { answerOf, applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideHandoffOps, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderOnboardingDone, validateOnboardingWorkspace, validateWorkspace, WIZARD_NAME_RE, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
 import { bindWizardStore, identityWorkspaceOf, loadWizardStore } from "../daemon/wizard.js";
+import { loadClassStore } from "../daemon/classes.js";
 import { stewardRoute } from "../daemon/steward.js";
 import { DAEMON, foldRoom, holderOf, mirrors, msgIdOf, openDuties, roomHost, sameWho, whoKey, type RoomOp } from "../shared/room.js";
 
@@ -206,6 +207,33 @@ try {
   assert.equal(guideRefusal(g.get("chat:wrG#guide"), "mcp__wezard__set_workspace"), "", "人手 .guide 不受限");
   assert.equal(guideRefusal(undefined, "handoff"), "");
 
+  // ── CodeBuddy REPL (PTC) 包装: 白名单看脚本里实际调了什么 (2026-11-23) ──
+  // 只按外层工具名判 = 引导的工具面全关 (.guide-3 实录); 只认 REPL 这个名字 = 全开。
+  const repl = (code: string) => ({ code, description: "probe" });
+  const replRefusal = (code: string) => guideRefusal(guideRec, "REPL", repl(code));
+  for (const c of [
+    'return await mcp.wezard.chat_reply({ re: "x.1", text: "好的" });',
+    'await mcp.wezard.chat_say({ text: "稍等" }); return 1;',
+    'const r = await mcp.wezard.onboard_bind({ workspace: "/Users/x/y", create: true }); return JSON.stringify(r);',
+    'const tp = mcp.wezard.chat_reply; return await tp({ re: "x.1", text: "ok" });',
+    'const { onboard_bind: bind } = mcp.wezard; return await bind({ name: "fix" });',
+    'return JSON.stringify(await tools.mcp__wezard__chat_say({ text: "hi" }));',
+    'return await mcp_wezard.onboard_bind({ workspace: "/Users/x/y" });',
+    "return 1 + 1;",
+  ]) assert.equal(replRefusal(c), "", "REPL 放行: " + c.slice(0, 40));
+  for (const c of [
+    "return await mcp.wezard.handoff({});",
+    'await mcp.wezard.chat_reply({ re: "x.1", text: "ok" }); return await mcp.wezard.set_workspace({ cwd: "/x" });',
+    'return await Bash({ command: "ls" });',
+    'return await Read({ file_path: "/etc/passwd" });',
+    'const f = (await import("node:fs")).readFileSync; return f("/x");',
+    'return new Function("return 1")();',
+    'const nm = "chat_reply"; return await mcp.wezard[nm]({});',
+  ]) assert.match(replRefusal(c), /三件工具/, "REPL 拒: " + c.slice(0, 40));
+  assert.match(replRefusal("return {"), /三件工具/, "脚本解析不了 = 拒");
+  assert.match(guideRefusal(guideRec, "REPL"), /三件工具/, "没有脚本的 REPL = 拒");
+  assert.equal(guideRefusal(g.get("chat:wrG#guide"), "REPL", repl('await Bash({ command: "ls" })')), "", "人手 .guide 不受限");
+
   // ── 绑定后 room 交接 (契约 §4): 管家接手, 引导离开, 人那条 duty 跟着走 ──
   const ROOM = "chat:wrHAND";
   const gw = { kind: "wizard", id: "wGUIDE" } as const;
@@ -251,6 +279,15 @@ try {
   assert.deepEqual(after2.msgs.find((m) => m.sys === "onboard-done")!.wake, [], "完成行不重复唤醒");
   assert.deepEqual(guideHandoffOps(foldRoom("chat:wrNONE", []), { guide: gw, steward: sw, text: "x", now: 1 }), [],
     "引导不在 room 里 = 没得交");
+  // 交接时顺手起群名 (引导还是 host): name 行在最前, host 照旧交给管家。
+  // (fold + applyOp 会就地改状态, 每次都从账本重折一份。)
+  const handName = guideHandoffOps(foldRoom(ROOM, journal), { guide: gw, steward: sw, text: "✅", now: 11, roomName: "tpmtest" });
+  assert.equal(handName[0]?.op, "name", "name 行在最前 (引导还是 host)");
+  const afterName = foldRoom(ROOM, [...journal, ...handName]);
+  assert.equal(afterName.title, "tpmtest", "群名落进 room 状态");
+  assert.equal(sameWho(roomHost(afterName), sw), true, "起名不影响 host 交接");
+  assert.equal(foldRoom(ROOM, [...journal, ...guideHandoffOps(foldRoom(ROOM, journal), { guide: gw, steward: sw, text: "✅", now: 11 })]).title, undefined,
+    "没给 roomName = 不加 name 行");
 
   // ── onboard_bind 的判定 (路由只负责落盘): 谁 / 什么参数 / 建成什么样 ──
   const judgeAt = (base: string) => (input: Exclude<OnboardingInput, { kind: "command" | "sentence" }>) => judgeOnboarding(store, base, input);
@@ -271,11 +308,51 @@ try {
   const outside = planOnboardBind({ caller: guideRec, onboarding: true, workspace: "/tmp/wezard-onboard-outside", create: true, judge: judgeAt("chat:wrBIN") });
   assert.equal(outside.ok, false, "$HOME 外 = 拒");
   if (!outside.ok) assert.match(outside.reason, /\$HOME/);
-  assert.equal(planOnboardBind({ caller: guideRec, onboarding: true, workspace: made, name: "fix", judge: judgeAt("chat:wrBIN") }).ok, false, "workspace 与 name 同给 = 400");
   assert.equal(planOnboardBind({ caller: guideRec, onboarding: true, judge: judgeAt("chat:wrBIN") }).ok, false, "两个都不给 = 400");
   const unknownName = planOnboardBind({ caller: guideRec, onboarding: true, name: "nobody", judge: judgeAt("chat:wrBIN") });
   assert.equal(unknownName.ok, false, "名册里没有 = 400 带原因 (引导自己追问)");
   if (!unknownName.ok) assert.match(unknownName.reason, /名册里也没有/);
+
+  // ── 一句话办完三件 (人 2026-11-23): workspace + 新管家名 + 群名同一个调用 ──
+  const wsTpm = join(dir, "tpm");
+  const named = planOnboardBind({ caller: guideRec, onboarding: true, workspace: wsTpm, create: true, name: "tpm", roomName: "tpmtest", judge: judgeAt("chat:wrNAMED") });
+  assert.equal(named.ok, true, "workspace 与 name 同给 = 给新管家起名 (不再是 400)");
+  if (named.ok) {
+    assert.deepEqual(named.verdict, { kind: "bind-new", workspace: wsTpm });
+    assert.equal(named.name, "tpm", "新管家指定的名字");
+    assert.equal(named.roomName, "tpmtest", "顺手给的群名");
+  }
+  const dup = planOnboardBind({ caller: guideRec, onboarding: true, workspace: join(dir, "tpm-dup"), create: true, name: "fix", judge: judgeAt("chat:wrNAMED"), nameTaken: (n) => n === "fix" });
+  assert.equal(dup.ok, false, "名字已被占用 = 409");
+  if (!dup.ok) { assert.equal(dup.status, 409); assert.match(dup.reason, /已被占用/); }
+  const shaped = planOnboardBind({ caller: guideRec, onboarding: true, workspace: join(dir, "tpm9"), create: true, name: "tpm-2", judge: judgeAt("chat:wrNAMED") });
+  assert.equal(shaped.ok, false, "类名不能以 -数字 结尾 (那是实例名)");
+  if (!shaped.ok) { assert.equal(shaped.status, 400); assert.match(shaped.reason, /不能用作管家名/); }
+  // 目录上已有管家: 名字跟身份走, 另起的名字要回绝 (回绝里点名已有的那个)。
+  const dupStore = loadWizardStore(join(dir, "wizards-dup.json"));
+  const wsDup = join(dir, "dupws");
+  mkdirSync(wsDup);
+  dupStore.upsert("chat:wrDUP", { kind: "steward", name: "dupone", workspace: wsDup });
+  const judgeDup = (input: Exclude<OnboardingInput, { kind: "command" | "sentence" }>) => judgeOnboarding(dupStore, "chat:wrDUP2", input);
+  const otherName = planOnboardBind({ caller: guideRec, onboarding: true, workspace: wsDup, name: "someone", judge: judgeDup });
+  assert.equal(otherName.ok, false, "目录上已有管家时不能另起名字");
+  if (!otherName.ok) { assert.equal(otherName.status, 400); assert.match(otherName.reason, /dupone/); }
+  assert.equal(planOnboardBind({ caller: guideRec, onboarding: true, workspace: wsDup, name: "dupone", roomName: "已绑", judge: judgeDup }).ok, true, "给的就是它自己 = 绑已有");
+  assert.equal(planOnboardBind({ caller: guideRec, onboarding: true, workspace: wsTpm, roomName: "x".repeat(61), judge: judgeAt("chat:wrNAMED") }).ok, false, "群名太长 = 400");
+
+  // 落定: 新管家用指定的名字 (无类世界 = 自由名; 类世界 = 类名, 实例 <类名>-1)
+  const obNamed = loadOnboardingStore(cfg);
+  obNamed.begin("chat:wrNAMED");
+  const namedBound = applyOnboarding(store, obNamed, "chat:wrNAMED", { kind: "bind-new", workspace: wsTpm }, () => undefined, () => "", "tpm");
+  assert.deepEqual(namedBound, { name: "tpm", target: "chat:wrNAMED", workspace: wsTpm, fresh: true }, "新管家用指定的名字");
+  assert.equal(store.get("chat:wrNAMED")?.name, "tpm");
+  const cstore = loadWizardStore(join(dir, "wizards-class.json"), () => undefined, loadClassStore(join(dir, "classes.json")));
+  const obCls = loadOnboardingStore(cfg);
+  obCls.begin("chat:wrCLS");
+  const clsBound = applyOnboarding(cstore, obCls, "chat:wrCLS", { kind: "bind-new", workspace: wsTpm }, () => undefined, () => "", "tpm");
+  assert.equal(clsBound.name, "tpm", "绑定写类名");
+  assert.equal(cstore.get("chat:wrCLS")?.name, "tpm-1", "实例名 = 类名-1");
+  assert.equal(cstore.byName("tpm")?.target, "chat:wrCLS", "类名解析回本群锚点");
 
   bindWizardStore(g);
   const replies: Array<{ status: number; body?: string }> = [];
@@ -308,6 +385,11 @@ try {
   }
   const human = await decide("s-human", "Read", { file_path: "/x" });
   assert.equal(human.decision, "allow", "人手开的 .guide 照常 (matcher 外放行), 不吃引导拒绝");
+  const replAllow = await decide("s-guide", "REPL", { code: 'return await mcp.wezard.onboard_bind({ workspace: "/Users/x/y" });' });
+  assert.equal(replAllow.decision, "allow", "REPL 里只调白名单工具 = 放行 (2026-11-23 修复)");
+  const replDeny = await decide("s-guide", "REPL", { code: "return await mcp.wezard.handoff({});" });
+  assert.equal(replDeny.decision, "deny", "REPL 里调白名单外的照旧拒");
+  assert.match(replDeny.reason ?? "", /三件工具/);
 
   // ── 在途豁免 → room 口径 (fix-task §8.2) ──────────────────────────
   // 出站门已废: 引导说话不再需要 speech 豁免, 在途与否同一读数; 盘上残留的旧键在

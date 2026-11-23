@@ -1810,23 +1810,26 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       const base = baseOfKey(self);
-      const b = body as { workspace?: string; create?: boolean; name?: string };
+      const b = body as { workspace?: string; create?: boolean; name?: string; roomName?: string };
       const plan = planOnboardBind({
         caller: wizards.get(self), onboarding: needsOnboarding(cfg, wizards, base),
-        workspace: b.workspace, create: b.create, name: b.name,
+        workspace: b.workspace, create: b.create, name: b.name, roomName: b.roomName,
+        nameTaken: (n) => !!wizards.byName(n),
         judge: (input) => judgeOnboarding(wizards, base, input, (t) => m.sessionInfo(t)?.cwd ?? ""),
       });
       if (!plan.ok) { json(res, plan.status, { ok: false, reason: plan.reason }); return; }
       const { verdict } = plan;
       const bound = applyOnboarding(wizards, onboarding, base, verdict,
         (name) => guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: verdict.kind === "bind-new" ? "新群引导新建管家 " + name + " (工作区 " + verdict.workspace + ") 并绑到 " + base : "新群引导把 " + name + " 绑为 " + base + " 的管家", byHuman: true })),
-        (t) => identityWorkspaceOf(wizards, t) || ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
-      roomLog.info({ room: base, ...bound }, "onboarding: steward bound (guide tool)");
-      const handed = guideSettleRoom(base, bound);
+        (t) => identityWorkspaceOf(wizards, t) || ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)),
+        plan.name);
+      roomLog.info({ room: base, ...bound, roomName: plan.roomName ?? "" }, "onboarding: steward bound (guide tool)");
+      const handed = guideSettleRoom(base, bound, plan.roomName);
       if (!handed) notifyChat(base, renderOnboardingDone(bound)); // 引导不在 room 里 (老流程): 至少回报一句
       void reapGuideAfterTurn(self); // 先回成功: 这一轮的话还要说完, 收尸在轮终之后 (或 60s)
       json(res, 200, { ok: true, name: bound.name, target: bound.target, workspace: bound.workspace, fresh: bound.fresh,
         ...(handed ? { room: base } : {}),
+        ...(plan.roomName ? { roomName: plan.roomName } : {}),
         message: "绑定完成, 引导到此结束: 这一轮不要再说话、不要再调工具; 人的原话与后续要求已经交给管家 ." + bound.name + "。" });
     });
     // ── 出生 / 退役的 room 落账 ──────────────────────────────────────────
@@ -1991,7 +1994,7 @@ const main = async (): Promise<void> => {
     };
     /** 引导落定: 管家进 room → 引导名下 duty 全部转给它并唤醒 → 引导离开 → 完成系统行。
      *  false = 引导不在这个 room 里 (老流程 / 没走过 room), 调用方自己回一句。 */
-    const guideSettleRoom = (base: string, bound: OnboardingBound): boolean => {
+    const guideSettleRoom = (base: string, bound: OnboardingBound, roomName = ""): boolean => {
       const s = roomState(base);
       const guideTarget = guideOf(wizards, base);
       const guide = guideTarget ? roomSelfOf(guideTarget) : undefined;
@@ -1999,7 +2002,7 @@ const main = async (): Promise<void> => {
       if (!s || !guide || !steward) return false;
       // roomMirror 给 daemon 的行补 "[wezard] " 前缀, 完成确认自己已经带了一个。
       const text = renderOnboardingDone(bound).replace(/^\[wezard\]\s*/, "");
-      const ops = guideHandoffOps(s, { guide, steward, text, now: Date.now() });
+      const ops = guideHandoffOps(s, { guide, steward, text, now: Date.now(), ...(roomName ? { roomName } : {}) });
       if (!ops.length) return false;
       hub.write(base, ops);
       roomLog.info({ room: base, guide: guideTarget, steward: bound.target, ops: ops.length }, "onboarding: room 交给管家");

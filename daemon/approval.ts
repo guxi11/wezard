@@ -2139,8 +2139,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     const owner = getMirrorTarget?.(sessionId);
     // 新群引导化身没有工具面 (onboarding.ts guideRefusal): 内置工具与 wezard MCP 一律在这里拒,
     // 排在手闸与一切放行之前 —— 它只把 daemon 的指令转成人话, handoff / set_workspace 自己
-    // 正是 2026-11-17 teststrict 的事故形态。
-    const guideDeny = owner ? guideRefusal(wizardStore()?.get(owner), toolName) : "";
+    // 正是 2026-11-17 teststrict 的事故形态。CodeBuddy 的一切调用都包在 REPL 的 code 里, 所以
+    // 白名单要看脚本里实际调了什么 (toolInput 一起传), 只看 REPL 这个名字要么全拒要么全开。
+    const guideDeny = owner ? guideRefusal(wizardStore()?.get(owner), toolName, toolInput) : "";
     if (guideDeny) {
       log.info({ toolName, sessionId, owner }, "onboarding guide tool reject");
       json(res, 200, { decision: "deny", reason: guideDeny } satisfies ApproveResp);
