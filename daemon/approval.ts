@@ -43,8 +43,7 @@ import { chatPolicyOf } from "./chat-name.js";
 import { isStewardTarget } from "./steward.js";
 import { wizardStore } from "./wizard.js";
 import { makeStewardGuard } from "./steward-guard.js";
-import { guideRefusal } from "./onboarding.js";
-import { monitorRefusal } from "./wizard.js";
+import { faceOf, faceRefusal } from "./tool-face.js";
 import { sessionNameFor } from "./session-name.js";
 import { reachable } from "./reach.js";
 
@@ -2138,21 +2137,15 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // v3 §3: 判定从「untagged 默认会话」升为「该聊天绑定的管家化身」(config chatPolicy.steward
     // 指定优先, 没绑 = 现存默认会话) —— 指定的化身即使是 tagged 也 arm, 换绑后旧默认会话不再 arm。
     const owner = getMirrorTarget?.(sessionId);
-    // 新群引导化身没有工具面 (onboarding.ts guideRefusal): 内置工具与 wezard MCP 一律在这里拒,
-    // 排在手闸与一切放行之前 —— 它只把 daemon 的指令转成人话, handoff / set_workspace 自己
-    // 正是 2026-11-17 teststrict 的事故形态。CodeBuddy 的一切调用都包在 REPL 的 code 里, 所以
-    // 白名单要看脚本里实际调了什么 (toolInput 一起传), 只看 REPL 这个名字要么全拒要么全开。
-    const guideDeny = owner ? guideRefusal(wizardStore()?.get(owner), toolName, toolInput) : "";
-    if (guideDeny) {
-      log.info({ toolName, sessionId, owner }, "onboarding guide tool reject");
-      json(res, 200, { decision: "deny", reason: guideDeny } satisfies ApproveResp);
-      return;
-    }
-    // monitor 的工具面也是硬的 (§2.2): 与引导同层, 排在手闸与一切放行之前。
-    const monitorDeny = owner ? monitorRefusal(wizardStore()?.get(owner), toolName, toolInput) : "";
-    if (monitorDeny) {
-      log.info({ toolName, sessionId, owner }, "monitor tool reject");
-      json(res, 200, { decision: "deny", reason: monitorDeny } satisfies ApproveResp);
+    // 受限会话的工具面 (daemon/tool-face.ts 的声明式注册表): 引导化身 / monitor 等一律在这里拒,
+    // 排在手闸与一切放行之前 —— 它们只做一件受控的事, handoff / set_workspace 自己 / 发言正是
+    // 2026-11-17 teststrict 与 2026-11-23 .monitor-2 的事故形态。CodeBuddy 的一切调用都包在
+    // REPL 的 code 里, 所以白名单要看脚本里实际调了什么 (toolInput 恒传); 新增受限会话只注册
+    // face, 不改这里。
+    const faceDeny = owner ? faceRefusal(wizardStore()?.get(owner), toolName ?? "", toolInput) : "";
+    if (faceDeny) {
+      log.info({ toolName, sessionId, owner, face: owner ? faceOf(wizardStore()?.get(owner))?.name : undefined }, "tool face reject");
+      json(res, 200, { decision: "deny", reason: faceDeny } satisfies ApproveResp);
       return;
     }
     // 管家手闸只看 role (wiring B: 出站门已废, 契约 §7 改由 role 触发)。

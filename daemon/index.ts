@@ -114,10 +114,10 @@ import {
   identityEditRefusal,
   instancesOf,
   leadSettled,
-  monitorRefusal,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
+import { faceRefusal } from "./tool-face.js";
 import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
 import { cacheTouchMs, cacheTtlSec, contextMaterials, firstStamp, lastContextTokens, lastExchange, lastModel, talkTurns } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
@@ -133,7 +133,7 @@ import { parseWhen, planHasOpenDuty, renderRoomRead } from "../shared/room-view.
 import { memberLabel } from "../shared/room-label.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle } from "./wait-idle.js";
-import { applyOnboarding, bindSteward, guideHandoffOps, guideOf, guideRefusal, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
+import { applyOnboarding, bindSteward, guideHandoffOps, guideOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
 import { reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 
@@ -668,7 +668,7 @@ const main = async (): Promise<void> => {
     // 的会话; 引导状态机不动, 人下一句话会重起一个干净的引导化身接着引导。别人冲着引导化身来的
     // (替它 handoff / 给它设工作区) 只拒不收 (reap=false): 越权的不是它。
     const refuseGuide = (res: import("node:http").ServerResponse, target: string, action: string, reap = true): boolean => {
-      const reason = guideRefusal(wizardStore()?.get(target), action);
+      const reason = faceRefusal(wizardStore()?.get(target), action);
       if (!reason) return false;
       json(res, 403, { ok: false, reason });
       log.warn({ target, action, reap }, "onboarding: guide tool surface refused");
@@ -679,7 +679,7 @@ const main = async (): Promise<void> => {
     };
     /** monitor 的工具面硬限 (wizard.ts monitorRefusal): 审批层已全拒, 审批关掉时在这里兜一道。 */
     const refuseMonitor = (res: import("node:http").ServerResponse, target: string, action: string): boolean => {
-      const reason = monitorRefusal(wizardStore()?.get(target), action);
+      const reason = faceRefusal(wizardStore()?.get(target), action);
       if (!reason) return false;
       json(res, 403, { ok: false, reason });
       log.warn({ target, action }, "monitor tool surface refused");

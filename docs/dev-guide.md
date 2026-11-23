@@ -150,6 +150,27 @@ reminder = 挂在一句话尾巴上的 `<system-reminder wezard="<kind>" …>…
 
 **触发出现在两处, 加第三处前先想清楚**: `wezard init` 收尾 (默认装、不询问) 与每次 spawn 前的 `prepareSessionSkills`。后者是「老用户升级 npm 后自动拿到新版」的唯一路径, 早退只看 stamp 的 version + 内容签名, 正常情况下零盘 IO。**别把物化塞进 daemon boot**: 每条 spawn 已经会走到。
 
+## 5. 受限会话的工具面 (声明式注册表)
+
+「只能做一件受控的事」的会话 (新群引导化身 / room 的 monitor / 以后新增的这类) **不许**在自己
+的模块里写「按外层工具名判白名单」的拒绝逻辑 —— 同型 bug 已经两次 (引导 25179b4、monitor
+5066898): CodeBuddy 只把 `REPL` 暴露成一个直接工具, 真正的调用在 `code` 脚本里, 只看外层名
+会把整个工具面关死。
+
+- 在 [daemon/tool-face.ts](../daemon/tool-face.ts) 的 `TOOL_FACES` 注册一个 face:
+  `{ name, match(rec), tools: ReadonlySet<string>, refuse(what) }` (`tools` 用短名, `refuse` 的
+  `what` 既可能是外层工具名, 也可能是脚本里的调用拼写)。
+- 判定只走 `faceRefusal(rec, action, toolInput?)`: 没匹配 → 放行; 外层名在白名单 → 放行;
+  `EXEC_SHELLS` (REPL) → `execToolRefusal` 下钻脚本 (每一项调用都必须是本 face 的白名单;
+  纯计算与 `REPL.searchTools` 照旧放行); 其余 → `face.refuse(action)`。**fail-closed**:
+  认不出的调用 / `new` / `import` / 解析失败 / 没有 `toolInput` 全拒。
+- 审批层 (`daemon/approval.ts`) 与路由层 (`daemon/index.ts`) 都已经只调 `faceRefusal`;
+  **新增受限会话只注册 face, 不改这两处**。
+- [tests/tool-face.test.ts](../tests/tool-face.test.ts) 对每个注册 face 自动跑同一组断言
+  (外层放行 / REPL 里放行 / REPL 里调别的 face 拒绝 / 认不出·new·import·解析失败·无 toolInput
+  拒绝 / 非 REPL 非白名单拒绝); 新 face 只要在测试的 `REC_FOR` 里补一条造记录的工厂, 就自动
+  获得全套覆盖。
+
 ---
 
 ## 通用规矩
