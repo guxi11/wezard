@@ -51,6 +51,7 @@ import {
 import { errText, installResponseTracker } from "./last-response.js";
 import { openRoomStore } from "./rooms.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
+import { repairStewardInstances } from "./steward-repair.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
@@ -78,7 +79,7 @@ import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isIn
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import { chatBaseOf, chatNameOf, chatPolicyOf, listChatNames, peerAddress, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { isStewardTarget, markGlobalSteward, STEWARD_KINDS, stewardRoute, stewardsAt } from "./steward.js";
+import { appointedSteward, isStewardTarget, markGlobalSteward, STEWARD_KINDS, stewardRoute, stewardsAt } from "./steward.js";
 import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
   anchorOf,
@@ -2265,6 +2266,26 @@ const main = async (): Promise<void> => {
       const rebound = rewriteStewardBindings(cfg, sourcePath, cmig.aliases);
       if (rebound) classLog.info({ rebound }, "steward bindings rewritten to class names");
     }
+    // 绑定自愈 (人 2026-11-23: 不同的 room 要用不同的实例): 早先的 bind-existing 把**别的 room
+    // 的实例名**写进了绑定并把那条化身 join 进来当 host —— 绑定改回类名, 各 room 里换成本 room
+    // 的实例 (没有就领号新开)。幂等; dhtpm 群自己那条不动。
+    try {
+      const rep = repairStewardInstances({
+        store: wizards, rooms: roomStore.ids(), stateOf: roomState,
+        write: (room, ops) => { hub.write(room, ops); },
+        rewriteBindings: (aliases) => rewriteStewardBindings(cfg, sourcePath, aliases),
+        // 只认**直绑**: 频道表按裸 topic 只对频道 room 自己; 帖子 room 的成员是频道管家
+        // (同一个实例, 成员关系表达归属), 不许换; 群看 chatPolicy 自己那一条。
+        boundClassOf: (room) => {
+          const bare = room.startsWith("chat:") ? room.slice("chat:".length) : "";
+          const name = (bare ? (cfg.wrc.channel.steward ?? {})[bare] : "") || appointedSteward(cfg, room);
+          return name ? (wizards.classes?.byName(name)?.id ?? "") : "";
+        },
+      });
+      if (rep.rebound || rep.rooms) classLog.info({ ...rep }, "steward instances repaired (per-room)");
+      // 换成实例的频道 room 若还没有 monitor, 这里补建 (帖子 room 的成员是频道管家, 不在这里)。
+      for (const j of rep.joined) if (channelRoomOf(cfg, j.room)) ensureMonitor(j.room);
+    } catch (e) { classLog.warn({ err: errText(e) }, "steward instance repair failed (不影响启动)"); }
     // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
     const gs = markGlobalSteward(wizards, cfg.defaultChat);

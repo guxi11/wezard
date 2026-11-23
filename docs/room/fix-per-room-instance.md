@@ -65,8 +65,12 @@
 
 ## 进度 (执行者自维护)
 
-- [ ] ① judgeOnboarding 类命中绑类名 (names 分支同修)
-- [ ] ② 落定解析: 本 room 化身, 无则 fresh spawn (群 + 频道两路)
-- [ ] ③ 既有错误绑定纠正 (幂等)
-- [ ] ④ 单测四组
-- [ ] ⑤ typecheck + build + reload + kickstart + 交代
+- [x] ① judgeOnboarding 类命中绑类名 (names 分支同修) — verdict 带 identity/classId; 人给实例名 /
+  类名都落类名 (daemon/onboarding.ts)
+- [x] ② 落定解析: 本 room 化身, 无则 fresh spawn (群 + 频道两路) — steward.localManifestation
+  (类是 openInstance 领号, 非类身份是本 room 又一条同身份记录), applyOnboarding 统一解析
+- [x] ③ 既有错误绑定纠正 (幂等) — daemon/steward-repair.ts + boot 自愈 (不是独立闸门脚本):
+  绑定实例名→类名 (chatPolicy + 频道表), 只修**直绑**的 room, 帖子 room / 群里的频道管家不动
+- [x] ④ 单测四组 — tests/steward-instance.test.ts (目录命中类 / 第二个 room 新序号 + 同 room 复用 /
+  实例名与类名入口 / 自愈幂等 + 帖子 room 与 dhtpm 原样)
+- [x] ⑤ typecheck + build + reload + kickstart + 交代

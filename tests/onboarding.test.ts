@@ -136,10 +136,14 @@ try {
   const obn = loadOnboardingStore(cfg);
   obn.begin(C);
   const vName = judgeOnboarding(store, C, { kind: "names", names: ["fix"] });
-  assert.deepEqual(vName, { kind: "bind-existing", name: "fix", target: "chat:wrHOME" });
+  // 人 2026-11-23: 判定多带一个 identity (绑的是身份), 化身在落定时按本 room 解析。
+  assert.deepEqual(vName, { kind: "bind-existing", name: "fix", target: "chat:wrHOME", identity: "chat:wrHOME" });
   const bn = applyOnboarding(store, obn, C, vName as Bind, (n) => bindSteward(cfg, src, C, n), (t) => identityWorkspaceOf(store, t));
-  assert.deepEqual(bn, { name: "fix", target: "chat:wrHOME", workspace: "/Users/x/fixws", fresh: false });
-  assert.equal(store.get(C), undefined, "绑已有不在本群新建锚点");
+  // 人 2026-11-23: 绑的是身份, 化身按本 room 解析 —— 本群新开一条同身份记录 (不再指别的群那条)。
+  assert.deepEqual(bn, { name: "fix", target: "chat:wrNAME#fix", workspace: "/Users/x/fixws", fresh: false });
+  assert.equal(store.get(C), undefined, "绑已有不占本群 untagged 锚点 (锚点是新建管家才写)");
+  assert.equal(store.get("chat:wrNAME#fix")?.identity, "chat:wrHOME", "本群化身的身份归绑定身份");
+  assert.equal(store.get("chat:wrHOME")?.target, "chat:wrHOME", "原有化身原样不动 (别的群照旧)");
   assert.equal(obn.get(C), undefined);
   assert.equal(judgeOnboarding(store, C, { kind: "names", names: ["nobody"] }).kind, "retry", "名册里没有 = 重问");
   store.upsert("user:owner#workspace", { kind: "worker", name: "workspace" });
@@ -154,7 +158,7 @@ try {
   mkdirSync(wsOrg);
   kin.upsert("chat:wrORG", { kind: "steward", name: "orgsteward", workspace: wsOrg });
   assert.deepEqual(judgeOnboarding(kin, "chat:wrN2", classifyOnboardingInput(wsOrg)),
-    { kind: "bind-existing", name: "orgsteward", target: "chat:wrORG" }, "目录上已有的管家 = 绑它 (每群一条化身, 身份复用)");
+    { kind: "bind-existing", name: "orgsteward", target: "chat:wrORG", identity: "chat:wrORG" }, "目录上已有的管家 = 绑它 (每群一条化身, 身份复用)");
   kin.upsert("chat:wrORG2", { kind: "steward", name: "orgsteward2", workspace: wsOrg });
   const ambiguous = judgeOnboarding(kin, "chat:wrN2", classifyOnboardingInput(wsOrg));
   assert.equal(ambiguous.kind, "retry", "同一目录两个管家 = 反问, 不猜");
@@ -168,10 +172,10 @@ try {
   const cwdOf = (t: string): string => (t === "chat:wrLIVE" || t === "chat:wrGLOBAL" ? wsLive : "");
   kin.upsert("chat:wrLIVE", { kind: "steward", name: "livesteward" });
   assert.deepEqual(judgeOnboarding(kin, "chat:wrN3", classifyOnboardingInput(wsLive), cwdOf),
-    { kind: "bind-existing", name: "livesteward", target: "chat:wrLIVE" }, "没写 workspace 时按活目录推断");
+    { kind: "bind-existing", name: "livesteward", target: "chat:wrLIVE", identity: "chat:wrLIVE" }, "没写 workspace 时按活目录推断");
   kin.upsert("chat:wrGLOBAL", { kind: "global-steward", name: "globalone" });
   assert.deepEqual(judgeOnboarding(kin, "chat:wrN4", classifyOnboardingInput(wsLive), cwdOf),
-    { kind: "bind-existing", name: "globalone", target: "chat:wrGLOBAL" }, "推断层里全局管家优先");
+    { kind: "bind-existing", name: "globalone", target: "chat:wrGLOBAL", identity: "chat:wrGLOBAL" }, "推断层里全局管家优先");
   const wsWork = join(dir, "work");
   mkdirSync(wsWork);
   kin.upsert("chat:wrW", { kind: "worker", name: "worker1", workspace: wsWork });

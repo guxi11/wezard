@@ -12,7 +12,7 @@
 import type { Config } from "../shared/config.js";
 import { baseOfKey, botOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
 import { instanceName, normPath } from "./classes.js";
-import { anchorOf, identityOf, type WizardKind, type WizardRecord, type WizardStore } from "./wizard.js";
+import { anchorOf, identityFieldsOf, identityOf, openInstance, type WizardKind, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf } from "./channel-posts.js";
 
 /** config 里显式绑定的管家身份名 (chatPolicy.<base>.steward); "" = 没绑。 */
@@ -78,6 +78,31 @@ const manifestationIn = (store: WizardStore, identity: string, base: string) =>
     .filter((w) => identityOf(w) === identity && baseOfKey(w.target) === base)
     .slice()
     .sort((a, b) => Number(!!tagOfKey(a.target)) - Number(!!tagOfKey(b.target)) || a.bornAt - b.bornAt || (a.target < b.target ? -1 : 1))[0];
+
+/** 本 room 里某个管家身份 (类 id 或普通身份 id) 的化身 target —— 没有就开一个; 名册缺席 = ""。
+ *  人 2026-11-23: **绑定只绑身份 (类名), 化身按 room 解析** —— 绝不把别的 room 的 target 当本
+ *  room 的管家 (那会把别人家的实例拉进来当 host)。类是领序号的新实例 (openInstance: 本 room
+ *  已有就复用它, 没有才 allocOrdinal); 非类身份是本 room 的又一条同身份记录 (名字取身份名 +
+ *  uniqueTag 防撞, 身份级字段从锚点继承), 与 stewardRoute.open 同一形态。 */
+export const localManifestation = (
+  store: WizardStore | undefined,
+  base: string,
+  identity: string,
+  kind?: WizardKind,
+): string => {
+  if (!store || !identity) return "";
+  const hit = manifestationIn(store, identity, base);
+  if (hit) return hit.target;
+  const anchor = anchorOf(store, identity);
+  const opened = openInstance(store, base, identity, kind ?? anchor?.kind ?? "steward");
+  if (opened) return opened;
+  if (!anchor?.name) return "";
+  const taken = new Set(store.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)).filter(Boolean));
+  const target = keyOf(base, uniqueTag(anchor.name, taken));
+  const k = kind ?? anchor.kind;
+  store.upsert(target, { ...identityFieldsOf(anchor), identity, name: anchor.name, ...(k ? { kind: k } : {}) });
+  return target;
+};
 
 export interface StewardRoute {
   /** 裸消息的投递目标。 */

@@ -19,8 +19,8 @@ import { baseOfKey, botOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../sha
 import { parse } from "acorn";
 import { EXEC_SHELLS, execToolRefusal, shortToolOf } from "./exec-surface.js";
 import { instanceName, validClassName } from "./classes.js";
-import { appointedChannelSteward, appointedSteward, stewardsAt } from "./steward.js";
-import { foldName, type WizardRecord, type WizardStore } from "./wizard.js";
+import { appointedChannelSteward, appointedSteward, localManifestation, stewardsAt } from "./steward.js";
+import { foldName, identityOf, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf, postsOfChannel } from "./channel-posts.js";
 import { DAEMON, applyOp, holderOf, leaveOps, msgIdOf, openDuties, sameWho, whoKey, type MsgRow, type RoomOp, type RoomState, type Who } from "../shared/room.js";
 
@@ -224,25 +224,39 @@ export const validateOnboardingWorkspace = (
 
 // ── 判定 + 写入 ───────────────────────────────────────────────────────
 
+/** 绑定的是**身份**不是某一条化身 (人 2026-11-23): name 落绑定 (类命中 = 类名),
+ *  identity 是身份 id (类 id / 普通身份 id), 本 room 的化身由 applyOnboarding 落定解析。
+ *  target 只作「身份锚点在哪」的线索 (推工作区用), **绝不再拿去 join 别的 room**。 */
 export type OnboardingVerdict =
   | { kind: "retry"; reason: string }
   | { kind: "bind-new"; workspace: string }
-  | { kind: "bind-existing"; name: string; target: string };
+  | { kind: "bind-existing"; name: string; target: string; identity?: string; classId?: string };
 
 /** 一句非命令人话 → 该做什么 (纯判定, 不写盘)。名字只认本 bot 名册里的已有身份,
  *  且排除引导化身本身。目录上已有管家身份 (<role, workspace> 唯一) 就绑它, 没有才新建 ——
- *  cwdOf 给「没写 workspace 的管家」判它现在的活目录。 */
+ *  cwdOf 给「没写 workspace 的管家」判它现在的活目录。
+ *  命中是**类**时绑类名 (不是锚点实例名) —— 同一个类在不同 room 要各用各的实例。 */
 export const judgeOnboarding = (store: WizardStore | undefined, base: string, input: Exclude<OnboardingInput, { kind: "command" | "sentence" }>, cwdOf: (target: string) => string = () => ""): OnboardingVerdict => {
+  /** 一条身份记录 → verdict: 类是类名 + classId, 其余是身份名。 */
+  const bindOf = (rec: WizardRecord): OnboardingVerdict => {
+    const identity = identityOf(rec);
+    const cls = store?.classes?.get(identity);
+    return { kind: "bind-existing", name: cls ? cls.name : rec.name, target: rec.target, identity, ...(cls ? { classId: cls.id } : {}) };
+  };
   if (input.kind === "workspace") {
     const v = validateWorkspace(input.path);
     if (!v.ok) return { kind: "retry", reason: "目录不行: " + v.reason };
     const hits = stewardsAt(store, base, v.abs, cwdOf);
-    if (hits.length === 1) return { kind: "bind-existing", name: hits[0]!.name, target: hits[0]!.target };
+    if (hits.length === 1) return bindOf(hits[0]!);
     if (hits.length > 1) return { kind: "retry", reason: "目录 " + v.abs + " 上已有多个管家: " + hits.slice(0, 5).map((h) => h.name).join(" / ") + " — 回复其中一个的名字" };
     return { kind: "bind-new", workspace: v.abs };
   }
+  // 人给的是实例名 / 身份名: 落它的身份 (类实例 → 类名, 本 room 的实例落定时再解析)。
   const hit = input.names.map((n) => store?.byName(n)).find((r) => r && sameBot(base, r.target) && !isGuideManifestation(r));
-  if (hit) return { kind: "bind-existing", name: hit.name, target: hit.target };
+  if (hit) return bindOf(hit);
+  // 人直接给类名 (类名不在 wizard 名册里, 在类表)。
+  const cls = input.names.map((n) => store?.classes?.byName(n)).find((c) => !!c && c.bot === botOfKey(base));
+  if (cls) return { kind: "bind-existing", name: cls.name, target: cls.id, identity: cls.id, classId: cls.id };
   return { kind: "retry", reason: input.names.length ? "没认出目录, 名册里也没有叫 " + input.names.slice(0, 3).join(" / ") + " 的管家" : "没认出目录或管家名字" };
 };
 
@@ -307,11 +321,16 @@ export const rewriteStewardBindings = (
 };
 
 export interface OnboardingBound {
+  /** 绑进 config 的名字: 类命中 = 类名, 否则身份名。 */
   name: string;
-  /** 管家身份的 target (新建 = 本群锚点; 绑已有 = 那个身份所在的 target) —— room 交接要用它找 uid。 */
+  /** **本 room** 的化身 target —— room 交接用它找 uid; 已按 room 解析, 不会指别的 room。 */
   target: string;
   workspace: string;
   fresh: boolean;
+  /** 绑的是类 (人 2026-11-23): 同一个类在不同 room 各用各的实例。 */
+  classId?: string;
+  /** 有类时本 room 实例的名字 (类名-序号)。 */
+  instance?: string;
 }
 
 /** 落定一个绑定 verdict: 新建 = 本群 untagged 锚点落 kind:steward + workspace (身份级) 并领一个
@@ -327,7 +346,23 @@ export const applyOnboarding = (
   want = "",
 ): OnboardingBound => {
   const done = (b: OnboardingBound): OnboardingBound => { bind(b.name); onboarding.finish(base); return b; };
-  if (verdict.kind === "bind-existing") return done({ name: verdict.name, target: verdict.target, workspace: workspaceOf(verdict.target), fresh: false });
+  // 绑已有 (人 2026-11-23): 绑定只绑身份, **化身按本 room 解析** —— 本 room 已有这个身份的
+  // 化身就用它, 没有就开一条 (类是领序号的新实例)。绝不把别的 room 的 target 拉过来当管家。
+  if (verdict.kind === "bind-existing") {
+    const identity = verdict.identity ?? "";
+    const cls = identity ? store.classes?.get(identity) : undefined;
+    const local = localManifestation(store, base, identity);
+    const target = local || verdict.target;
+    const rec = store.get(target);
+    return done({
+      name: cls ? cls.name : verdict.name,
+      target,
+      workspace: cls?.workspace || workspaceOf(target) || workspaceOf(verdict.target),
+      fresh: false,
+      ...(cls ? { classId: cls.id } : {}),
+      ...(cls && rec?.name ? { instance: rec.name } : {}),
+    });
+  }
   // 类世界 (人 2026-11-18): 新建管家 = 建一个类 (id = 本群锚点 target, 名 = want / 自动中性名)
   // + 它的第 1 个实例 (记录名 `类名-1`); 绑定写**类名** —— 人点类名就落本群这个实例。
   // want 是人类指定给管家的名字 (人 2026-11-23: 引导一句话里连名字一起定, 不要甩给后来的管家)。
@@ -472,4 +507,7 @@ export const renderGuideRetry = (reason: string): string =>
 export const renderOnboardingDone = (b: OnboardingBound): string =>
   b.fresh
     ? "[wezard] ✅ 引导完成: 本群管家 ." + b.name + " 已就位 (工作区 " + b.workspace + ")。之后直接在群里说话就是找它; 想改名 / 改职责对它说一声即可。"
-    : "[wezard] ✅ 引导完成: 本群管家绑定为已有的 ." + b.name + " (工作区跟身份走: " + (b.workspace || "身份未记录工作区") + ")。之后直接在群里说话就是找它。";
+    // 绑的是类: 说清本 room 用的是哪个实例 —— 同一个类在别的 room 是别的实例, 人按实例点名。
+    : "[wezard] ✅ 引导完成: 本群管家绑定为已有的 ." + (b.instance || b.name)
+      + (b.classId ? " (." + b.name + " 在本群的实例)" : "")
+      + " (工作区跟身份走: " + (b.workspace || "身份未记录工作区") + ")。之后直接在群里说话就是找它。";
