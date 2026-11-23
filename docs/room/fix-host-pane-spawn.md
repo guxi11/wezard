@@ -46,4 +46,6 @@ room-hub.ts:249 起注释: 没有活 pane ≠ 忙, 那是**冷会话** (曾有�
 - [x] 修法 3: 单测 — tests/steward-instance 第 ⑤ 组 (只收无 pane 的那个 / 有 pane 跳过 + 幂等 /
   帖子 room 不另造实例)
 - [x] tsc + build + 单测绿
-- [ ] reload + 真机验证 OliveBrown-2 可响应
+- [x] reload + 真机验证 — boot 日志 steward panes spawned at boot = 频道那个实例; tmux pane %831
+  (OliveBrown-2, cwd = dhtpm), mirror 绑定 sessionId 4933bf99 + pane %831 已落; 唤醒不再是 gone
+  (等待人在频道真发消息确认响应)
