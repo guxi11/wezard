@@ -72,7 +72,9 @@ cfg2.chatPolicy = { ...(cfg2.chatPolicy ?? {}), "chat:opkC": { ...(cfg2.chatPoli
 assert.equal(settleChannelSteward(cfg2, store2, src2, "chat:opkC")?.name, "Old2", "频道已绑: 帖子级残留不翻案");
 assert.equal(cfg2.chatPolicy?.["chat:opkC"]?.steward, undefined);
 
-// ── ④ 端到端: 帖子 A 引导落定 → 帖子 B 在途引导收掉; B 的裸消息落频道管家 ──
+// ── ④ 端到端: 频道引导落定 → 同频道帖子在途引导收掉; 帖子裸消息落频道管家 ──
+//  人 2026-11-23 改口径: 引导的粒度是**频道** (chat:<topic_id>) —— 原生帧的帖子 base 先换回频道
+//  room 再判 needsOnboarding, 所以落定的管家锚点是频道 room, 不再是第一个发话的帖子 base。
 const dir3 = "s3";
 const cfg3 = cfgOf(dir3);
 mkdirSync(join(ROOT, dir3), { recursive: true });
@@ -118,6 +120,6 @@ assert.equal(store3.get("chat:opkF#guide"), undefined, "引导记录一并 drop"
 assert.equal(JSON.parse(readFileSync(join(ROOT, dir3, "onboarding.json"), "utf8"))["chat:opkF"], undefined, "F 的在途引导状态清掉 (出站豁免随之关)");
 await handlers.get("message.text")!(native("opkF", "f1", "hi"));
 assert.deepEqual(dispatched, ["chat:opkF#" + name], "F 的裸消息落频道管家在 F 的化身, 不再起引导");
-assert.equal(store3.get("chat:opkF#" + name)?.identity, "chat:opkE", "化身归频道管家身份");
+assert.equal(store3.get("chat:opkF#" + name)?.identity, "chat:T3", "化身归频道管家身份 (锚点 = 频道 room)");
 
 console.log("channel-steward-scope ok");

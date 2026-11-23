@@ -1154,8 +1154,15 @@ export const installInboundRouter = (
   };
   const guideGate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, raw: string): Promise<boolean> => {
     if (!isGroup(msg)) return false;
-    const base = chatPrincipal(msg);
-    if (sourceOf(msg) === "channel") await settleChannelPost(base);
+    let base = chatPrincipal(msg);
+    if (sourceOf(msg) === "channel") {
+      await settleChannelPost(base);
+      // 频道: 绑定与引导的粒度都是频道 (人 2026-11-23: 一个频道一个管家、一条引导)。原生帧的
+      // base 是**帖子**群 (chat:opk…), 配上频道就换回频道 room —— 引导化身住频道 room, 帖子
+      // room 在绑定前没有 host, 人话落那儿没人接。
+      const topicId = channelOfPost(cfg, base);
+      if (topicId) base = "chat:" + topicId;
+    }
     const store = wizardStore();
     if (!needsOnboarding(cfg, store, base)) {
       // 绑定已在 (含同频道别的帖子绑的): 在途引导状态 (出站豁免) 与引导化身一并收掉。

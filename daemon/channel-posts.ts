@@ -55,9 +55,15 @@ export const postBaseOf = (cfg: Config, topicId: string, postId: string): string
   Object.keys(storeOf(cfg).all())
     .find((b) => { const r = refOf(storeOf(cfg).get(b)); return r?.channel === topicId && !!r.post && r.post === postId; });
 
-/** 该频道已配对的帖子 base。 */
+/** 该频道已配对的帖子 base (不含频道 room 自己 —— 它由 learnChannelRoom 记进来, 根帖 id 为空)。 */
 export const postsOfChannel = (cfg: Config, topicId: string): string[] =>
-  Object.keys(storeOf(cfg).all()).filter((b) => refOf(storeOf(cfg).get(b))?.channel === topicId);
+  Object.keys(storeOf(cfg).all())
+    .filter((b) => { const r = refOf(storeOf(cfg).get(b)); return r?.channel === topicId && !!r.post; });
+
+/** 记一个频道 room 本身 (chat:<topic_id>) 为已知频道: 未绑定、还没有帖子配对过的频道也要认得出
+ *  —— 引导 / 绑定落 wrc.channel.steward 都要先认出「这是一个频道」。幂等。 */
+export const learnChannelRoom = (cfg: Config, topicId: string): boolean =>
+  learnChannelPost(cfg, "chat:" + topicId, topicId, "");
 
 /** 记一对 帖子 → {频道, 根帖}; 新学到或改了返回 true (没变不写盘)。
  *  postId 是频道自己的 post_id (send_reply 要它), 不是帖子群的 chatid (opk…) —— 两者不同。 */

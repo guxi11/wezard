@@ -31,7 +31,8 @@ import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } 
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicPost, sendTopicReply, type ChannelHuman } from "./channel.js";
-import { channelRefOf, postRefOf } from "./channel-posts.js";
+import { channelOf, channelRefOf, learnChannelRoom, postRefOf, postsOfChannel } from "./channel-posts.js";
+import { channelMonitorLeaveOps, channelMonitorWanted, channelRoomOf, channelGuideJoinOps, hostJoinOps, planChannelGuideTurn, postRoomBirthOps, type ChannelGuideTurn } from "./channel-onboarding.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -133,7 +134,7 @@ import { parseWhen, planHasOpenDuty, renderRoomRead } from "../shared/room-view.
 import { memberLabel } from "../shared/room-label.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle } from "./wait-idle.js";
-import { applyOnboarding, bindSteward, guideHandoffOps, guideOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
+import { applyOnboarding, bindSteward, GUIDE_DESC, guideHandoffOps, guideOf, guideTargetOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderGuideRetry, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
 import { reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 
@@ -1857,6 +1858,7 @@ const main = async (): Promise<void> => {
         plan.name);
       roomLog.info({ room: base, ...bound, roomName: plan.roomName ?? "" }, "onboarding: steward bound (guide tool)");
       const handed = guideSettleRoom(base, bound, plan.roomName);
+      settleBoundChannel(base, bound);
       if (!handed) notifyChat(base, renderOnboardingDone(bound)); // 引导不在 room 里 (老流程): 至少回报一句
       void reapGuideAfterTurn(self); // 先回成功: 这一轮的话还要说完, 收尸在轮终之后 (或 60s)
       json(res, 200, { ok: true, name: bound.name, target: bound.target, workspace: bound.workspace, fresh: bound.fresh,
@@ -1968,24 +1970,80 @@ const main = async (): Promise<void> => {
         .catch((e: unknown) => roomLog.warn({ target, err: errText(e) }, "monitor: 冷启动失败 (第一条人话会再试)"))
         .finally(() => monitorStarting.delete(target));
     };
-    /** 频道 room 不存在就开一个 (频道管家已绑定就作 founder —— monitor 需要有人可激活)。 */
+    /** 频道 room 不存在就开一个 (频道管家已绑定就作 founder —— monitor 需要有人可激活)。
+     *  未绑定期不建 monitor (channel-onboarding 口径①): 否则每条人话都被 monitor 抢走, 引导就哑了。
+     *  learnChannelRoom: 未配对过帖子的频道也要被认成频道 —— 引导绑定落 wrc.channel.steward 靠它。 */
     const ensureChannelRoom = (topicId: string): string => {
       const room = "chat:" + topicId;
+      learnChannelRoom(cfg, topicId);
       if (!roomState(room)) {
         const at = Date.now();
         const ops: RoomOp[] = [{ op: "open", at, room, kind: "wecom-group", by: DAEMON }];
         try {
           const stw = resolveSteward(cfg, wizardStore(), room, (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
-          const uid = stw.fresh ? wizards.get(stw.target)?.uid : undefined;
+          // 已有化身的才能作 founder (fresh = 记录还没落, 由入站接待自己开)。与 ensureBoundRoom 同一判法。
+          const uid = stw.fresh ? undefined : wizards.get(stw.target)?.uid;
           if (uid) ops.push({ op: "join", at, room, who: { kind: "wizard", id: uid }, ord: 1, via: "founder", by: DAEMON });
-        } catch { /* 没绑定: 只有 monitor 的频道 room, 等帖子 host 进来 */ }
+        } catch { /* 没绑定: 空频道 room, 引导 (或绑定后的管家) 会进来 */ }
         hub.write(room, ops);
       }
-      ensureMonitor(room);
+      if (channelMonitorWanted(cfg, wizardStore(), room)) ensureMonitor(room);
       return room;
     };
-    /** 人话落 room: 频道 room / 帖子 room 都先保证存在; mention / post 原样写进行里。 */
+    /** 频道引导期: 引导化身入座频道 room 并接住这条人话 (人话落频道 room —— 帖子 room 此刻没有
+     *  host, 落那儿等于丢话)。与群引导的 guideTakeover 同形, 只是没有企微占位气泡 (频道 room
+     *  的出站是帖子)。 */
+    const takeChannelGuide = (turn: ChannelGuideTurn): { ok: boolean; reason?: string } => {
+      const rec = wizards.get(turn.guide);
+      if (!rec?.uid) return { ok: false, reason: "引导会话不在名册上" };
+      const at = Date.now();
+      const s = roomState(turn.channelRoom);
+      // 旧版本给未绑定频道建过 monitor: 先请它退场, 否则人话只听它的, 引导接不到 (口径①)。
+      const evict = s ? channelMonitorLeaveOps(s, at) : [];
+      if (evict.length) { hub.write(turn.channelRoom, evict); roomLog.info({ room: turn.channelRoom }, "onboarding: 频道引导期请走 monitor"); }
+      const join = channelGuideJoinOps(roomState(turn.channelRoom), turn.channelRoom, { kind: "wizard", id: rec.uid }, at);
+      if (join.length) hub.write(turn.channelRoom, join);
+      const v = hub.append(turn.channelRoom, turn.human);
+      return v.ok ? { ok: true } : { ok: false, reason: v.reason };
+    };
+    const channelGuideSpawning = new Set<string>();
+    /** 未绑定频道的人话: 起 (或续) 引导化身, 人话落频道 room 交给它。会话冷启动在后台做 ——
+     *  人话先落账 (起 pane 慢不能丢话), 泵贴不进去会把它重生。 */
+    const channelGuideTurn = (turn: ChannelGuideTurn): void => {
+      const store = wizardStore();
+      if (!store) return;
+      if (!store.get(turn.guide)) {
+        store.upsert(turn.guide, { identity: turn.guide, kind: "worker", description: GUIDE_DESC, workspace: expandHome(cfg.wrc.cwd) });
+        roomLog.info({ room: turn.channelRoom, guide: turn.guide }, "onboarding: 频道引导化身落记录");
+      }
+      if (!m.hasMirrorTarget(turn.guide) && !channelGuideSpawning.has(turn.guide)) {
+        channelGuideSpawning.add(turn.guide);
+        const name = settleName(store, chatNameOf(cfg, turn.guide), turn.guide) || turn.guide;
+        void m.newSession(turn.guide, name, { silent: true, cwd: expandHome(cfg.wrc.cwd) })
+          .then((r) => {
+            if (!r.ok) { roomLog.warn({ guide: turn.guide, reason: r.reason }, "onboarding: 频道引导会话起不来 (人话照样落账, 泵会再试)"); return; }
+            m.armCharter(turn.guide, turn.first ? renderGuideOpening() : renderGuideRetry(""));
+          })
+          .catch((err: unknown) => roomLog.warn({ guide: turn.guide, err: errText(err) }, "onboarding: 频道引导会话起不来"))
+          .finally(() => channelGuideSpawning.delete(turn.guide));
+      }
+      const r = takeChannelGuide(turn);
+      if (!r.ok) roomLog.warn({ room: turn.channelRoom, guide: turn.guide, reason: r.reason }, "onboarding: 频道引导没接住这条人话");
+    };
+    /** 频道已绑定而引导化身还挂着 (人手改 config / 上个进程死在半路): 收尸 —— 与群 guideGate 开头同款。 */
+    const reapStaleChannelGuide = (channelRoom: string): void => {
+      const guide = guideOf(wizards, channelRoom);
+      if (!guide) return;
+      roomLog.info({ room: channelRoom, guide }, "onboarding: 频道已绑定, 收掉遗留的引导化身");
+      void m.killPane(guide).catch(() => undefined).then(() => { wizardStore()?.drop(guide); });
+    };
+    /** 人话落 room: 频道 room / 帖子 room 都先保证存在; mention / post 原样写进行里。
+     *  未绑定频道先过引导 (口径②④): 引导接一切人话, 绑定后才轮到 monitor / host。 */
     channelIngest = (e) => {
+      const turn = planChannelGuideTurn({ cfg, store: wizardStore(), onboarding, room: e.room }, e);
+      if (turn) { channelGuideTurn(turn); return; }
+      const chRoom = channelRoomOf(cfg, e.room);
+      if (chRoom) { onboarding.finish(chRoom); reapStaleChannelGuide(chRoom); }
       if (!roomState(e.room)) {
         roomLog.warn({ room: e.room, msgid: e.msgid }, "channel: room 不存在, 人话没落账本 (自愈: 下一条事件重建)");
         return;
@@ -1997,16 +2055,16 @@ const main = async (): Promise<void> => {
       if (!v.ok) roomLog.warn({ room: e.room, msgid: e.msgid, reason: v.reason }, "channel: 人话落行被拒");
     };
     channelRoomSeen = (topicId) => { ensureChannelRoom(topicId); };
-    /** 帖子 room 诞生: 建 room; 它的 host 同时是所属频道 room 的成员 (成员关系表达归属); 起两个 monitor。 */
+    /** 帖子 room 诞生: 建 room; 已绑定的频道里它的 host 同时是频道 room 的成员 (成员关系表达归属);
+     *  各起一个 monitor。未绑定 / 引导期只开房不收人 (没有 host), 绑定后由管家补进来 (口径⑤)。 */
     channelPostBorn = (topicId, postBase) => {
       const channelRoom = ensureChannelRoom(topicId);
+      const chState = roomState(channelRoom);
+      // 引导期之外 (已绑定 / 存量频道) 帖子 room 才接人; 引导期它只开房, 人话归频道 room 的引导。
+      const settled = channelMonitorWanted(cfg, wizardStore(), channelRoom);
       if (!roomState(postBase)) {
-        const at = Date.now();
-        const ops: RoomOp[] = [{ op: "open", at, room: postBase, kind: "topic-post", by: DAEMON }];
-        const chState = roomState(channelRoom);
-        const founder = chState ? roomHost(chState) : undefined;
-        if (founder) ops.push({ op: "join", at, room: postBase, who: founder, ord: 1, via: "founder", by: DAEMON });
-        hub.write(postBase, ops);
+        const founder = settled && chState ? roomHost(chState) : undefined;
+        hub.write(postBase, postRoomBirthOps(postBase, founder, Date.now()));
         roomLog.info({ room: postBase, channel: channelRoom, founder: founder && roomNameOf(founder) }, "channel: 帖子 room 诞生");
       }
       const ps = roomState(postBase);
@@ -2014,7 +2072,7 @@ const main = async (): Promise<void> => {
       const cs = roomState(channelRoom);
       if (host && cs && !cs.members.has(whoKey(host)))
         hub.write(channelRoom, [{ op: "join", at: Date.now(), room: channelRoom, who: host, ord: cs.nextOrd, via: "invite", by: DAEMON }]);
-      ensureMonitor(postBase);
+      if (settled) ensureMonitor(postBase);
     };
     /** 定时任务 / plan 提醒的一枪 (cutmap G-1/G-2): kind:"trigger" 行 —— 不镜像, 只唤醒 owner。 */
     const fireTaskTrigger = (target: string, text: string, ext: string): void => {
@@ -2126,6 +2184,25 @@ const main = async (): Promise<void> => {
       }
       return true;
     };
+    /** 绑定落在**频道**上 (wrc.channel.steward): 管家入驻频道 room 与各帖子 room 当 host, 再起
+     *  monitor (口径③)。引导期这两样都没建 (ensureChannelRoom / channelPostBorn 的 bound 闸),
+     *  这里是唯一的补建点 —— 普通群 (channelOf 认不出) = 无操作。 */
+    const settleBoundChannel = (base: string, bound: OnboardingBound): void => {
+      const topicId = channelOf(cfg, base);
+      if (!topicId) return;
+      const steward = roomSelfOf(bound.target);
+      const rooms = [base, ...postsOfChannel(cfg, topicId)];
+      for (const room of rooms) {
+        const s = roomState(room);
+        if (!s) continue;
+        if (steward) {
+          const ops = hostJoinOps(s, steward, Date.now());
+          if (ops.length) hub.write(room, ops);
+        }
+        if (channelMonitorWanted(cfg, wizardStore(), room)) ensureMonitor(room);
+      }
+      roomLog.info({ room: base, topicId, steward: bound.target, rooms: rooms.length }, "onboarding: 频道交出管家 (host + monitor)");
+    };
     /** 引导收尸 (绑定后): 工具调用已经回成功, 等它这一轮结束 (或 60s 上限) 再 kill + drop ——
      *  半路杀 pane 会把这一轮截断在 CLI 里。它已经 leave 过 room, 所以 drop 不会再产生
      *  canceled 行 (leaveRooms 对非成员是空操作)。 */
@@ -2138,7 +2215,13 @@ const main = async (): Promise<void> => {
       roomLog.info({ guide, killed: r.ok, reason: r.reason }, "onboarding: guide reaped after bind");
     };
     guideInboundHook = guideTakeover;
-    guideSettleHook = guideSettleRoom;
+    // 群引导的落定也走频道补建: base 是频道 room 时, 绑定后要补 host / monitor (口径③);
+    // 普通群 channelOf 认不出, settleBoundChannel 无操作。settleBoundChannel 幂等。
+    guideSettleHook = (base, bound) => {
+      const ok = guideSettleRoom(base, bound);
+      if (ok) settleBoundChannel(base, bound);
+      return ok;
+    };
     // rolepage 的 room 历史路由 (room-ui 的第 4 个接线点): 坏账本按「没有这个 room」处理。
     setRoomReader({ ids: roomStore.ids, get: (id) => roomState(id) });
     // 回填外层引用 (入站包装在 mirror 块之外)。
