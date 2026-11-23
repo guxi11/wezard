@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI_BACKEND_DEFAULTS } from "../shared/cli-backends.js";
-import { charterFacts, charterPreamble, charterToRearm, shouldRearmCharter } from "../shared/charter-rearm.js";
+import { charterFacts, charterInContext, charterInContextOf, charterPreamble, charterToRearm, shouldRearmCharter } from "../shared/charter-rearm.js";
 import { loadMirrorStore, type MirrorAttachment } from "../daemon/mirror-store.js";
 
 const claude = CLI_BACKEND_DEFAULTS.claude.normalizeTranscriptLine;
@@ -118,3 +118,21 @@ assert.equal(
 
 rmSync(dir, { recursive: true, force: true });
 console.log("Charter rearm predicate and reload fixture passed");
+
+// ── 重生 (--resume 同一会话): 上下文里现在有没有宪章 ───────────────────
+const cut = JSON.stringify({ type: "system", subtype: "compact_boundary" });
+assert.equal(charterInContextOf([claudeUser(CH + "在吗"), claudeAssistant("在")].join("\n"), claude), true); // 已送达无切断 → 不挂
+assert.equal(charterInContextOf([claudeUser(CH + "在吗"), cut, claudeUser("摘要")].join("\n"), claude), false); // 切断后没有 → 挂
+assert.equal(charterInContextOf([claudeUser(CH + "在吗"), cut, claudeUser(CH + "再来")].join("\n"), claude), true); // 切断后补过
+assert.equal(charterInContextOf([claudeUser("你好"), claudeAssistant(CH)].join("\n"), claude), false); // assistant 字面量不算
+assert.equal(charterInContext({ cli: "claude", jsonlPath: "/nonexistent/x.jsonl" }), null); // 无 transcript → 挂
+{
+  const d = mkdtempSync(join(tmpdir(), "ch-ctx-"));
+  const f = join(d, "s.jsonl");
+  writeFileSync(f, [claudeUser(CH + "在吗"), claudeAssistant("在")].join("\n") + "\n");
+  assert.equal(charterInContext({ cli: "claude", jsonlPath: f }), true);
+  appendFileSync(f, cut + "\n");
+  assert.equal(charterInContext({ cli: "claude", jsonlPath: f }), false);
+  rmSync(d, { recursive: true, force: true });
+}
+console.log("charter-in-context ok");

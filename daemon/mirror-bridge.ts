@@ -1,7 +1,7 @@
 import type { ClearAttempt } from "./handoff.js";
 import { envelopeFor, parseEnvelope, renderTail } from "../shared/reminder.js";
 import { turnOpening } from "./turn-opening.js";
-import { charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
+import { charterInContext, charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand, inspectCodexHooks, trustCodexHookSet, type CodexHook } from "../shared/codex-hooks.js";
 import { fileURLToPath } from "node:url";
@@ -5947,6 +5947,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (Boolean(rec.charterOwed) === owed) return;
     deps.store.set(a.target, { ...rec, charterOwed: owed || undefined });
   };
+  /** --resume 重生后宪章该不该重挂: 已欠着就照挂; 否则上下文里已有 (最近切断之后) 就不挂。 */
+  const charterOwedOnResume = (a: AttachState, charter: string | undefined): string | undefined =>
+    a.charterPending?.trim() || deps.store.get(a.target)?.charterOwed || charterInContext({ cli: backendForPath(a.jsonlPath).name, jsonlPath: a.jsonlPath }) !== true
+      ? charter
+      : undefined;
+
   /** 挂/清这个 pane 的宪章 (内存 + 落盘): 除 attach 自己那次 (它紧接着整份重写记录,
    *  一并带上 charterOwed) 之外, 所有 `charterPending = …` 都走它 —— 否则 reload
    *  恢复出来的绑定分不清「欠着」与「已送达」。 */
@@ -7871,7 +7877,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
         // 重生出的 pane 里是同一份会话, 但宪章要重挂: --resume 读的是 CLI 自己的
         // 系统提示, 我们的宪章只跟着消息走。下面的注入 (本函数尾部) 会带上它。
-        setCharterPending(a, respawnCli === "codex" ? undefined : charter);
+        // 同一个会话 --resume 回来, 上下文里已有宪章 (最近一次切断之后) 就不再挂;
+        // 欠着 / 读不到转录 / 被压缩压掉了才挂。
+        setCharterPending(a, respawnCli === "codex" ? undefined : charterOwedOnResume(a, charter));
         fresh = true;
       }
       if (!permitted()) return denied;
@@ -8444,7 +8452,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             log.info({ target: a.target, sessionId: sid, newPane: a.tmuxPane, newSession: a.tmuxSession }, "mirror: tmux respawned");
             // 重挂宪章 (同 injectText 的 respawn-init): --resume 只带回对话内容,
             // 我们的宪章跟着消息走。本条注入 (下面) 会带上它。
-            setCharterPending(a, respawnCli === "codex" ? undefined : charter);
+            setCharterPending(a, respawnCli === "codex" ? undefined : charterOwedOnResume(a, charter));
             // Re-bind onto the resume fork once it appears (EOF offset: the fork
             // already holds the full prior transcript — replaying from 0 would
             // re-dump it). If --resume happens to keep the same jsonl, no new

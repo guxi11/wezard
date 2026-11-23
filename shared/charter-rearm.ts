@@ -13,7 +13,7 @@
 //   落盘标记为 true      → 武装 (挂上过、没确认送达)
 //   一条 user 行都没有   → 武装 (同上, 文件还没写第一句)
 //   其余                 → 不武装 (2.9.0 之前用 system prompt 起的老会话, 别重复灌)
-import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { CLI_BACKEND_DEFAULTS, backendForPath, type CliBackend, type CliBackendName } from "./cli-backends.js";
 import { expandHome } from "./paths.js";
 import { parseReminders } from "./reminder.js";
@@ -144,6 +144,26 @@ export const shouldRearmCharter = (input: { cli?: string; owed?: boolean; jsonlP
   const facts = readFacts(path, normalizerFor(input.cli, path));
   return charterVerdict({ cli: input.cli, owed: input.owed, facts });
 };
+
+/** 这个会话的上下文里**现在**有没有宪章: 最近一次上下文切断 (compact_boundary) 之后
+ *  有 user 行带宪章块才算。给 --resume 重生用 —— 同一个会话回来, 上下文原样, 宪章在就别
+ *  再贴一份 (每次白付 ~5k token); 压缩把它压掉了才要重挂。/clear 换新 sid 是新文件,
+ *  不在这里。null = 读不了 (文件不存在 / IO 失败), 调用方按「不在」处理。 */
+export const charterInContext = (input: { cli?: string; jsonlPath: string }): boolean | null => {
+  const path = expandHome(input.jsonlPath);
+  if (!existsSync(path)) return null;
+  let text: string;
+  try { text = readFileSync(path, "utf8"); } catch { return null; }
+  return charterInContextOf(text, normalizerFor(input.cli, path));
+};
+
+/** 纯解析版: 逐行走, 切断清零, 宪章 user 行置位。预筛掉不含关键字的行, 免得整份转录都 JSON.parse。 */
+export const charterInContextOf = (transcript: string, normalize: LineNormalizer): boolean =>
+  transcript.split("\n").reduce((inCtx, line) => {
+    if (line.includes('"compact_boundary"') || /"type"\s*:\s*"compacted"/.test(line)) return false;
+    if (inCtx || !line.includes("charter")) return inCtx;
+    return classify(line, normalize) === "charter";
+  }, false);
 
 /** attach 用: 判据为真时现渲染一份 (调用方给的 render 是 charterFor), 否则 undefined。 */
 export const charterToRearm = (input: {
