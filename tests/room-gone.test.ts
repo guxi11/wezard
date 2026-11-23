@@ -17,7 +17,8 @@ const wiz: Record<string, { target: string; name: string }> = {
   [B]: { target: "chat:wrG#b", name: "b" },
 };
 const warns: Array<Record<string, unknown>> = [];
-const log = { info: () => {}, warn: (o: Record<string, unknown>) => { warns.push(o); }, child: () => log } as never;
+const debugs: Array<Record<string, unknown>> = [];
+const log = { info: () => {}, debug: (o: Record<string, unknown>) => { debugs.push(o); }, warn: (o: Record<string, unknown>) => { warns.push(o); }, child: () => log } as never;
 let next: PasteResult = "gone";
 const pastedTo: string[] = [];
 const hub = createRoomHub({
@@ -80,3 +81,32 @@ await hub.pump();
 assert.equal(warns.filter((w) => w.result === "failed").length, 2, "成功后的新失败重新报");
 
 console.log("room-gone: ok");
+
+// 模拟 reload: 新 hub (failedAs 清空), 账本里已有 undelivered → gone 不再 warn, 降成 debug
+{
+  const store2 = openRoomStore(dir);
+  const room2 = "adhoc:g2";
+  store2.ensure(room2, { at: 1, kind: "adhoc", by: DAEMON });
+  const mk = () => createRoomHub({
+    store: store2, log, now: () => 10_000,
+    wizardOf: (u) => wiz[u],
+    nameOf: (w: Who) => (w.kind === "wizard" ? "." + (wiz[w.id]?.name ?? w.id) : w.id),
+    roomLabel: (r) => r, mirror: async () => true, live: async () => false, idle: async () => true, interrupt: async () => {},
+    paste: async (target) => (target === "chat:wrG#b" ? "gone" : "ok"),
+  });
+  const h1 = mk();
+  h1.write(room2, [
+    { op: "join", at: 1, room: room2, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: room2, who: { kind: "wizard", id: B }, ord: 2, via: "spawn", by: { kind: "wizard", id: A } },
+  ]);
+  h1.append(room2, { author: { kind: "wizard", id: A }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: B }], text: "z" });
+  const w0 = warns.filter((w) => w.result === "gone").length;
+  await h1.pump();
+  assert.equal(warns.filter((w) => w.result === "gone").length, w0 + 1, "首次 gone 写了新行 → warn");
+  const h2 = mk(); // 新 boot
+  const d0 = debugs.length;
+  await h2.pump();
+  assert.equal(warns.filter((w) => w.result === "gone").length, w0 + 1, "boot 后第二次 gone 不再 warn");
+  assert.ok(debugs.length > d0, "降成 debug");
+}
+console.log("room-gone ok");

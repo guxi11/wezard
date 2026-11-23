@@ -5672,13 +5672,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const POLL_MS = 500;
     const TIMEOUT_MS = 5 * 60_000; // generous: user may take a while to type
     const t0 = Date.now();
+    const sizeOf = (f: string): number => { try { return statSync(f).size; } catch { return 0; } };
+    const armedSize = sizeOf(a.jsonlPath); // 现在的 CLI resume 原地续写同一个 jsonl, 超时时靠它长没长区分「没 fork」和「真没动静」
     let stopped = false;
     let timer: NodeJS.Timeout | undefined;
 
     const tick = (): void => {
       if (stopped) return;
       if (Date.now() - t0 > TIMEOUT_MS) {
-        log.warn({ target: a.target, sessionId: a.sessionId }, "mirror migration: timeout, giving up");
+        if (!exclusive && sizeOf(a.jsonlPath) > armedSize) log.info({ target: a.target, sessionId: a.sessionId }, "mirror migration: resume 原地续写, 未 fork");
+        else log.warn({ target: a.target, sessionId: a.sessionId }, "mirror migration: timeout, giving up");
         a.migrationWatcher = undefined;
         return;
       }

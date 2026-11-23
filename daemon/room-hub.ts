@@ -81,6 +81,7 @@ export const createRoomHub = (p: HubPorts) => {
   const uncertain = new Map<string, Set<string>>(); // uid → 上次不确定投递过的 room
   const reminded = new Set<string>();              // duty key: 已提醒过 (轮终贴提醒 / Stop hook 拦一次)
   const stopChecked = new Map<string, number>();   // uid → 它的 Stop hook 最近一次来问的时刻
+  const busyNoted = new Set<string>(); // 已打过「目标忙」info 的 uid, 投成功或不忙时清掉
   const failedAs = new Map<string, PasteResult>(); // uid → 上次投递失败的结果 (只在状态变化时打 warn, 30s 重踢不刷屏)
   let running: Promise<void> | undefined;
   let again = false;
@@ -279,9 +280,16 @@ export const createRoomHub = (p: HubPorts) => {
     // 只有活着的 pane 才需要等它闲 (或按 interrupt 先 Esc)。
     const live = p.live ? await p.live(w.target) : true;
     if (live && !(await p.idle(w.target))) {
-      if (!wantsInterrupt) return;
+      if (!wantsInterrupt) {
+        if (!busyNoted.has(uid)) {
+          busyNoted.add(uid);
+          p.log?.info({ uid, target: w.target, msgs: [...rooms.values()].flat().map((r) => r.id) }, "room: 目标忙, 等它这一轮结束");
+        }
+        return;
+      }
       await p.interrupt(w.target); // 先 Esc 打断再投, 不拆 pane (§3b I-1); 被打断那一轮的 duty 不关
     }
+    busyNoted.delete(uid);
     const { text, seen, msgs } = render(uid, rooms);
     const res = await p.paste(w.target, text, p.tailOf?.(w.target, [...rooms.values()].flat()));
     if (res === "ok") {
@@ -299,18 +307,21 @@ export const createRoomHub = (p: HubPorts) => {
       uncertain.set(uid, new Set(seen.map((x) => x.room)));
     }
     if (res === "ok") failedAs.delete(uid);
-    else if (res !== "uncertain" && failedAs.get(uid) !== res) {
+    // gone: 只有这次真写了新的 undelivered 行才算新事实 warn; 账本里早有 → debug (failedAs 只在内存, 每次 boot 都会重打)
+    const wrote = res === "gone" ? reportGone(uid, rooms) : 0;
+    if (res !== "ok" && res !== "uncertain" && failedAs.get(uid) !== res) {
       failedAs.set(uid, res);
-      p.log?.warn({ uid, target: w.target, result: res, msgs }, "room: 唤醒投递失败, 游标不动, 30s 后重试");
+      const lvl = res === "gone" && wrote === 0 ? "debug" : "warn";
+      p.log?.[lvl]?.({ uid, target: w.target, result: res, msgs }, "room: 唤醒投递失败, 游标不动, 30s 后重试");
     }
-    if (res === "gone") reportGone(uid, rooms);
   };
 
   /** 目标没有会话 (被 stop_wizard 结束): 它名下被这批行唤醒的 duty 各给提问者写一条系统行 ——
    *  不然 chat_ask 只落在账本里, 提问方以为对方在做, 泵每 30s 静默重试到天荒地老。
    *  游标不推: 之后同名 spawn_wizard 重生的它照样读得到这些行。账本里有即不重复 (同 escalate)。 */
-  const reportGone = (uid: string, rooms: Map<string, MsgRow[]>): void => {
+  const reportGone = (uid: string, rooms: Map<string, MsgRow[]>): number => {
     const who: Who = { kind: "wizard", id: uid };
+    let wrote = 0;
     for (const [room, rows] of rooms) {
       const s = state(room);
       if (!s) continue;
@@ -322,8 +333,10 @@ export const createRoomHub = (p: HubPorts) => {
           ...(d.asker.kind !== "daemon" ? { to: [d.asker] } : {}),
           text: "[wezard] " + p.nameOf(who) + " 没有会话 (已被结束), " + d.msg + " 投不进去 (" + uid + "): 用 spawn_wizard 同名重生它, 或改派别人",
         });
+        wrote++;
       }
     }
+    return wrote;
   };
 
   /** 串行泵: 跑着时再踢只记一笔「再来一轮」, 返回的是正在跑的那一轮 (调用方 await 到它跑完)。 */
