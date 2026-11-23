@@ -54,7 +54,7 @@ export const roomsDirOf = (stateDir: string): string => join(expandHome(stateDir
 
 // ── room id ────────────────────────────────────────────────────────────
 
-export type RoomKind = "wecom-group" | "wecom-dm" | "topic-post" | "wx" | "dm" | "adhoc";
+export type RoomKind = "wecom-group" | "wecom-dm" | "topic-post" | "channel" | "wx" | "dm" | "adhoc";
 
 /** 两个 wizard 的 dm room: uid 排序后 \`|\` 拼接, 同一对唯一。名字 / target 绝不进 id。 */
 export const dmRoomId = (a: string, b: string): string => {

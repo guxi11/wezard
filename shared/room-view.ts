@@ -28,6 +28,8 @@ export interface RoomMemberFact {
   ord: number;
   /** 此刻是 host (wizard 成员里加入序最小的那位); 人永不 true。 */
   host: boolean;
+  /** monitor 成员 (不发言 / 不当 host / 不持有 duty; 图上画成单独样式)。 */
+  role?: "monitor";
 }
 
 export interface RoomLastFact { seq: number; at: number; author: Who; authorName: string; preview: string }
@@ -48,7 +50,16 @@ export interface RoomFact {
   last?: RoomLastFact;
   /** 未决 duty 数 (读时 fold, 不落盘)。 */
   openDuties: number;
+  /** 帖子 room 的归属: 所属频道 (读时由 channel-posts 映射算, 不落账本)。 */
+  channel?: { id: string; name: string };
+  /** 帖子 room 的根帖 id (send_reply 用)。 */
+  rootPost?: string;
 }
+
+/** channel-posts 映射的读侧形状 (由调用方注入; shared 不 import daemon)。
+ *  channel room → { channel: 裸 topic_id }; 帖子 room → { channel, post: 根帖 id }。 */
+export type ChannelRef = { channel: string; post: string };
+export type ChannelOf = (room: string) => ChannelRef | undefined;
 
 const KIND_BY_PREFIX = (id: string): RoomKind =>
   id.startsWith("dm:") ? "dm"
@@ -61,22 +72,26 @@ export const roomKindOf = (s: RoomState): RoomKind => s.kind ?? KIND_BY_PREFIX(s
 
 const stripMd = (t: string): string => t.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
 
-export const buildRoomFact = (s: RoomState, n: RenderNames): RoomFact => {
+export const buildRoomFact = (s: RoomState, n: RenderNames, channelOf?: ChannelOf): RoomFact => {
   const host = roomHost(s);
+  // 频道 / 帖子的 kind 读时算 (channel-posts 是唯一判据), 不落账本。
+  const chRef = channelOf?.(s.id);
+  const kind: RoomKind = chRef ? (chRef.post ? "topic-post" : "channel") : roomKindOf(s);
   const lastRow = s.msgs[s.msgs.length - 1];
   const preview = lastRow && stripMd(lastRow.files?.length && !rowText(lastRow).trim()
     ? "📎 " + lastRow.files.map((f) => f.name).join(", ")
     : rowText(lastRow)).slice(0, 80);
   return {
     id: s.id,
-    kind: roomKindOf(s),
+    kind,
     title: s.title ?? "",
+    ...(chRef?.post ? { rootPost: chRef.post, channel: { id: chRef.channel, name: n.roomLabel("chat:" + chRef.channel) } } : {}),
     notice: s.notice ?? "",
     bound: isBoundRoom(s.id),
     ...(host ? { host } : {}),
     members: (() => {
       const list = [...s.members.values()].sort((a, b) => a.ord - b.ord)
-        .map((m) => ({ who: m.who, name: n.nameOf(m.who), via: m.via, since: m.since, ord: m.ord, host: !!host && sameWho(host, m.who) }));
+        .map((m) => ({ who: m.who, name: n.nameOf(m.who), via: m.via, since: m.since, ord: m.ord, host: !!host && sameWho(host, m.who), ...(m.role === "monitor" ? { role: "monitor" as const } : {}) }));
       // 人从来不走 join (没有 join 行): 只在消息里出现。补成参与者, 否则图上没有 user 节点。
       const seen = new Set(list.map((m) => m.who.kind + ":" + m.who.id));
       let ord = list.reduce((mx, m) => Math.max(mx, m.ord), 0);
@@ -99,8 +114,8 @@ export const buildRoomFact = (s: RoomState, n: RenderNames): RoomFact => {
 };
 
 /** 全部 room 的快照, 最近有动静的在前。 */
-export const buildRoomFacts = (states: readonly RoomState[], n: RenderNames): RoomFact[] =>
-  states.map((s) => buildRoomFact(s, n)).sort((a, b) => (b.last?.at ?? 0) - (a.last?.at ?? 0) || (a.id < b.id ? -1 : 1));
+export const buildRoomFacts = (states: readonly RoomState[], n: RenderNames, channelOf?: ChannelOf): RoomFact[] =>
+  states.map((s) => buildRoomFact(s, n, channelOf)).sort((a, b) => (b.last?.at ?? 0) - (a.last?.at ?? 0) || (a.id < b.id ? -1 : 1));
 
 // ── 历史 ───────────────────────────────────────────────────────────────
 

@@ -31,12 +31,12 @@ import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } 
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicPost, sendTopicReply, type ChannelHuman } from "./channel.js";
-import { postRefOf } from "./channel-posts.js";
+import { channelRefOf, postRefOf } from "./channel-posts.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, setRoomReader, setWorldFactsProvider, recordCharter, backfillCharter, lastChannelOf } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, setRoomReader, setWorldFactsProvider, recordCharter, backfillCharter, lastChannelOf, setChannelRef } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -214,6 +214,8 @@ const main = async (): Promise<void> => {
   // Restore auto-approve windows persisted across daemon restarts —
   // otherwise a `wezard reload` silently drops the user's "10min" choice.
   initAutoWindowPersistence(cfg.daemon.stateDir);
+  // rolepage 的频道 / 帖子 kind 与归属读时算 (channel-posts), 不落账本。
+  setChannelRef((room) => channelRefOf(cfg, room));
   // Replay tool/approval detail records so reload doesn't lose click-to-detail
   // links from messages already on the user's WeCom timeline.
   initDetailPersistence(cfg.daemon.stateDir, log.child({ mod: "detail" }));
@@ -2457,6 +2459,7 @@ const main = async (): Promise<void> => {
         // 坏账本跳过并留日志 —— 一个坏文件不该让整张图消失。
         rooms: roomFacts(roomStore, wizards.all(), {
           chatName: (base) => chatNameOf(cfg, base),
+          channelOf: (room) => channelRefOf(cfg, room),
           onBroken: (room, err) => log.warn({ mod: "room", room, err: errText(err) }, "room-facts: 坏账本跳过"),
         }),
         names: nameTable(wizards.all()),

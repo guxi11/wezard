@@ -70,6 +70,18 @@ export const learnChannelPost = (cfg: Config, base: string, topicId: string, pos
   return true;
 };
 
+/** 读模型用: room id 是频道还是帖子 (帖子带根帖 id); 都不是 = undefined。
+ *  频道 = 映射值里出现过的 topic, 或在频道管家表里绑过的 (chat:<topic_id>)。 */
+export const channelRefOf = (cfg: Config, room: string): ChannelPostRef | undefined => {
+  const post = postRefOf(cfg, room);
+  if (post) return post.post ? post : { ...post, post: "" };
+  if (!room.startsWith("chat:")) return undefined;
+  const bare = room.slice("chat:".length);
+  const known = bare in (cfg.wrc.channel.steward ?? {})
+    || Object.values(storeOf(cfg).all()).some((v) => refOf(v)?.channel === bare);
+  return known ? { channel: bare, post: "" } : undefined;
+};
+
 /** 最多等 waitMs 让配对落地 (原生帧可能先于 topic_at_bot 事件到)。 */
 export const awaitChannelOfPost = async (cfg: Config, base: string, waitMs: number): Promise<string> => {
   for (let left = waitMs; ; left -= 100) {

@@ -26,7 +26,7 @@ import { baseOfKey, sameBot } from "./session-label.js";
 import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, type ChannelOf, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
 import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
@@ -278,15 +278,20 @@ const ledgerIndex = (states: readonly RoomState[]): Ledger => {
   };
 };
 
-export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader): ChatRoutes => {
+export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader, channelResolver?: ChannelOf): ChatRoutes => {
   // room 账本在手边 (daemon / 同机 svr) 就以账本为准重建 rooms —— 推送快照只补认表,
   // 不然 daemon 没重启时这里会一直是旧的一份 (比如人节点缺失)。
   const liveRooms = (): RoomReader | undefined => (rooms && (!rooms.ready || rooms.ready()) ? rooms : undefined);
+  // 没有 channel-posts 的进程 (独立 svr) 用快照里已有的指针 —— 端口/帖子的归属不会因重建而丢。
+  const chFrom = (f: WorldFacts): ChannelOf => channelResolver ?? ((room) => {
+    const r = (f.rooms ?? []).find((x) => x.id === room);
+    return r?.channel ? { channel: r.channel.id, post: r.rootPost ?? "" } : undefined;
+  });
   const roomsNow = (f: WorldFacts): WorldFacts => {
     const rs = liveRooms();
     if (!rs) return f;
     const states = rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } });
-    return states.length ? { ...f, rooms: buildRoomFacts(states, namesOf(f)) } : f;
+    return states.length ? { ...f, rooms: buildRoomFacts(states, namesOf(f), chFrom(f)) } : f;
   };
   const getFacts = (t: Ticket): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
@@ -348,7 +353,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const from = fromRef ? whoRef([s], fromRef, n) : undefined;
       const hist = roomHistory(s, { ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}), limit, ...(from ? { from } : {}) }, n);
       const link = turnLinker(listRecent(ticket), f);
-      const fact = buildRoomFact(s, n);
+      const fact = buildRoomFact(s, n, chFrom(f));
       const said = lastSaidAt(s);
       json(res, 200, {
         ok: true, at: now,

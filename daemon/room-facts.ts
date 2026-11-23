@@ -4,7 +4,7 @@
 // 关系图消失。名字在 daemon 侧现查 (wizards.json 的 uid → 名字), 独立 svr 用的是随快照带
 // 过来的那一份 (见 shared/world.ts 的 names / rooms)。
 import { uidOf, type RenderNames, type Who } from "../shared/room.js";
-import { buildRoomFacts, type RoomFact } from "../shared/room-view.js";
+import { buildRoomFacts, type ChannelOf, type RoomFact } from "../shared/room-view.js";
 import type { RoomStore } from "./rooms.js";
 
 export interface WizardLike { target: string; name: string; uid?: string; bornAt?: number }
@@ -16,6 +16,8 @@ export interface RoomFactsOpts {
   humanName?: (id: string) => string;
   /** 坏账本的行 —— 调用方接日志。 */
   onBroken?: (room: string, err: unknown) => void;
+  /** 频道 / 帖子的读时解析 (channel-posts); 不给 = 一律按普通群判。 */
+  channelOf?: ChannelOf;
 }
 
 /** WorldFacts.names: who.id → 名字 (wizard 是 uid, 人是 userid)。 */
@@ -46,5 +48,5 @@ export const roomFacts = (store: RoomStore, wizards: readonly WizardLike[], opts
       return [];
     }
   });
-  return buildRoomFacts(states, n);
+  return buildRoomFacts(states, n, opts.channelOf);
 };

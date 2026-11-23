@@ -29,6 +29,7 @@ import {
 } from "../shared/detail-store.js";
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS, type RoomReader, type WorldFactsProvider } from "../shared/chat-http.js";
+import type { ChannelOf } from "../shared/room-view.js";
 import { EMPTY_FACTS } from "../shared/world.js";
 
 export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnInject, TurnUsage, CtxCut, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
@@ -391,10 +392,14 @@ export const roleUniq = (target: string): string => wizardStore()?.get(target)?.
 
 // Chat 视图路由 (页面 + JSON API + SSE)。store 未初始化时全部 503 —— 只可能发生在
 // initDetailPersistence 之前, 正常启动路径不会命中。
+/** channel-posts 的读侧解析器 (index 注入; 没有 = 频道 / 帖子按普通群画)。 */
+let channelRefOfRoom: ChannelOf | undefined;
+export const setChannelRef = (f?: ChannelOf): void => { channelRefOfRoom = f; };
+
 export const chatHandlers = (): Record<string, Handler> => {
   // provider 以闭包间接引用 —— chatHandlers 在 boot 早期就被调用, 那时 mirror 块
   // 还没装上 provider; 直接把 worldFacts 传进去会把 undefined 钉死。
-  const routes = store ? chatRouteTable(createChatRoutes(store, () => (worldFacts ? worldFacts() : EMPTY_FACTS), undefined, liveRoomReader)) : {};
+  const routes = store ? chatRouteTable(createChatRoutes(store, () => (worldFacts ? worldFacts() : EMPTY_FACTS), undefined, liveRoomReader, channelRefOfRoom)) : {};
   const unavailable: Handler = (_req, res) => {
     res.statusCode = 503;
     res.end("detail store not ready");

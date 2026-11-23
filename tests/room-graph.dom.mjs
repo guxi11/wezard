@@ -946,6 +946,38 @@ try {
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
   }
 
+  // ── 频道 / 帖子 / monitor (§2.5): 都是普通节点 (没有容器), 帖子弱连线指向频道, monitor 虚线、不戴礼帽 ──
+  {
+    const CH = "chat:CiCMchan", P = "chat:opkPost1", MU = "w" + "9".padStart(12, "0");
+    globalThis.__extraRooms = [
+      roomFact(CH, "channel", [{ who: who("wizard", MU), name: "mon", via: "invite", since: 1, ord: 1, host: false, role: "monitor" }], undefined),
+      { ...roomFact(P, "topic-post", [{ who: who("wizard", A), name: "alice", via: "founder", since: 1, ord: 1, host: true }], who("wizard", A)), channel: { id: "CiCMchan", name: "研发频道" }, rootPost: "p1" },
+    ];
+    globalThis.__extraNodes = [{ target: "chat:CiCMchan#monitor", kind: "wizard", uid: MU, name: "mon", label: "mon", base: CH, tag: "monitor", chat: "", busy: false, alive: true, lastTs: T0 + 5000, rels: [] }];
+    const pg = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+    await pg.addInitScript(() => { localStorage.setItem("wezard.role.side", "graph"); });
+    await pg.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+    await pg.waitForSelector(".rv-room", { timeout: 5000 });
+    await pg.waitForTimeout(400);
+    const ch = await pg.evaluate(() => ({
+      tips: [...document.querySelectorAll(".rv-room > title")].map((t) => t.textContent),
+      chanEdges: document.querySelectorAll(".rv-edge.chan").length,
+      monNodes: document.querySelectorAll(".rv-person.mon").length,
+      monEdges: document.querySelectorAll(".rv-edge.mon").length,
+      monHat: document.querySelectorAll(".rv-person.mon .rv-hosthat").length,
+      containers: document.querySelectorAll(".rv-room .rv-room").length,
+    }));
+    assert.ok(ch.tips.some((t) => t.includes("频道")), "频道 room 是普通节点, 类型在 tooltip: " + JSON.stringify(ch.tips));
+    assert.ok(ch.tips.some((t) => t.includes("帖子") && t.includes("频道 研发频道")), "帖子 tooltip 带所属频道");
+    assert.equal(ch.chanEdges, 1, "帖子 → 频道一条弱连线 (不画容器)");
+    assert.equal(ch.monNodes, 1, "monitor 画成单独样式的节点");
+    assert.equal(ch.monEdges, 1, "monitor 与所在 room 之间是虚线");
+    assert.equal(ch.monHat, 0, "monitor 不戴 host 礼帽");
+    assert.equal(ch.containers, 0, "room 节点不嵌套 (没有容器)");
+    await pg.close();
+    globalThis.__extraRooms = []; globalThis.__extraNodes = [];
+  }
+
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {
