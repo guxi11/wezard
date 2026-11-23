@@ -81,7 +81,7 @@ export const renderChatPage = (): string =>
       <div class="ch-who" id="ch-who"></div>
       <div class="ch-acts" id="ch-acts"></div>
     </header>
-    <div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div>
+    <div class="thread-box"><div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div><button type="button" class="to-bottom" id="to-bottom" hidden>scroll to bottom</button></div>
     <div class="pane" id="pane-world" hidden>
       <div class="wtools" id="wtools"></div>
       <div class="wscroll" id="wscroll"><div class="wmap" id="wmap"></div></div>

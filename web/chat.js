@@ -2423,6 +2423,20 @@
   // 用户正在滚 (最近 1.2s 内有 scroll) 就让这一轮刷新过去: 下一轮 4s 后再来, 不在手指 / 滚轮底下换 DOM。
   var scrollAt = 0;
   thread.addEventListener('scroll', function () { scrollAt = Date.now(); }, { passive: true });
+  // 「scroll to bottom」: 离底超过 80px 才显示。只读 scroll 位置、不改它, 所以不碰分页补历史 / 贴底跟随的逻辑;
+  // 内容变高 (新消息、展开过程框) 不触发 scroll 事件, 靠 ResizeObserver 补一次。rAF 合并, 一帧只算一次。
+  var toBottom = $('#to-bottom'), tbRaf = 0;
+  var syncToBottom = function () {
+    tbRaf = 0;
+    if (toBottom) toBottom.hidden = thread.scrollHeight - thread.scrollTop - thread.clientHeight <= 80;
+  };
+  var askSyncToBottom = function () { if (!tbRaf) tbRaf = requestAnimationFrame(syncToBottom); };
+  if (toBottom) {
+    thread.addEventListener('scroll', askSyncToBottom, { passive: true });
+    window.addEventListener('resize', askSyncToBottom);
+    if (window.ResizeObserver) { var tbRo = new ResizeObserver(askSyncToBottom); tbRo.observe(inner); tbRo.observe(thread); }
+    toBottom.addEventListener('click', function () { thread.scrollTo({ top: thread.scrollHeight, behavior: 'smooth' }); });
+  }
   var tick = function () {
     if (document.hidden || Date.now() - scrollAt < 1200) return;
     if (D.mode === 'room') loadRoom(D.roomId, Math.max(60, D.msgs.length), false, true);

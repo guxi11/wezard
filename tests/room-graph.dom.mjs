@@ -660,6 +660,13 @@ try {
   await page.click('.rv-room[data-room="' + G + '"]');
   await page.waitForFunction(() => document.querySelectorAll("#thread-in .rv-msg").length >= 100, null, { timeout: 8000 });
   const mid = await page.evaluate(() => { const t = document.querySelector("#thread"); t.scrollTop = Math.round((t.scrollHeight - t.clientHeight) / 2); return t.scrollTop; });
+  // 「scroll to bottom」: 滚到中间 (离底 > 80px) 就浮出来, 点它平滑滚到底后收起; 它在 .thread 外一层, 不进滚动内容。
+  await page.waitForFunction(() => !document.querySelector("#to-bottom").hidden, null, { timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.querySelector("#to-bottom").parentElement.id), "" , "按钮不在 #thread 内");
+  assert.equal(await page.evaluate(() => !!document.querySelector("#thread #to-bottom")), false);
+  await page.click("#to-bottom");
+  await page.waitForFunction(() => { const t = document.querySelector("#thread"); return t.scrollHeight - t.scrollTop - t.clientHeight <= 80 && document.querySelector("#to-bottom").hidden; }, null, { timeout: 5000 });
+  await page.evaluate(() => { const t = document.querySelector("#thread"); t.scrollTop = Math.round((t.scrollHeight - t.clientHeight) / 2); });
   await page.waitForTimeout(10500);
   const mid2 = await page.evaluate(() => ({ top: document.querySelector("#thread").scrollTop, n: window.__ticks }));
   assert.ok(Math.abs(mid2.top - mid) <= 2, "定时刷新后滚动位置不变: " + mid + " → " + mid2.top);
