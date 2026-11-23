@@ -57,11 +57,11 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   };
-  var api = function (path, params) {
+  var api = function (path, params, signal) {
     var p = new URLSearchParams();
     if (TOKEN) p.set('id', TOKEN);
     Object.keys(params || {}).forEach(function (k) { if (params[k] !== undefined && params[k] !== null && params[k] !== '') p.set(k, params[k]); });
-    return fetch(path + '?' + p.toString(), { cache: 'no-store' }).then(function (r) { return r.json(); });
+    return fetch(path + '?' + p.toString(), { cache: 'no-store', signal: signal }).then(function (r) { return r.json(); });
   };
   var syncUrl = function () {
     // role (视角) 只要已知就写; room (选中态) 永远写, 没选中写空串: 缺省 = 用票据落点, 空 = 明确不选 (刷新后不会被落点重新选中)。
@@ -1903,6 +1903,7 @@
     if (!w || D.cardRole !== D.role) {
       if (!D.role) { el.innerHTML = ''; return; }
       var ph = nodeOf(D.role);
+      document.title = (ph.label ? ph.label + ' ' : '') + (ph.name || D.role) + ' 的视角';
       el.innerHTML = '<div class="id"><span class="av">' + esc(ph.label || '🧙‍♂️') + '</span><span class="l"><span class="nl"><span class="nm">' + esc(ph.name || D.role) + '</span></span></span></div>';
       return;
     }
@@ -1968,6 +1969,7 @@
     restoreOpen();
     renderSide();
   };
+  var LOADING_HTML = '<div class="rv-none rv-loading">加载中…</div>';
   var renderWizard = function (skipBody) {
     var w = D.wizard || { name: D.role, label: '🧙‍♂️' };
     var plan = S.pane === 'plan';
@@ -1985,7 +1987,7 @@
     var older = D.stream && D.streamMore ? '<button class="rv-older" id="rv-older">‹ 更早</button>' : '';
     var note = D.ledger ? '' : '<div class="rv-note">这个部署没有 room 账本 — 只能看名片, 看不到消息 (要历史请打开 daemon 的 rolepage)。</div>';
     var ot = openTools();
-    inner.innerHTML = note + older + (D.stream ? streamHTML(D.streamOld.concat(D.stream)) : listHTML(D.msgs, true)) + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
+    inner.innerHTML = note + older + (D.wizLoading ? LOADING_HTML : D.stream ? streamHTML(D.streamOld.concat(D.stream)) : listHTML(D.msgs, true)) + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
     var ob = $('#rv-older'); if (ob) ob.onclick = function () { olderPage(); };
     fillMd(inner);
     applyFold(inner);
@@ -2048,6 +2050,8 @@
       var fresh = D.cardRole !== ((r.role && r.role.id) || role);
       if (r.role && r.role.id && r.role.id !== D.role) { D.role = r.role.id; syncUrl(); }
       applyCard(r);
+      // 看某个 role 的全部记录时: 名片 (/api/wizard?card=1, ~20ms) 比时间轴先到, 先把页头 / 名片 / 用量画出来, 正文等它自己的回包。
+      if (D.mode === 'wizard' && !D.roomId) { renderWizard(true); return true; }
       if (D.roomId && D.mode === 'room') {
         // 名片到手: 「我」(D.uid) 与顶栏的视角名才算得准, 第一次到要把 room 重画一遍 (滚动位置不动); 之后 6s 一刷只换名片与用量, 不碰消息。
         rolebar(); renderUsage();
@@ -2056,12 +2060,16 @@
       return true;
     }).catch(function () { return false; });
   };
-  var loadWizard = function (role, keepScroll) {
+  var loadWizard = function (role, keepScroll, poll) {
     // 换一个人 = 换一段对话: 日程栏 / 宪章只属于刚才那个人, 收回对话面。
     if (role && role !== D.role) { S.charter = null; resetPane(); }
     D.mode = 'wizard'; D.role = role || D.role; D.roomId = ''; syncUrl();
-    return api('api/wizard', { role: role, session: D.session === 'all' ? '' : D.session, limit: 60, msgs: '0' }).then(function (r) {
-      if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; return false; }
+    // 后发先至: 新的一发 (人点的 / 轮询) 取消还在路上的旧请求, 旧视角晚回来的响应既不会渲染也不白占带宽。
+    if (S.wizAbort) S.wizAbort.abort();
+    var ac = window.AbortController ? new AbortController() : null;
+    S.wizAbort = ac; S.wizBusy = true;
+    return api('api/wizard', { role: role, session: D.session === 'all' ? '' : D.session, limit: 60, msgs: '0' }, ac && ac.signal).then(function (r) {
+      if (!r.ok) { D.wizLoading = false; inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; return false; }
       // 回包回来时已经换成选中 room / 换了别人: 这一份作废 (定时刷新的那一发常这样迟到)。
       if (D.mode !== 'wizard' || (role && D.role !== role && !(r.role && D.role === r.role.id))) return false;
       var rid = (r.role && r.role.id) || D.role;
@@ -2077,6 +2085,7 @@
         var cut = tail[0].ts;
         D.streamOld = D.streamOld.concat(D.stream.filter(function (x) { return x.ts < cut; }));
       } else if (!keepOld) { D.streamOld = []; D.streamMore = !!r.streamEarlier; }
+      D.wizLoading = false;
       D.stream = tail; D.streamSig = streamSig(tail); D.streamSess = r.session || 'all';
       D.session = r.session || 'all'; applyCard(r);
       D.members = []; D.duties = []; D.createdAt = 0;
@@ -2084,7 +2093,20 @@
       renderWizard(same);
       if (!same) { if (keepScroll) restore(st); else scrollBottom(); }
       return true;
-    });
+    }).catch(function (e) {
+      // 被新的一发取消 = 正常; 其余失败: 人点开的那次给个落点, 轮询失败不打扰 (下一拍再来)。
+      if (!ac || ac.signal.aborted || poll || !D.wizLoading) return false;
+      D.wizLoading = false; inner.innerHTML = '<div class="rv-none">加载失败, 稍后会自动重试</div>';
+      return false;
+    }).then(function (v) { if (S.wizAbort === ac) S.wizBusy = false; return v; });
+  };
+  // 点击的同一帧就把视角切过去: 页头 / 名片 / 用量 / 图高亮按名册里已有的数据画, 正文先放「加载中」, 不让上一个人的内容留着冒充新的;
+  // 重数据 (时间轴 /api/wizard、名片 card=1、名册 /api/world) 由调用方同时发出, 谁先回谁先画。
+  var showSwitching = function () {
+    D.mode0 = ''; D.role0 = ''; D.stream = null; D.streamOld = []; D.streamMore = false; D.streamSig = '';
+    D.msgs = []; D.earlier = ''; D.members = []; D.duties = []; D.wizLoading = true;
+    renderWizard();
+    thread.scrollTop = 0;
   };
   // 窄屏 (≤760px) 是「列表 / 图」与「chat detail」二选一的两页: CSS 默认只显示 .side, 加了 .app.reading 才换成 .main。
   // 这个 class 曾经没有任何代码会加 —— 窄屏点进聊天后 detail 一直被 display:none, 只看得到列表 / 图。
@@ -2126,8 +2148,9 @@
     if (e.k === 'list') { setReading(false); syncUrl(); return; }
     S.fromMain = false;
     // 视角与选中态一起恢复: role 先落定 (名片按它取), 再按 room 有无选画哪一页。
-    adoptRole(e.role);
+    var moved = adoptRole(e.role);
     var back = e.room ? loadRoom(e.room, 60) : loadWizard(e.role, true);
+    if (!e.room && (moved || D.mode0 !== 'wizard')) { loadCard(); showSwitching(); }
     Promise.resolve(back).then(function () { thread.scrollTop = e.top; });
   });
   // 换 role: 宪章 / 日程栏 / 旧名片都属于上一个人, 清掉; 世界视图的未读 / 计划按新 role 重算。
@@ -2136,6 +2159,7 @@
     S.charter = null; resetPane();
     D.role = role; D.plans = []; D.schedules = []; D.stats = null;
     loadWorld();
+    rolebar(); renderUsage();   // 名片 (rolebar) 还是旧人的 → 按名册先画新人的名字占位
     return true;
   };
   var isMemberOf = function (roomId, target) {
@@ -2149,7 +2173,7 @@
     S.roomGen = (S.roomGen || 0) + 1;   // 在路上的 room 刷新作废
     var p = loadWizard(D.role);
     if (gside) { gside.hidden = true; gside.innerHTML = ''; }
-    syncListSel(); if (S.view === 'graph' && S.gdom) renderGraph();
+    showSwitching();   // 里头 renderSide 已把列表 / 图的选中同步掉
     return p;
   };
   // 列表 / 图里点 room: 没选中 = 选中, 已选中 = 取消 (取消选中的唯一入口)。窄屏也一样: 点已选中的 = 取消并进入 detail 看 role 的全部记录。
@@ -2165,8 +2189,10 @@
     var room = D.roomId, keep = !!room && isMemberOf(room, target);
     adoptRole(target);
     if (keep) { var p = loadRoom(room, 60, true); if (S.view === 'graph' && S.gdom) renderGraph(); return p; }
+    // 重数据同时发 (互不依赖): 时间轴 / 名片 / 名册 (adoptRole 里已发), 然后立刻画骨架。
     var q = loadWizard(target, keepScroll);
-    syncListSel(); if (S.view === 'graph' && S.gdom) renderGraph();
+    loadCard();
+    showSwitching();
     return q;
   };
   // 图里点 room (节点 / 边): 当前视角 role 在这个 room 里 → 关联, 只加上 room 选中、role 保留; 不在 → 无关联, 清掉旧的 role 选中,
@@ -2402,7 +2428,7 @@
   };
   // 账属于 role: 选中 room 与否都显示它的账。
   var renderUsage = function () {
-    var w = D.wizard;
+    var w = D.cardRole === D.role ? D.wizard : null;   // 名片还是上一个人的 (刚换视角): 用量区先空着, 不画旧人
     putUsage($('#pg-usage'), w && w.kind === 'wizard' ? D.stats : null, { name: w ? w.name || w.id : '', label: w ? w.label : '' });
   };
   // 进行中那一轮的耗时: 服务端只给开始时刻, 这里每秒按它走表 (与服务端 fmtDuration 同一写法)。
@@ -2449,8 +2475,13 @@
     worldRetry = setTimeout(function () { worldRetry = 0; loadWorld(); }, 2000);
   };
   var loadWorld = function () {
-    if (worldReq) return worldReq;
-    worldReq = api('api/world', { role: D.role || ROLE || '' }).then(function (r) {
+    var wrole = D.role || ROLE || '';
+    // 在路上的那发是替旧视角取的 (未读数按 role 算): 换了人就重发, 旧的回包丢掉。
+    if (worldReq && S.worldRole === wrole) return worldReq;
+    S.worldRole = wrole;
+    var wgen = S.worldGen = (S.worldGen || 0) + 1;
+    worldReq = api('api/world', { role: wrole }).then(function (r) {
+      if (wgen !== S.worldGen) return r;
       worldReq = null;
       if (!r.ok) { convsEl.innerHTML = '<div class="rv-none">' + esc(r.error || '世界视图加载失败') + '</div>'; return; }
       // 名册缺席 (svr 刚重启, 还没收到 daemon 推来的快照): 这份回包里的名字全是 id。已有一份好的就原样留着, 不拿 id 覆盖;
@@ -2466,7 +2497,7 @@
       if (D.roomId && D.role && Date.now() - (S.cardAt || 0) > 30000) loadCard();
       if (S.pane === 'plan') { renderPlan(); return r; }
       return r;
-    }).catch(function () { worldReq = null; });
+    }).catch(function () { if (wgen === S.worldGen) worldReq = null; });
     return worldReq;
   };
 
@@ -2520,7 +2551,7 @@
   var tick = function () {
     if (document.hidden || Date.now() - scrollAt < 1200) return;
     if (D.mode === 'room') loadRoom(D.roomId, Math.max(60, D.msgs.length), false, true);
-    else if (D.mode === 'wizard') loadWizard(D.role, true);
+    else if (D.mode === 'wizard' && !S.wizBusy) loadWizard(D.role, true, true);
   };
   setInterval(tick, TICK_MS);
   var rzTimer = 0;
