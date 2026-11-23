@@ -18,7 +18,7 @@
 5. 更新本文并提交; 交差的分身 `stop_wizard`; 做成了就在群里报一句 (commit + 测试 + 遗留)。没值得做的事就回 QUIET。
 6. 仍须先问 admin 的只有: push / 发布、改 `~/.wezard/config.jsonc` / 权限 / secrets、删状态、改服务定义、群发 —— 直接在群里问。改语义的大改 (数据模型、落盘格式、删 MCP 工具、改 charter 文案) 先在 `docs/evolve/` 写方案, 再在群里讨论。charter 改动攒成一次发出 (每次都会让在跑的 wizard 用旧 charter)。
 
-## 测试基线 (2026-11-23: 124/126 —— 只剩 codex-hooks / codex-session, 本机无 codex; graph-layout 回归已由 wezard-1 修于 e22d40f (测试字高 16→11; 遗留: 估宽按拉丁 0.55·fs, CJK 名会低估); 2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
+## 测试基线 (2026-11-23: 124/126 —— 只剩 codex-hooks / codex-session, 本机无 codex; graph-layout 回归已由 wezard-1 修于 b22193c (测试字高 16→11; 遗留: 估宽按拉丁 0.55·fs, CJK 名会低估); 2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
 **117 / 119 通过** (2026-11-22 晚, PaulOwen 全量)。只剩 `codex-hooks` / `codex-session` 失败: 本机没装 `codex`, spawn ENOENT, 属环境问题。`codex-backend` 与 `wizard-stream` 已修: 两处都是断言跟不上有意的退役 (`043219c` 删 bin / claudeBin 覆盖; `762482b` 删「全部消息」all=1), 不是回归。每次改动后对照, 通过数不能减少。
 
@@ -47,14 +47,14 @@
 - [x] 开发者指南 [`docs/dev-guide.md`](../dev-guide.md) (RoseQuincy `afb1743` `06bd575`): 加 MCP 工具 / room 行类型 / reminder kind 各动哪几处 + vm 沙箱截取锚点表。顺带对齐 CLAUDE.md (reminder kind 现状、room 唤醒不挂信封而是 `【label】(roomId)` 头、`daemonPost` 每个 POST 都带 selfRef)、contract.md §2/§6、过时注释。
 - [x] `tests/charter.test.ts` 断言默认注册的 MCP 工具都在 charter 名册里 (`c226798`, WendyVance): 合写 `plan_create/get/list/update` 展开比对; 豁免表 `charterExempt` 名字失效也报错。
 - [x] ~~下次 charter 攒批: `wecom_doc_*` 要不要进 charter~~ admin 定直接删 (企微文档走官方 skill, admin 另外跟进 skill 安装): `d6b831b` (YaraXu)。
-- [x] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): 人另发新话作答时「你要交代」一并列出原 duty 并标注 (OliveMiller, `fdf3f96`, 见已完成表)。遗留: 只是提示, 仍要模型自己关; `defaultFor` 有意不认它 (否则 for 变多条而留空)。
-- [x] `for` 血缘缺省 + 逾期计入子件活动 (LeoJones, `1e9aef0`, 见已完成表)。遗留: 同轮被多条 duty 唤醒时 `for` 留空不猜 (仍可能误报, 要治得派活工具显式传); 老账本无 `for` 的子件不回溯。
+- [x] **反问后的原 duty 易被遗忘** (实例 7aeb85fc.376): 人另发新话作答时「你要交代」一并列出原 duty 并标注 (OliveMiller, `e4ad59c`, 见已完成表)。遗留: 只是提示, 仍要模型自己关; `defaultFor` 有意不认它 (否则 for 变多条而留空)。
+- [x] `for` 血缘缺省 + 逾期计入子件活动 (LeoJones, `96670fa`, 见已完成表)。遗留: 同轮被多条 duty 唤醒时 `for` 留空不猜 (仍可能误报, 要治得派活工具显式传); 老账本无 `for` 的子件不回溯。
 - [x] 小清理: `daemon/room-overdue.ts` 未用的 `holderOf` import 已删。
 - [ ] hub 竞态 (LeoJones 写测试时发现, 未动): 同一 tick 两条 ask 先后 append, 第一次 deliver 的触发行只含第一条, 但 render 的未读行含第二条、游标推过它 → 第二条文本可见, 却不进 `turns.msgs`、没有「你要交代」行 (defaultFor 也看不到它)。真实场景少见, 低优先。
 - [x] handoff 可靠性: `c6f3c31` 已实证 —— 2026-11-22 18:30 OliveOwen 自我交接 `简报已贴回 ok:true` (Enter 到确认 212ms); c6f3c31 上线后 4h 内 `handoff: 放弃` 0 次; `打断后仍未静下来` 最后一次在 11-21 16:26, 之后 0 次。
-- [x] resume 重生不再重复灌 charter (SamQuincy, `e7525ab`, 见已完成表)。遗留: reload 路径 `charterToRearm` 仍从文件头扫 (压缩后 reload 靠落盘 `charterOwed` 兜住, 实际不漏); `charterInContext` 重生时整读一次 transcript。
+- [x] resume 重生不再重复灌 charter (SamQuincy, `4793d05`, 见已完成表)。遗留: reload 路径 `charterToRearm` 仍从文件头扫 (压缩后 reload 靠落盘 `charterOwed` 兜住, 实际不漏); `charterInContext` 重生时整读一次 transcript。
 - [ ] 上下文成本: charter 体积。
-- [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `20764ff`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。 **线上复核 (06:20)**: 修后 2h BobZane 0 次 respawn; reap 照常工作 (修后已收 4 个, 当前 tmux 4 pane), 未被 `wake owed` 整体挡住。
+- [x] idle 回收 ↔ 唤醒重生死循环 (PaulNash, `57bf312`, 见已完成表)。遗留: hub `deliver` 对「pane 活着但不闲」静默 return 无日志 (这次因此难查, 可加状态变化 debug); `reapOverflow` 排序仍只看 transcript; 一条永远投不进的唤醒会让 pane 常驻不被回收 (比循环便宜, 投递失败仍打 warn)。 **线上复核 (06:20)**: 修后 2h BobZane 0 次 respawn; reap 照常工作 (修后已收 4 个, 当前 tmux 4 pane), 未被 `wake owed` 整体挡住。
 - [ ] daemon 内存 / 并发治理 (本机 3.7GB)。
 - [x] daemon 日志降噪 (DavidAdams, `01c5b95`): ① hub gone 警告只在 reportGone 真写了新 undelivered 行时 warn (原 22 次 boot × 7 个早结束的 wizard = 154 条); ② deliver「活着但忙」静默 return → 状态变化 info; ③ 死 pane resume 的 fork 迁移 watcher 当天 64 次 0 命中 (现行 CLI resume 原地续写) → 超时且原文件长大降 info。复核: typecheck + 8 个 hub/pane 测试过; reload 后 warn 0 条 (之前每次 boot 7 条)。遗留: `busyNoted` 只在走到 paste 时清, 忙→无待投→再忙 的第二段不再打 info (可接受)。
 
@@ -97,11 +97,11 @@
 | 2026-11-22 | 开发者指南 `docs/dev-guide.md` + CLAUDE.md / 契约 / 注释对齐现行代码 (RoseQuincy, standard)。handoff 修复 `c6f3c31` 线上实证 ok | `afb1743` `06bd575` |
 | 2026-11-22 | 测试: 默认 MCP 工具 ⊆ charter 名册, 带防腐烂豁免表 (WendyVance, light)。探出缺口 `wecom_doc_*` 两个, 留给下次 charter 攒批 | `c226798` |
 | 2026-11-22 | admin 7aeb85fc.378: 删企微文档 MCP 桥 (两工具 / `/wedoc/*` / `daemon/wedoc.ts`, -487 行, CHANGELOG BREAKING; YaraXu); 关系图「缓存冷」图例改名 + 冷节点淡灰细描边, 成员栏同源 (AliceYoung, 截图核对) | `d6b831b` `b38ab70` |
-| 2026-11-23 | `for` 血缘缺省由 daemon 填 (hub `defaultFor`: 本轮唤醒且仍持有的唯一 duty; `/room/ask`、delegate、spawn/clone 出生派活三处) + 逾期计入跨 room 子孙件活动 (`buildDescendantActivity`, 深度 ≤5, 子件 done 重新计时)。修 wezard-1 派 lead 做 .399 后被误催 (.413) / 给 admin 误报 (.414)。LeoJones (standard); 我核 diff、重跑 9 个相关测试 + typecheck | `1e9aef0` |
-| 2026-11-23 | plan 闲时提醒抑制: owner 作为 asker 派出、带该 planId 未关的 duty 也算欠账 (`planHasOpenDuty` 纯函数 + `tests/plan-debt.test.ts`)。起因 FrankDavis 等交代时每改一次 revision 被提醒一次 (5 次), wezard-1 报。MayaKing (light); 我核 diff、重跑 plan-debt / room-overdue / room-hub + typecheck | `8f8e8ae` |
-| 2026-11-23 | 反问后原 duty 易被遗忘: hub `render` 的「你要交代」追加「我持有、last=need、提问人就是本批触发行作者」的 duty, 带「你反问过, 对方的答复可能就在上面」标注; `inject-view` 的 owe id 抽取对标注兼容 (按 `;` / ` (` 切)。OliveMiller (light); 我核 diff、重跑 7 个相关测试 + typecheck | `fdf3f96` |
-| 2026-11-23 | idle 回收 ↔ 唤醒重生死循环: BobZane 自 00 点起每 5 分钟 reap → 重生 → 注入没落地 → 再 reap (每小时白起 12 次 claude)。两个缺陷叠加: ① `e89db20` 后 reap 只信 transcript 末条记录, resume 的 pane 不写记录 → 刚生即判闲; ② 上个进程被杀时遗留的悬空 tool_use 被 `idleVerdict` 当成「停在审批卡」, requireIdle 永不过。修: `lastActiveOf` 并入 pane 出生时刻 (ps etime); reap veto「wake owed」; `openToolUses(jsonl, sinceMs)` 只数本 CLI 进程启动后的调用。线上 12 分钟 reaped:0, 积压 4.8h 的唤醒投进去。PaulNash (standard); 我核 diff、全量测试 123/126 (codex 两个本机无 codex; graph-layout 是 `ea07e52` 的回归, 已二分并转 wezard-1 d6977146.23) | `20764ff` |
-| 2026-11-23 | 死 pane `--resume` 重生不再无条件重挂 charter: 新 `charterInContext` (最近一次 compact_boundary 之后有 user 行带宪章块 = 已在上下文), 两处 respawn 改走 `charterOwedOnResume` (欠账 / 无转录 / 被压缩掉才挂)。实证起因: OliveOwen 4 次 reap→重生各叠一份 ~8.6k 字。SamQuincy (light); 我核 diff、重跑 charter-rearm / charter / pane-delivery / maintenance-scheduler + typecheck | `e7525ab` |
+| 2026-11-23 | `for` 血缘缺省由 daemon 填 (hub `defaultFor`: 本轮唤醒且仍持有的唯一 duty; `/room/ask`、delegate、spawn/clone 出生派活三处) + 逾期计入跨 room 子孙件活动 (`buildDescendantActivity`, 深度 ≤5, 子件 done 重新计时)。修 wezard-1 派 lead 做 .399 后被误催 (.413) / 给 admin 误报 (.414)。LeoJones (standard); 我核 diff、重跑 9 个相关测试 + typecheck | `96670fa` |
+| 2026-11-23 | plan 闲时提醒抑制: owner 作为 asker 派出、带该 planId 未关的 duty 也算欠账 (`planHasOpenDuty` 纯函数 + `tests/plan-debt.test.ts`)。起因 FrankDavis 等交代时每改一次 revision 被提醒一次 (5 次), wezard-1 报。MayaKing (light); 我核 diff、重跑 plan-debt / room-overdue / room-hub + typecheck | `ea349c9` |
+| 2026-11-23 | 反问后原 duty 易被遗忘: hub `render` 的「你要交代」追加「我持有、last=need、提问人就是本批触发行作者」的 duty, 带「你反问过, 对方的答复可能就在上面」标注; `inject-view` 的 owe id 抽取对标注兼容 (按 `;` / ` (` 切)。OliveMiller (light); 我核 diff、重跑 7 个相关测试 + typecheck | `e4ad59c` |
+| 2026-11-23 | idle 回收 ↔ 唤醒重生死循环: BobZane 自 00 点起每 5 分钟 reap → 重生 → 注入没落地 → 再 reap (每小时白起 12 次 claude)。两个缺陷叠加: ① `4adb49f` 后 reap 只信 transcript 末条记录, resume 的 pane 不写记录 → 刚生即判闲; ② 上个进程被杀时遗留的悬空 tool_use 被 `idleVerdict` 当成「停在审批卡」, requireIdle 永不过。修: `lastActiveOf` 并入 pane 出生时刻 (ps etime); reap veto「wake owed」; `openToolUses(jsonl, sinceMs)` 只数本 CLI 进程启动后的调用。线上 12 分钟 reaped:0, 积压 4.8h 的唤醒投进去。PaulNash (standard); 我核 diff、全量测试 123/126 (codex 两个本机无 codex; graph-layout 是 `406cd4a` 的回归, 已二分并转 wezard-1 d6977146.23) | `57bf312` |
+| 2026-11-23 | 死 pane `--resume` 重生不再无条件重挂 charter: 新 `charterInContext` (最近一次 compact_boundary 之后有 user 行带宪章块 = 已在上下文), 两处 respawn 改走 `charterOwedOnResume` (欠账 / 无转录 / 被压缩掉才挂)。实证起因: OliveOwen 4 次 reap→重生各叠一份 ~8.6k 字。SamQuincy (light); 我核 diff、重跑 charter-rearm / charter / pane-delivery / maintenance-scheduler + typecheck | `4793d05` |
 | 2026-11-23 | daemon 日志降噪 (只改级别/去重): hub gone 警告只在真写了新 `undelivered` 行时 warn (当天 154 条 = 22 次 boot × 7 个早结束的 wizard); deliver「活着但忙」补状态变化 info; resume 迁移 watcher 超时而原 jsonl 长大 → info (当天 64 次 0 命中, 现行 CLI resume 原地续写)。DavidAdams (light); 我核 diff、重跑 8 个 hub/pane 测试 + typecheck, reload 后 warn 0 条 | `01c5b95` |
 
 ## 机制笔记: duty 一直不关时 daemon 做什么 (2026-11-22 读码, admin 问)
@@ -129,3 +129,4 @@
 - daemon.log 里 `spawn-tmux: pane creation failed` (duplicate session) 与 `launch failure with --model` (No conversation found) 的成串 warn 都早于 2026-11-21 `spawn-tmux.ts` 的修复, 之后未再出现。
 - `web/chat.js` 正由 `LeoLane` (关系图) / `IrisIrwin` (视角 / detail) 改, 别并行动它。
 - 多 wizard 共用 git index: 提交前 `git diff --cached`, 必要时临时 index。
+- push 前 wezard-1 会 `rebase origin/v3`, 本地 commit 的 hash 全部改写 (2026-11-23 那次改了 7 个)。本文的 hash 要在 push 之后按 commit 标题重新对一遍; `git merge-base --is-ancestor <h> HEAD` 不过的就是旧号。
