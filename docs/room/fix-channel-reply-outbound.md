@@ -50,8 +50,10 @@ daemon/index.ts roomMirror 的 isTopicChat 分支: 行是 reply 且 `re` 指到�
 
 ## 进度
 
-- [ ] ① roomMirror: re 带 post 的 reply → send_reply
-- [ ] ② charter + 工具描述频道语义
-- [ ] 文档口径 + CHANGELOG
-- [ ] 单测
-- [ ] tsc + build 绿 + reload
+- [x] ① roomMirror: reply 且 re 到带 post 的原话行 → send_reply 回原帖; 其余 send_post。判定抽成纯函数 daemon/channel.ts `channelOutboundOf`
+- [x] ② charter (renderCharter「room 是唯一的沟通对象」段) + chat_say / chat_reply 工具描述写明频道 / 帖子出站语义
+- [x] 文档口径 (channel-monitor.md §2.3) + CHANGELOG
+- [x] 单测 (strict-channel ⑤ `channelOutboundOf`; charter 断言频道段)
+- [x] tsc + build 绿 + 相关单测绿
+- [x] 现场核实: 频道 room 的人话行都带 post (topic_event 新帖 / 未配对评论 / @bot 兜底 三个 ingest 分支), 真机 4229c91d.19 带 post=CiDPT2cQ…, 所以对它的下一条 chat_reply 会走 send_reply
+- [ ] reload + 真机: 人在帖子下再评论, 交代评论回原帖; 主动 chat_say 仍是新帖
