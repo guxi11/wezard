@@ -440,10 +440,10 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Open an adhoc room",
       description:
-        "开一个 `adhoc:…` 临时 room 并把 `with` 里的人拉进来 (你按 ord=1 入座, 是这个 room 的 host)。多步的活默认开一个跟进 room 把事情关在里面 —— 只有需要人和执行者直接对话时, 才把人拉进主 room。room 没有绑定传输, 消息只在 rolepage 可见。",
+        "开一个 `adhoc:…` 临时 room 并把 `with` 里的人拉进来 (你按 ord=1 入座, 是这个 room 的 host)。多步的活默认开一个跟进 room 把事情关在里面 —— 只有需要人和执行者直接对话时, 才把人拉进主 room。room 没有绑定传输, 消息只在 rolepage 可见。**开 room 请起个名字** (`title`): 写这个 room 在干什么, rolepage 的关系图 / 列表上就显示它; 不给则只显示成员名 (`A·B·C`), 看不出是哪件事; 事后可用 room_name 补。",
       inputSchema: currentAddressSchema({
         with: z.array(z.string()).describe("拉进来的 wizard 名 (裸名)。"),
-        title: z.string().optional().describe("这个 room 干什么用, 一句话。"),
+        title: z.string().optional().describe("room 的名字: 这个 room 在干什么, 一句话 (如「账单迁移 review」)。强烈建议给; 不给 rolepage 上只显示成员名。"),
       }),
     },
     async ({ with: members, title }) =>

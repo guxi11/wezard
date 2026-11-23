@@ -146,7 +146,7 @@ const run = async (): Promise<void> => {
   const s4 = await get(routes.search, "id=t-ticket&q=" + encodeURIComponent("私聊"));
   assert.equal(s4.msgs.length, 1);
   assert.equal(s4.msgs[0].group, false, "wizard 之间的 dm = 会话");
-  assert.equal(s4.msgs[0].roomName, "alice、bob", "没起名的 dm 用成员名, 不是一排「私聊」");
+  assert.equal(s4.msgs[0].roomName, "alice ↔ bob", "没起名的 dm 用成员名, 不是一排「私聊」");
   const s5 = await get(routes.search, "id=t-ticket&q=" + encodeURIComponent("查 完"));
   assert.deepEqual(s5.msgs.map((m: { snippet: string }) => m.snippet), ["查完了"], "空格分词, 各词都要命中");
   const s0 = await get(routes.search, "id=t-ticket&q=");

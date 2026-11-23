@@ -128,6 +128,7 @@ import { renderReminder } from "../shared/reminder.js";
 import { busyOf, createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, wakeCostOf, decide, occupies, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
 import { parseWhen, planHasOpenDuty, renderRoomRead } from "../shared/room-view.js";
+import { memberLabel } from "../shared/room-label.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle } from "./wait-idle.js";
 import { applyOnboarding, bindSteward, guideHandoffOps, guideOf, guideRefusal, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
@@ -1178,9 +1179,9 @@ const main = async (): Promise<void> => {
         // dm 是 room 的特殊形式: 成员恰好是 id 里那两个 → 「A ↔ B」; 拉进第三人之后按当前全员列。
         const ms = s ? [...s.members.values()].map((m) => m.who) : [];
         const onlyPair = !ms.length || ms.every((w) => w.kind === "wizard" && pair.includes(w.id));
-        return onlyPair ? pair.map((u) => roomWizardOf(u)?.name ?? u).join(" ↔ ") : ms.map(roomNameOf).join(", ");
+        return onlyPair ? memberLabel(pair.map((u) => roomWizardOf(u)?.name ?? u)) : memberLabel(ms.map(roomNameOf));
       }
-      if (room.startsWith("adhoc:")) return [...(s?.members.values() ?? [])].slice(0, 3).map((x) => roomNameOf(x.who)).join(", ") || room;
+      if (room.startsWith("adhoc:")) return memberLabel([...(s?.members.values() ?? [])].map((x) => roomNameOf(x.who))) || room;
       return chatNameOf(cfg, room) || room;
     };
     /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。
@@ -1547,7 +1548,8 @@ const main = async (): Promise<void> => {
       const inv = whosOf(b.with ?? []);
       if (inv.error) { json(res, 400, { ok: false, reason: inv.error }); return; }
       const id = openAdhoc(me, inv.who!, (b.title ?? "").toString().trim());
-      json(res, 200, { ok: true, room: id, id, members: [me, ...inv.who!].map(roomNameOf) });
+      json(res, 200, { ok: true, room: id, id, members: [me, ...inv.who!].map(roomNameOf),
+        ...((b.title ?? "").toString().trim() ? {} : { hint: "这个 room 没有名字, rolepage 上只显示成员名; 用 room_name 补一个, 写它在干什么" }) });
     });
     /** 改群公告 (空串 = 清除): 落 notice 行 → 发一条 system 行 (绑定 room 会镜像进企微) → 在跑的 wizard 成员
      *  经 notices 带一行提示 (下一次注入随 system-reminder 到, 不唤醒)。权限由调用方判 (wizard 走 canNotice, 人走 /notice)。

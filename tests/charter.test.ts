@@ -25,6 +25,7 @@ for (const stale of ["开工前先问", "默认兜底目录", "keep:true"]) {
 for (const retired of ["tell_peer", "read_chat", "chat_members", "顶层模式", "严格模式", "RESULT:", "public:true"]) {
   assert.ok(!charter.includes(retired), `charter must not mention retired routing: ${retired}`);
 }
+assert.match(charter, /room_open\(\{with:\[…\], title\}\)/, "charter: 开 room 要给 title (写它在干什么)");
 for (const tool of ["wizard_roster", "delegate", "chat_ask", "chat_reply", "chat_say", "room_open", "room_read", "room_watch", "handoff"]) {
   assert.ok(charter.includes(tool), `charter must advertise ${tool}`);
 }

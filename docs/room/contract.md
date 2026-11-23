@@ -105,7 +105,7 @@ send_file({ room?, path, kind?, caption?, title?, description?, re?: string })  
 - 多个 to 有非成员 → 400, 让先 room_open。
 
 管理面:
-- `room_open({ with: string[], title? })`: 开 adhoc, 调用方 ord=1 即 host。
+- `room_open({ with: string[], title? })`: 开 adhoc, 调用方 ord=1 即 host。`title` 不强制但强烈建议 (写这个 room 在干什么); 没起名的 dm / adhoc 在 rolepage 上显示成员名 (`A ↔ B` / `A·B·C` / `A·B·C 等N人`, `shared/room-label.ts`), 不再有「私聊」兜底; 响应里带一句 `hint` 提醒用 `room_name` 补名。
 - `room_invite({ room, who })`: host / 人 / 拉自己直属子 wizard 立即入; 其余成员邀请转成 join-req。
 - `room_join({ room, reason })`: 写 join-req, 唤醒 host。
 - `room_approve({ re, accept })`: 仅 host / 人。

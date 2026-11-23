@@ -85,15 +85,8 @@ export const searchRooms = (
   const hit = matches(terms);
   const head = terms[0]!;
   const factBy = new Map(facts.map((f) => [f.id, f] as const));
-  // 没起名的 dm / adhoc 只有「私聊」「临时 room」这种代号, 一排认不出 —— 与前端列表同一写法, 用成员名。
-  const nameOf = (id: string): string => {
-    const f = factBy.get(id);
-    const names = (f?.members ?? []).map((m) => m.name).filter(Boolean);
-    if (!f || f.title || !names.length) return roomName(id);
-    if (f.kind === "dm") return names.slice(0, 2).join("、");
-    if (f.kind === "adhoc") return "临时 · " + names.slice(0, 3).join("、") + (names.length > 3 ? " 等" : "");
-    return roomName(id);
-  };
+  // roomName 已带上没起名 dm / adhoc 的成员名兜底 (shared/room-label.ts), 与列表 / 图同口径。
+  const nameOf = roomName;
 
   const rooms = facts
     .map((f): RoomHit => ({

@@ -23,6 +23,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
 import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
+import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
 import { buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
@@ -178,7 +179,7 @@ const wireSpan = (s: SessionSpan) => { const { runs: _runs, ...rest } = s; retur
 const namesOf = (f: WorldFacts): RenderNames => {
   const byUid = new Map(f.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.name] as const));
   const titleOf = new Map((f.rooms ?? []).map((r) => [r.id, r.title] as const));
-  const labelOf = new Map((f.rooms ?? []).map((r) => [r.id, r.members.map((m) => m.name).join(" ↔ ")] as const));
+  const labelOf = new Map((f.rooms ?? []).map((r) => [r.id, memberLabel(r.members.map((m) => m.name))] as const));
   return {
     nameOf: (w) => w.kind === "wizard" ? byUid.get(w.id) ?? f.names?.[w.id] ?? w.id
       : w.kind === "human" ? f.humanNames?.["human:" + w.id] ?? f.names?.[w.id] ?? w.id
@@ -188,17 +189,19 @@ const namesOf = (f: WorldFacts): RenderNames => {
   };
 };
 
-/** 提示行里的去处: 起过名 / 有聊天名就用名字, 否则一个短代号 (与前端 shortRoom 同口径) —— 不拿成员名拼。 */
+/** 提示行里的去处: 起过名 / 有聊天名就用名字; 没名字的 dm / adhoc 用成员名 (与前端 roomTitle 同口径), 其余一个短代号。 */
 const roomShortOf = (f: WorldFacts) => {
   const titleOf = new Map((f.rooms ?? []).map((r) => [r.id, r.title] as const));
   return (room: string): string => {
     const named = titleOf.get(room) || f.chatNames[room];
     if (named) return named;
-    // dm 拉进第三人后就是多人 room, 与 adhoc 同口径。
-    if (room.startsWith("dm:")) return ((f.rooms ?? []).find((r) => r.id === room)?.members.length ?? 2) > 2 ? "临时 room" : "私聊";
-    if (room.startsWith("adhoc:")) return "临时 room";
+    if (room.startsWith("dm:") || room.startsWith("adhoc:")) {
+      const label = memberLabel(((f.rooms ?? []).find((r) => r.id === room)?.members ?? []).map((m) => m.name));
+      if (label) return label;
+    }
     const tail = room.replace(/^[a-z-]+:/, "").slice(-6);
-    return (room.startsWith("user:") ? "单聊" : room.startsWith("chat:wx") ? "微信" : "群") + (tail ? " …" + tail : "");
+    const kind = room.startsWith("user:") ? "单聊" : room.startsWith("chat:wx") ? "微信" : room.startsWith("dm:") || room.startsWith("adhoc:") ? "room" : "群";
+    return kind + (tail ? " …" + tail : "");
   };
 };
 

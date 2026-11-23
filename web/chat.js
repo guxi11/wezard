@@ -180,13 +180,17 @@
     var name = uid ? (W.names[uid] || uid) : human ? (W.names[id.slice(6)] || id.slice(6)) : id;
     return { target: id, kind: human ? 'human' : 'wizard', name: safeName(name), label: human ? '👤' : '🧙‍♂️', rels: [] };
   };
-  // room 的名字 = 它的显示名 (host 起的 title > 聊天名 > 一个短代号)。
-  // 不再用「N 人」或全量成员名当名字 —— 成员是侧栏的事 (gside)。
+  // room 的名字 = 它的显示名 (host 起的 title > 聊天名 > 没起名的 dm / adhoc 用成员名 > 一个短代号)。
+  // 不再有「私聊」「临时 room」兜底: 认不出是哪件事。成员名拼法与 shared/room-label.ts 同口径。
+  var memberNames = function (r) {
+    var ns = (r && r.members || []).map(function (m) { return m.name; }).filter(Boolean);
+    if (ns.length <= 1) return ns[0] || '';
+    if (ns.length === 2) return ns.join(' ↔ ');
+    return ns.slice(0, 3).join('·') + (ns.length > 3 ? ' 等' + ns.length + '人' : '');
+  };
   var shortRoom = function (id) {
     var s = String(id || '');
-    if (/^dm:/.test(s)) return '私聊';
-    if (/^adhoc:/.test(s)) return '临时 room';
-    var kind = /^user:/.test(s) ? '单聊' : /^chat:wx/.test(s) ? '微信' : '群';
+    var kind = /^user:/.test(s) ? '单聊' : /^chat:wx/.test(s) ? '微信' : /^(?:dm|adhoc):/.test(s) ? 'room' : '群';
     var tail = s.replace(/^[a-z-]+:/, '').slice(-6);
     return tail ? kind + ' …' + tail : (s || 'room');
   };
@@ -194,12 +198,13 @@
     for (var i = 0; i < W.rooms.length; i++) if (W.rooms[i].id === id) return W.rooms[i];
     return null;
   };
-  /** 服务端给的 label (可能是成员名拼的) 只在它没有拿成员凑数时才认。 */
+  /** 没有 room 数据 (只剩消息上带的 label) 才认服务端 label; 有就按 title > 聊天名 > 成员名 > 短代号。
+   *  绑定的群没起名也没有聊天名时不拿成员拼 (成员是侧栏的事), 只给短代号。 */
   var roomNameOf = function (r, fallback) {
-    if (!r) return fallback && fallback.indexOf(' ↔ ') < 0 ? fallback : shortRoom(fallback);
+    if (!r) return fallback || shortRoom(fallback);
     if (r.title) return r.title;
     if (W.chatNames[r.id]) return W.chatNames[r.id];
-    return fallback && fallback.indexOf(' ↔ ') < 0 ? fallback : shortRoom(r.id);
+    return (/^(?:dm|adhoc):/.test(r.id) && memberNames(r)) || shortRoom(r.id);
   };
   var roomLabelOf = function (r) {
     return r ? roomNameOf(r, r.label) : '';
@@ -343,7 +348,7 @@
     rooms.forEach(function (r) {
       // 胶囊宽按 12pt (16px) 字估: 图标 + 名字 (最多 gNameMax 个字) 每字 ~9.3px, 两侧各留 8。
       // 选中的 room 名字加粗 (见 CSS .rv-room.on > text), 每字再宽 ~16%, 胶囊跟着撑开, 免得字溢出边框、压到两侧 chevron。
-      var w = Math.max(70, 40 + Math.min(gNameMax() + 1, roomLabelOf(r).length) * (!!D.roomId && D.roomId === r.id ? 10.8 : 9.3));
+      var w = Math.max(70, 40 + Math.min(gRoomMax() + 1, roomLabelOf(r).length) * (!!D.roomId && D.roomId === r.id ? 10.8 : 9.3));
       nodes.push({ id: 'r:' + r.id, ref: r, isRoom: true, w: w, r: Math.max(w, 22) / 2 });
     });
     people.forEach(function (p) {
@@ -461,6 +466,8 @@
   // 不随画布缩放; 画布大小只改变间距 —— 首排按面板大小把目标边长整体乘 S.gs (gFitScale)。
   var GFS = 11;
   var gNameMax = function () { return (panelBox().w || 332) <= 420 ? 9 : 11; };   // 名字最多几个字, 再长省略号 (窄屏更短)
+  // room 胶囊的名字可以更长: 没起名的 room 是成员名拼的 (`A·B·C`), 11 字只够看见第一个人。完整名在 tooltip。
+  var gRoomMax = function () { return gNameMax() + 5; };
   // 包围盒 [半宽, 半高, 中心下移] (像素): 人 = 圆点 + 下方名字, 圆点上方留 4 (选中环 / 视角箭头在左右); room = 胶囊。
   var gBox = function (p) {
     if (p.isRoom) return [p.w / 2 + 3, 16, 0];
@@ -683,7 +690,7 @@
       var un = unreadOf(r);
       var dot = un ? '<g class="rv-un"><circle cx="' + (n.w / 2 - 2).toFixed(1) + '" cy="-13" r="' + (un > 9 ? 8 : 7) + '"/><text x="' + (n.w / 2 - 2).toFixed(1) + '" y="-10" text-anchor="middle">' + (un > 99 ? '99+' : un) + '</text></g>' : '';
       return '<title>' + esc(roomLabelOf(r) + ' · ' + roomKindWord(r) + (un ? ' · 未读 ' + un + ' 条' : '') + (r.openDuties ? ' · 未决 duty ' + r.openDuties + ' 件' : '')) + '</title><rect x="' + (-n.w / 2).toFixed(1) + '" y="-13" width="' + n.w.toFixed(1) + '" height="26" rx="9"/>' +
-        '<text x="' + (-n.w / 2 + 8).toFixed(1) + '" y="5.5">' + esc(roomIcon(r) + ' ' + clipName(roomLabelOf(r), gNameMax())) + '</text>' + dot;
+        '<text x="' + (-n.w / 2 + 8).toFixed(1) + '" y="5.5">' + esc(roomIcon(r) + ' ' + clipName(roomLabelOf(r), gRoomMax())) + '</text>' + dot;
     }
     var p = n.ref, human = p.kind === 'human', st = stateOfNode(p), rr = n.r;
     var sides = human ? 0 : polySides(p);
@@ -1828,21 +1835,8 @@
     var cls = 'fx' + (attr === 'charter' && S.charter ? ' on' : '') + (attr === 'plan' && S.pane === 'plan' ? ' on' : '') + (tone ? ' ' + tone : '');
     return '<span' + (attr ? ' class="' + cls + '" data-rb="' + attr + '"' : '') + ' title="' + esc(tip || txt) + '">' + ic + ' ' + esc(txt) + '</span>';
   };
-  // room 没有名字时服务端会把成员名拼起来当 label —— 那是给关系用的, 不能当标题。
   var roomTitle = function (r) {
-    if (!r) return D.roomId;
-    if (r.title || W.chatNames[r.id]) return r.title || W.chatNames[r.id];
-    if (r.kind === 'dm') {
-      // dm 拉进第三人后是多人 room: 列全员 (两人时就是原来的「A、B」)。
-      var all = (r.members || []).map(function (m) { return m.name; }).filter(Boolean);
-      return all.length ? all.join('、') : '私聊';
-    }
-    // 没起名的 adhoc: 列表里一排「临时 room」认不出谁是谁 —— 带上前几位成员。
-    if (r.kind === 'adhoc') {
-      var few = (r.members || []).slice(0, 3).map(function (m) { return m.name; }).filter(Boolean);
-      return few.length ? '临时 · ' + few.join('、') + ((r.members || []).length > 3 ? ' 等' : '') : shortRoom(r.id);
-    }
-    return shortRoom(r.id);
+    return r ? roomNameOf(r, '') : D.roomId;
   };
   // 🏠 = 这个 wizard 的主群: target key 的 base principal 那个聊天 (不是创建者 —— 创建者另起「👤 创建者」)。
   // 名字取 room 列表里显示的那个 (host 起的别名优先), 没有才用服务端给的聊天名; 都没有就不画, 不拿 id 凑数。
