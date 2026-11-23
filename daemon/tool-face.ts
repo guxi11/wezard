@@ -9,7 +9,7 @@
 // 会替每个 face 自动跑同一组断言; 见 docs/dev-guide.md「受限会话的工具面」)。
 import type { WizardRecord } from "./wizard.js";
 import { MONITOR_TOOLS } from "./wizard.js";
-import { GUIDE_DESC, GUIDE_TOOLS, isGuideManifestation } from "./onboarding.js";
+import { GUIDE_TOOLS, isGuideManifestation } from "./onboarding.js";
 import { EXEC_SHELLS, execToolRefusal, shortToolOf } from "./exec-surface.js";
 
 export interface ToolFace {
@@ -54,5 +54,3 @@ export const faceRefusal = (rec: WizardRecord | undefined, action: string, toolI
   }
   return face.refuse(action);
 };
-
-export { GUIDE_DESC };
