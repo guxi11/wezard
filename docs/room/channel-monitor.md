@@ -21,6 +21,14 @@
    - 被激活者按自己的游标读未读记录, 自己看上下文。
 6. **monitor 挂了就不投递, 优先重试**: 不回落给管家, 也不静默丢。
 7. **删 room_transfer**。
+8. **换绑 = 建 / 复用目录的管家类 + 写频道表 + 每个 room 坐上新类的本 room 实例**
+   (人 2026-11-23「绑定工作区为 cc-wecom」; `POST /mirror/channel/rebind`, 实现在 daemon/channel-rebind.ts)。
+   - 频道 = 一条 `<bot, steward, workspace>` 的类绑定 (`wrc.channel.steward.<topic>` 存**类名**);
+     换绑后这个频道的管家身份就是新目录的类, 帖子级的旧 `chatPolicy.<帖子>.steward` 一并清掉。
+   - 新实例坐 **1 号座** (host = 加入序最小的 wizard 成员), 所以 host 真的换人。
+   - **旧 host 不离开 room**: 它手上可能还有没交代的件, leave 会把它们全部 canceled (那是人的提问)。
+     它只是不再是 host / 不再算本 room 的管家 (手闸与宪章随之不再算它), 会话、名字、记录一个都不动。
+   - 幂等: 已绑这个类 = 只补座位; 本 room 已有这个类的实例 = 不写任何 op。
 
 ## 2. 规则改动
 

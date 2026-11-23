@@ -33,6 +33,7 @@ import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inb
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicReply, sendTopicReplyOrPost, type ChannelHuman } from "./channel.js";
 import { channelOf, channelRefOf, learnChannelRoom, postRefOf, postsOfChannel } from "./channel-posts.js";
 import { channelMonitorLeaveOps, channelMonitorWanted, channelRoomOf, channelGuideJoinOps, hostJoinOps, planChannelGuideTurn, postRoomBirthOps, type ChannelGuideTurn } from "./channel-onboarding.js";
+import { rebindChannel } from "./channel-rebind.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -593,6 +594,40 @@ const main = async (): Promise<void> => {
       json(res, r.ok ? 200 : 500, r.ok
         ? { ok: true, target, sessionId: r.sessionId, cwd: r.cwd }
         : { ok: false, reason: r.reason, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd });
+    });
+    // 频道换绑 (人 2026-11-23: 「绑定工作区为 cc-wecom」): 频道 = 一条类绑定; 换绑 = 建 / 复用
+    // 该目录的管家类 + 写 wrc.channel.steward + 频道 room 与各帖子 room 坐上新类的**本 room**
+    // 实例 (旧 host 不离开: leave 会把它手上没交代的件全 canceled)。只动这一个频道。
+    http.register("POST /mirror/channel/rebind", async (req, res) => {
+      const body = (await readBody(req)) as Partial<{ sessionId: string; tmuxPane: string; topicId: string; workspace: string; name: string }>;
+      const self = resolveSelf(body);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const topicId = (body.topicId ?? "").trim();
+      // 权限: 频道管家表本来就对 wizard 可写 (config_set 那条), 这里不另设身份闸 —— 只要求
+      // 频道已有账本 (认得出的频道才谈得上换绑), 并把这次改动写进频道 room (谁换的, 换成什么)。
+      if (!roomState("chat:" + topicId)) { json(res, 404, { ok: false, reason: "这个频道还没有 room 账本: " + topicId }); return; }
+      const { r: out, note } = guardCharter(
+        () => rebindChannel({
+          cfg, sourcePath, store: wizards, stateOf: roomState,
+          write: (room, ops) => { hub.write(room, ops); },
+          topicId, workspace: (body.workspace ?? "").toString(), ...(body.name ? { name: body.name.toString() } : {}),
+        }),
+        (r) => r.ok ? { what: "频道 " + r.topicId + " 换绑到 ." + r.className, self, byHuman: true } : undefined,
+      );
+      if (!out.ok) { json(res, 400, out); return; }
+      // 频道级事实留一条系统行 (不唤醒谁、不开 duty): 人一眼看到 host 换成了谁。
+      const ownRoom = "chat:" + out.topicId;
+      const ownSeat = out.rooms.find((f) => f.room === ownRoom)?.seat ?? "";
+      const said = hub.append(ownRoom, { author: DAEMON, kind: "system", origin: "daemon", sys: "rebind",
+        text: "[wezard] 本频道的管家已换绑为 ." + out.className + (ownSeat ? " (本 room 的实例 ." + displayName(ownSeat) + ")" : "")
+          + " —— 各 room 的 host 换成本 room 的新实例; 旧 host 仍留在群里, 只是不再是 host" });
+      if (!said.ok) roomLog.warn({ room: ownRoom, reason: said.reason }, "channel: rebind 系统行被拒");
+      out.rooms.forEach((f) => ensureMonitor(f.room));
+      // 频道 room 的管家会话先起 (与频道落定同一口子); 帖子 room 的实例等第一次唤醒再冷启动。
+      const own = out.rooms.find((f) => f.room === "chat:" + out.topicId);
+      if (own?.seat) spawnStewardPane(own.seat);
+      roomLog.info({ ...out }, "channel: rebind");
+      json(res, 200, { ...out, charter: await note });
     });
     // ── wizard ↔ wizard + 流水线 ───────────────────────────────────────
     // 这组路由让一个 pane 里的 wizard 作用到它的**同伴**身上。MCP 工具只看得见自己那个
