@@ -46,10 +46,11 @@
 
 ## 进度
 
-- [ ] ① room_activate 改 assign op + kick, 不写 msg 行
-- [ ] ① 泵注入/overdue/补投三链路核对与修
-- [ ] ① monitor 硬闸收严
-- [ ] ② 评论被拒回退新帖 (带引用) + (可选) 未配对预判
-- [ ] 文档 + charter + 工具描述
-- [ ] 单测
-- [ ] tsc + build 绿 + reload
+- [x] ① room_activate 改 assign op + kick, 不写 msg 行 (shared/room.ts AssignOp/judgeActivate/wasActivated; index 处理器校验后 hub.write assign + hub.kick; 响应 {ok,room,msg,to})
+- [x] ① 泵注入/overdue/补投三链路核对与修: pending 收 assign duty 的人话行 (已读行按「判决晚于上次唤醒批次」补投); scanOwed 的 waker 认 assign → 人话行 (轮终/Stop hook 仍能拦); overdue remind 仍走自己的 trigger 行 (未受影响); 补投 (杀 monitor pane) 照旧: monitor 重生 → activate → assign
+- [x] ① monitor 硬闸收严: hub.append 对 monitor 一律 403 「不写任何消息行」; 存量 activate trigger 行重放与 t8 渲染保留
+- [x] ② 评论被拒回退新帖 (带引用): sendTopicReply 返回 "rejected"; sendTopicReplyOrPost 回退 send_post 带 `> 回 <名字>: <前 80 字>`; 频道回话分支 (含 postAsChannelReply) 都走它。未配对预判**未做** (按运行期 errcode 回退, 简单可靠)
+- [x] 文档 (channel-monitor §2.1/§2.2/§2.3) + charter (monitor 判决不写行; 频道段写企微限制) + room_activate/chat_say/chat_reply 工具描述 + CHANGELOG
+- [x] 单测: tests/room-assign.test.ts (assign fold/重放幂等, judgeActivate, 注入无 monitor 痕迹, 已读行补唤醒, 存量兼容), monitor ③ 改写, strict-channel ⑥ 回退
+- [x] tsc + build 绿 + 相关单测全绿
+- [ ] reload + 真机 (没 @ bot 的帖子评论 → 新帖带引用; @ 过的 → 评论回原帖; 注入无 monitor 痕迹; 杀 monitor pane 补投照 t3-accept)
