@@ -14,7 +14,7 @@ import { isTurn, staleAt } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { parseInjection } from "./inject-view.js";
 import { allMessages, inSpan, marksOf, SYSTEM, teammateOf, unwrapMates, type Directory, type Msg, type SessionSpan } from "./role-view.js";
-import type { RoomMsg } from "./room-view.js";
+import type { MemberNote, RoomMsg } from "./room-view.js";
 import { whoKey, type MsgRow, type Who } from "./room.js";
 import { nameHead } from "./session-label.js";
 
@@ -137,7 +137,9 @@ export type StreamMsg = WireMsg<RoomMsg & { roomLabel: string }>;
 
 export interface StreamRow {
   id: string;
-  kind: "in" | "out" | "mark" | "ledger";
+  kind: "in" | "out" | "mark" | "ledger" | "note";
+  /** note 行 (成员变动系统通知) 的分类: join / leave / remove; 文案在 text。 */
+  note?: "join" | "leave" | "remove";
   ts: number;
   from?: string;
   fromName?: string;
@@ -177,6 +179,19 @@ const sigOf = (r: StreamRow): string => hashStr([
   r.row ? r.row.id + (r.row.status ?? "") + (r.row.turn ?? "") : "",
   r.inj ? [r.inj.id, r.inj.status ?? "", (r.inj.re ?? []).join(","), r.inj.raw ?? "", r.inj.note ?? ""].join("\u0001") : "",
 ].join("\u0000"));
+
+/** 成员变动通知 → 时间轴上的一行 (居中小灰字; 文案已在 memberNotes 里折好)。 */
+export const noteRow = (m: MemberNote, roomLabel: string): StreamRow => {
+  const r: StreamRow = { id: m.id, kind: "note", ts: m.at, note: m.kind, text: m.text, room: m.room, roomLabel };
+  return { ...r, sig: sigOf(r) };
+};
+
+/** 把通知并进时间轴: 只放进视野内 (最早一行之后) 的, 其余是更早的历史, 不凭空冒出来。 */
+export const withNotes = (rows: readonly StreamRow[], notes: readonly StreamRow[]): StreamRow[] => {
+  if (!rows.length) return [];
+  const from = rows[0]!.ts;
+  return [...rows, ...notes.filter((x) => x.ts >= from)].sort((a, b) => a.ts - b.ts);
+};
 
 export interface StreamQuery extends DecoQuery {
   /** 频道 base → 显示名 (与账本行同一个口径)。 */

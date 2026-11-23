@@ -11,7 +11,7 @@
 // 一样 —— 名字只是把 uid 换成给人看的写法。
 import {
   holderOf, openDuties, roomHost, sameWho, whoKey,
-  renderMsgLine, rowText, type FileRef, type JoinVia, type MsgKind, type MsgOrigin, type MsgRow,
+  renderMsgLine, roomHash, rowText, type FileRef, type MemberEvent, type JoinVia, type MsgKind, type MsgOrigin, type MsgRow,
   type ReplyStatus, type RenderNames, type RoomKind, type RoomState, type SpeakBasis, type Who,
   isBoundRoom,
 } from "./room.js";
@@ -164,6 +164,77 @@ export const roomHistory = (s: RoomState, q: HistoryQuery, n: RenderNames): { ms
     total: pool.length,
     ...(page.length && pool.length > page.length ? { earlier: page[0]!.id } : {}),
   };
+};
+
+// ── 成员变动 (系统通知) ───────────────────────────────────────────────
+
+/** 一条成员变动通知的线上形状: 同类连续变动已折成一条 (whos 是全部当事人)。 */
+export interface MemberNote {
+  id: string;
+  room: string;
+  at: number;
+  kind: "join" | "leave" | "remove";
+  text: string;
+  whos: Who[];
+  /** wizard 视图才有: 属于哪个 room。 */
+  roomLabel?: string;
+}
+
+/** 不是一次「入群」的入座: 创建者本人 / 迁移批量入座 —— 不报。 (inbound 另判: 人说话时的隐式入座不报, wizard 首次进群要报。) */
+const SILENT_VIA: ReadonlySet<JoinVia> = new Set<JoinVia>(["founder", "migrate"]);
+/** 折叠: 同一动作的两条变动相隔超过它就各成一条 (期间有人说话也断开)。 */
+export const NOTE_GAP_MS = 5 * 60_000;
+const NAMES_SHOWN = 3;
+
+/** 名单: 三个以内逐个列, 更多 =「B、C、D 等 N 人」。 */
+export const listNames = (names: readonly string[]): string =>
+  names.length <= NAMES_SHOWN ? names.join("、") : names.slice(0, NAMES_SHOWN).join("、") + " 等 " + names.length + " 人";
+
+/** 一组同类变动的文案 (纯函数, 测试直接断言): 拿不到操作者 (daemon / 自己) 就省略「A」。 */
+export const noteText = (
+  a: { op: "join" | "leave"; via?: JoinVia; self: boolean; by: string; why?: string }, names: readonly string[],
+): string => {
+  const who = listNames(names);
+  const why = a.why ? " (" + a.why + ")" : "";
+  if (a.op === "leave") return a.self ? who + " 退出了群" + why : a.by ? who + " 被 " + a.by + " 移出群" + why : who + " 被移出群" + why;
+  if (a.self || !a.by) return who + " 加入了群";
+  switch (a.via) {
+    case "approve": return a.by + " 批准了 " + who + " 入群";
+    case "spawn": return a.by + " 拉起了 " + who + " 进群";
+    case "mention": return a.by + " @ 了 " + who + ", 已加入群";
+    case "transfer": return a.by + " 把任务转交给了 " + who + ", 已加入群";
+    default: return a.by + " 邀请了 " + who + " 进群";
+  }
+};
+
+/** 要不要报这条: 静默的入座不报 (人从来不走 join 行, 偶有的 inbound 入座是隐式的); dm 是两个人的对话, 开房那一拍的入座 (与 open 同一刻) 是结构而不是事件。 */
+const noteworthy = (s: RoomState, e: MemberEvent): boolean =>
+  e.op === "leave" || (!SILENT_VIA.has(e.via ?? "founder") && !(e.via === "inbound" && e.who.kind === "human") && !(s.kind === "dm" && s.openedAt === e.at));
+
+/** 一个 room 的成员变动通知 (按时间序)。involving = 只要这个 uid 当事 (当事人或操作者)。
+ *  折叠: 相邻、同动作 (进 / 退 / 被移)、同操作者、同来路、间隔 ≤ NOTE_GAP_MS 且其间没人说过话的合成一条。 */
+export const memberNotes = (s: RoomState, n: RenderNames, involving?: string): MemberNote[] => {
+  const events = s.memberLog.filter((e) => noteworthy(s, e) && (!involving || e.who.id === involving || e.by.id === involving));
+  const key = (e: MemberEvent): string => [e.op, e.via ?? "", sameWho(e.who, e.by) ? "self" : whoKey(e.by), e.why ?? ""].join("|");
+  const spoke = (from: number, to: number): boolean => s.msgs.some((m) => m.at > from && m.at < to);
+  const groups = events.reduce<MemberEvent[][]>((acc, e) => {
+    const g = acc[acc.length - 1];
+    const last = g?.[g.length - 1];
+    if (g && last && key(last) === key(e) && e.at - last.at <= NOTE_GAP_MS && !spoke(last.at, e.at)) g.push(e);
+    else acc.push([e]);
+    return acc;
+  }, []);
+  return groups.map((g) => {
+    const e = g[0]!;
+    const self = sameWho(e.who, e.by);
+    const by = e.by.kind === "daemon" ? "" : n.nameOf(e.by);
+    const kind = e.op === "join" ? "join" : self ? "leave" : "remove";
+    return {
+      id: "mn:" + roomHash(s.id) + ":" + e.at + ":" + whoKey(e.who), room: s.id, at: e.at, kind,
+      text: noteText({ op: e.op, ...(e.via ? { via: e.via } : {}), self, by, ...(e.why ? { why: e.why } : {}) }, g.map((x) => n.nameOf(x.who))),
+      whos: g.map((x) => x.who),
+    };
+  });
 };
 
 // ── wizard 视图: 与我相关 ──────────────────────────────

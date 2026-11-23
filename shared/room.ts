@@ -189,10 +189,24 @@ export interface RoomState {
   duties: Map<string, Duty>;
   /** 历史上出现过的全部成员 (含已离开), 给 rolepage 的二部图与 W-1 视图用。 */
   everMembers: Map<string, Who>;
+  /** 成员进出的时间线 (fold 出来, 不落第二份): 新成员入座 / 在座成员离开各一条, rolepage 画成系统通知。
+   *  已在座者的再次 join (只改 via / by) 不算进出。 */
+  memberLog: MemberEvent[];
+}
+
+export interface MemberEvent {
+  at: number;
+  op: "join" | "leave";
+  who: Who;
+  by: Who;
+  /** join 才有。 */
+  via?: JoinVia;
+  /** leave 才有 (stop_wizard end / 离开原因)。 */
+  why?: string;
 }
 
 export const emptyRoom = (id: string): RoomState => ({
-  id, seq: 0, nextOrd: 1, members: new Map(), msgs: [], byId: new Map(), duties: new Map(), everMembers: new Map(),
+  id, seq: 0, nextOrd: 1, members: new Map(), msgs: [], byId: new Map(), duties: new Map(), everMembers: new Map(), memberLog: [],
 });
 
 const slotOfWho = (w: Who): Slot => whoKey(w);
@@ -227,12 +241,16 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
     case "join": {
       const k = whoKey(op.who);
       const prev = s.members.get(k);
+      if (!prev) s.memberLog.push({ at: op.at, op: "join", who: op.who, by: op.by, via: op.via });
       s.members.set(k, prev ? { ...prev, via: op.via, by: op.by } : { who: op.who, ord: op.ord, via: op.via, since: op.at, by: op.by, seen: 0, watch: false, batches: [] });
       s.everMembers.set(k, op.who);
       s.nextOrd = Math.max(s.nextOrd, op.ord + 1);
       break;
     }
-    case "leave": s.members.delete(whoKey(op.who)); break;
+    case "leave":
+      if (s.members.has(whoKey(op.who))) s.memberLog.push({ at: op.at, op: "leave", who: op.who, by: op.by, ...(op.why ? { why: op.why } : {}) });
+      s.members.delete(whoKey(op.who));
+      break;
     case "seen": {
       const m = s.members.get(whoKey(op.who));
       if (m && op.seq > m.seen) m.seen = op.seq;

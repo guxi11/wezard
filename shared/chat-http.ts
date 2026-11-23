@@ -26,13 +26,13 @@ import { baseOfKey, sameBot } from "./session-label.js";
 import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
 import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
-import { isInjection, renderTurnBox, roomDeco, spokenTurn, wireMsg, wizardStream } from "./role-render.js";
+import { isInjection, noteRow, renderTurnBox, roomDeco, spokenTurn, wireMsg, withNotes, wizardStream } from "./role-render.js";
 import { searchRooms } from "./room-search.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
@@ -359,6 +359,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
           return at ? { ...m, lastAt: at } : m;
         }),
         duties: dutyFacts(s, n),
+        // 成员进出 (系统通知): 全量给 (一个 room 的进出再多也是几十条), 前端按 at 插进已加载那一段消息里。
+        notes: memberNotes(s, n),
         msgs: hist.msgs.map(wireMsg(ledgerIndex([s]).lookup, n.nameOf)).map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
@@ -420,7 +422,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         ...card,
         msgs: hist.msgs.map(wire).map(linked),
         // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
-        stream: wizardStream(records, role, dir, now, {
+        stream: withNotes(wizardStream(records, role, dir, now, {
           span,
           msgs: streamMsgs,
           woke: uid ? wokeRows(states, uid, since, n).map(wire) : [],
@@ -429,7 +431,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
           repliesOf: lx.repliesOf,
           lookup: lx.lookup,
           roomFrom: lx.roomFrom,
-        }),
+        }), uid ? states.flatMap((s) => memberNotes(s, n, uid).map((m) => noteRow(m, n.roomLabel(s.id)))) : []),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
         rooms: f.rooms ?? [],
