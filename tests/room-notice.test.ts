@@ -109,6 +109,7 @@ const names = { nameOf: (w: Who) => w.id, roomLabel: (r: string) => r };
   if (v.ok) {
     assert.deepEqual(v.row.wake, [], "系统行不唤醒任何成员");
     assert.ok(mirrors(v.row), "绑定 room 的系统行会镜像");
+    assert.ok(!mirrors({ ...v.row, kind: "reply", status: "done", text: "" }), "空正文无文件的纯关账行不出站");
   }
   await new Promise((r) => setTimeout(r, 20));
   assert.ok(mirrored.some((t) => t.includes("📌 群公告: 只修 bug")), "镜像到了企微");

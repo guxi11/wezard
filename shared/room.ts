@@ -456,9 +456,12 @@ export const msgClosedDone = (s: RoomState, msg: string): boolean => {
 
 // ── 镜像规则 (§3a) ─────────────────────────────────────────────────────
 
-/** 一行进企微 ⇔ room 绑定了传输 ∧ 是 msg ∧ origin ∉ {inbound, migrate} ∧ kind ≠ trigger。没有别的例外。 */
+/** 一行进企微 ⇔ room 绑定了传输 ∧ 是 msg ∧ origin ∉ {inbound, migrate} ∧ kind ≠ trigger
+ *  ∧ 有内容 (正文或文件至少一样)。空正文无文件的行 (纯 status 关账, 2026-11-23 人报: 空交代被发成
+ *  只有身份头的空评论) 不出站 —— 账本里它照常存在并关账, 只是没东西可给人看。 */
 export const mirrors = (row: RoomOp): boolean =>
-  row.op === "msg" && isBoundRoom(row.room) && row.origin !== "inbound" && row.origin !== "migrate" && row.kind !== "trigger";
+  row.op === "msg" && isBoundRoom(row.room) && row.origin !== "inbound" && row.origin !== "migrate" && row.kind !== "trigger"
+  && (String(row.text ?? "").trim() !== "" || (row.files?.length ?? 0) > 0);
 
 /** 人话行的占位气泡由**第一条** re 它且带正文的 reply 覆盖; 之后的作为新消息。 */
 export const coversBubble = (s: RoomState, row: MsgRow): string | undefined => {
