@@ -17,6 +17,10 @@
 
 monitor activate → 唤醒 OliveBrown-2 → probePane 无 paneId → "gone" → reportGone。
 
+### 为什么「被唤醒时也没有重新拉起来」不是另一个 bug
+
+room-hub.ts:249 起注释: 没有活 pane ≠ 忙, 那是**冷会话** (曾有会话绑定, reload 后没重挂 / pane 已死), 贴进去会自动重生。但 gone 的定义 (room-hub.ts:25) 是「目标**没有任何会话绑定**」—— 重试也贴不进去, 更不会触发重生。OliveBrown-2 从未被 spawn 过, 没有任何会话绑定, 所以唤醒只能 gone。这不是唤醒重生机制坏了, 修法 ①② 落地后「无会话绑定的 host 记录」不会再出现/存量被补, 即闭环。不要去改 gone 的判定或给 gone 加重生逻辑。
+
 ## 修法
 
 1. **settleBoundChannel 补起 pane** (index.ts): hostJoinOps/ensureMonitor 之后, 加与 guideSettleRoom 完全同构的两分支 (`m.hasMirrorTarget(bound.target) ? hub.kick() : void m.newSession(bound.target, settleName(wizards, chatNameOf(cfg, bound.target), bound.target) || bound.target, { silent: true }).then(() => hub.kick()).catch(() => undefined)`)。频道 room 与帖子 room 共用同一管家, 一次即可。
