@@ -11,6 +11,12 @@
 ### Fixed
 - **频道 room 里回一条评论也发成新帖 (人报 2026-11-23「在 channel room 里的管家, 为什么不能判断是回复这个帖子还是创建新的帖子」)** — **行为变化**: `roomMirror` 的频道分支原先一律 `send_post`。现在 `chat_reply` 且 `re` 指向的原话行带 `post` (帖子下的人话) → `send_reply` 评论回那个帖子; `chat_say` 主动说 / re 的不是评论 → 仍 `send_post`。选择编码在动作里, 不给工具加参数; 帖子 room 出站不变。判定抽成纯函数 `channelOutboundOf` (daemon/channel.ts)。charter 与 `chat_say` / `chat_reply` 工具描述补上频道 / 帖子 room 语义 (此前只有群语义, 管家自述「回复挂在原消息下面」等全错)。文档 docs/room/channel-monitor.md §2.3, 测试 tests/strict-channel.test.ts / tests/charter.test.ts。
 
+### Changed
+- **monitor 判决完全不进消息记录 (人 2026-11-23「wizard 不需要知道有 monitor 这个环节吧」; 推翻 t8 的系统行渲染)** — **协议变化**: `room_activate` 不再 append `kind:"trigger" sys:"activate"` 消息行, 改落一条非 msg 的 `assign` op (`{duty, to, asker, by}`, 不占 seq、不镜像), 在 `to` 名下直接开 duty (`via:"assign"`, asker = 原话人) 并踢泵; 被激活的 wizard 只看到人的原话 + 「你要交代: <id> (human, 来自 人)」, 注入里没有任何 monitor 痕迹。审计只在 daemon.log 的 `monitor: activate`。唤醒泵 (`pending`) 不再依赖触发行 wake: 人话行在未读里且有 assign 开的未关 duty 即待唤醒; 已读行只在判决晚于它最近一次唤醒批次时补投。轮终 / Stop hook 的欠账扫描把 assign 账的 waker 认作人话行本身 (overdue 的 remind trigger 不变)。monitor 硬闸收严为**不能写任何 msg 行** (含 activate)。存量账本里的 activate trigger 行照旧重放开 duty, t8 的系统形态渲染保留 (只对存量)。`shared/room.ts` 新增 `AssignOp` / `judgeActivate` / `wasActivated`; 测试 `tests/room-assign.test.ts`, `tests/monitor.test.ts` ③ 改写。
+
+### Fixed
+- **频道里回一条没 @ 过 bot 的帖子评论, 交代被企微拒后静默丢失 (人 2026-11-23「当 channel 里的消息没有艾特机器人时, 能回复这条帖子吗」)** — 企微限制: bot 只能评论 **@ 过它**的帖子。`sendTopicReply` 现在被 errcode 拒时返回 `"rejected"`, 新增 `sendTopicReplyOrPost` 回退 `send_post` 发新帖, 正文开头带 `> 回 <名字>: <原话前 80 字>` 引用标注 (回退记 log.warn), 不再静默丢失; 帖子 room 的出站不变。未配对预判未做 (按运行期 errcode 回退)。文档 channel-monitor.md §2.3, charter 与 `chat_reply` / `chat_say` 描述写明这条限制, 测试 `tests/strict-channel.test.ts` ⑥。
+
 ### Removed
 - **`room_transfer` 退役 (交接 = 把接手方拉进 room, 再自己 `room_leave`)** — **BREAKING**: 删 MCP 工具 `room_transfer`、`POST /room/transfer`、charter 工具清单与 `mcp/output.ts` 的渲染分支; 老账本里的 `move` 行仍由 fold 读侧折叠 (逾期计时照算活动), 新群引导的 duty 交接不走它。docs/room/contract.md 与 技术说明.md 同步。
 - **频道一次性判官退役** — **BREAKING**: 删 `wrc.channel.judge` 配置、`runJudgeOnce` / `askJudge` / `buildJudgePrompt` / `parseVerdict` / `judgeAndMaybe` 与 `tests/channel-judge.test.ts` —— 频道里是否回应改由 room 的 monitor 判 (上面的 activate 行), 频道事件也不再伪造 `chatid=topic_id` 的群帧进 inbound。

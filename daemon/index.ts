@@ -30,7 +30,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, rende
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
-import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicReply, type ChannelHuman } from "./channel.js";
+import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicReply, sendTopicReplyOrPost, type ChannelHuman } from "./channel.js";
 import { channelOf, channelRefOf, learnChannelRoom, postRefOf, postsOfChannel } from "./channel-posts.js";
 import { channelMonitorLeaveOps, channelMonitorWanted, channelRoomOf, channelGuideJoinOps, hostJoinOps, planChannelGuideTurn, postRoomBirthOps, type ChannelGuideTurn } from "./channel-onboarding.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -59,7 +59,7 @@ import { createRoomHub, type RoomHub } from "./room-hub.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeNotice, leaveOps, dutiesHeldBy, planDm, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, planDm, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -704,6 +704,21 @@ const main = async (): Promise<void> => {
         linkTags(dest, headed(ownHead(self), text, "\n\n")))
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
     };
+    /** 回话的引用标注: 评论被拒回退成新帖时, 让人知道这条在回谁的原话 (企微只允许评论 @ 过 bot 的帖子)。 */
+    const replyQuote = (row: MsgRow): string => {
+      const s = roomState(row.room);
+      const src = (row.re ?? []).map((id) => s?.byId.get(id)).find((r) => r?.author.kind === "human");
+      const text = src ? src.text.replace(/\s+/g, " ").trim() : "";
+      if (!text) return "";
+      return "> 回 " + roomNameOf(src!.author) + ": " + text.slice(0, 80) + (text.length > 80 ? "…" : "") + "\n\n";
+    };
+    /** 频道 room 的回话: 评论回原帖; 被企微拒 (没 @ 过 bot 的帖子) 回退发新帖, 正文带引用标注。 */
+    const postAsChannelReply = (self: string, dest: string, post: string, text: string, quote: string): void => {
+      const topicId = dest.replace(/^chat:/, "");
+      const full = linkTags(dest, headed(ownHead(self), text, "\n\n"));
+      void sendTopicReplyOrPost(ws.client, log.child({ mod: "channel" }), topicId, post, full, quote ? quote + full : full)
+        .catch((e: unknown) => log.warn({ topicId, post, err: errText(e) }, "channel post reply failed"));
+    };
     /** 帖子 room (chat:<opk…>) —— 一律评论到根帖 (send_reply)。 */
     const postAsReply = (self: string, dest: string, channel: string, post: string, text: string): void => {
       void sendTopicReply(ws.client, log.child({ mod: "channel" }), channel, post,
@@ -1245,9 +1260,14 @@ const main = async (): Promise<void> => {
         // 频道 room: 回话 (reply 且 re 到带 post 的评论行) = 评论回原帖; 主动说 = 新帖 (§2.3)。
         const out = channelOutboundOf(row, (id) => roomState(chat)?.byId.get(id)?.post);
         if (out.action === "reply") {
-          if (authorTarget) postAsReply(authorTarget, chat, chat.replace(/^chat:/, ""), out.post, body);
-          else void sendTopicReply(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), out.post, linkTags(chat, md))
-            .catch((e) => log.warn({ mod: "room", room: chat, post: out.post, err: errText(e) }, "room: topic 评论回帖失败"));
+          // 企微只允许评论 @ 过 bot 的帖子; 被拒就回退新帖 (带引用), 不让交代静默丢失。
+          const quote = replyQuote(row);
+          if (authorTarget) postAsChannelReply(authorTarget, chat, out.post, body, quote);
+          else {
+            const full = linkTags(chat, md);
+            void sendTopicReplyOrPost(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), out.post, full, quote ? quote + full : full)
+              .catch((e) => log.warn({ mod: "room", room: chat, post: out.post, err: errText(e) }, "room: topic 评论回帖失败"));
+          }
           return true;
         }
         if (authorTarget) postAsTopic(authorTarget, chat, body);
@@ -1797,9 +1817,16 @@ const main = async (): Promise<void> => {
       const ref = (b.to ?? "").toString().trim();
       const to = ref ? (whoRefOf(ref) ?? memberRefOf(s, ref)) : undefined;
       if (ref && !to) { json(res, 400, { ok: false, reason: "认不出这个地址: " + ref }); return; }
-      const v = hub.append(roomId, { author: me, kind: "trigger", sys: "activate", text: "", re, origin: "tool", ...(to ? { to: [to] } : {}) });
-      if (v.ok) roomLog.info({ room: roomId, re: re[0], to: to ? roomNameOf(to) : "", woke: v.row.wake }, "monitor: activate");
-      roomReply(res, v);
+      const v = judgeActivate(s, me, re, to);
+      if (!v.ok) { json(res, v.status, { ok: false, reason: v.reason }); return; }
+      // 判决不进消息记录 (2026-11-23 人定): 只落一条 assign op 开 duty, 然后踢泵。
+      // 被激活者看到的是人的原话 + 「你要交代」; 审计只有 daemon.log 这一行。
+      if (to) {
+        hub.write(roomId, [{ op: "assign", at: Date.now(), room: roomId, duty: re[0]!, to, asker: s.byId.get(re[0]!)!.author, by: me }]);
+        hub.kick();
+      }
+      roomLog.info({ room: roomId, re: re[0], to: to ? roomNameOf(to) : "" }, "monitor: activate");
+      json(res, 200, { ok: true, room: roomId, msg: re[0], to: to ? whoKey(to) : "" });
     });
     http.register("POST /room/read", async (req, res) => {
       const { self, body } = await readPeerBody(req);

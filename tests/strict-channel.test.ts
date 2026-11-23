@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
-import { channelOutboundOf, installChannelEvents, installChannelTransport, isTopicChat, registerTopic, sendTopicPost, sendTopicReply } from "../daemon/channel.js";
+import { channelOutboundOf, installChannelEvents, installChannelTransport, isTopicChat, registerTopic, sendTopicPost, sendTopicReply, sendTopicReplyOrPost } from "../daemon/channel.js";
 import { channelOfPost, learnChannelPost, postRefOf } from "../daemon/channel-posts.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "strict-channel-"));
@@ -78,4 +78,25 @@ assert.deepEqual(
   channelOutboundOf({ kind: "reply", re: ["m1", "m2"] }, (id) => (id === "m2" ? "pX" : undefined)),
   { action: "reply", post: "pX" }, "按 re 顺序取第一条带 post 的原话行");
 
-console.log("strict-channel (room 口径): 频道回话 → send_reply 回原帖, 主动说 → send_post, 帖子 → send_reply");
+// ⑥ 评论被企微拒 (bot 只能评论 @ 过它的帖子) → 回退发新帖, 正文带引用标注; 不再静默丢失。
+{
+  const sent: Array<{ cmd: string; content: string }> = [];
+  const rejecting: any = {
+    reply: async (_h: unknown, body: any, cmd: string) => {
+      sent.push({ cmd, content: String(body?.content ?? "") });
+      return cmd === "aibot_topic_send_reply" ? { errcode: 40058, errmsg: "post not mention bot" } : { post_id: "pnew" };
+    },
+  };
+  const quote = "> 回 张三: 这个帖子怎么处理\n\n";
+  const via = await sendTopicReplyOrPost(rejecting, log, "topicX", "pQ", "正文", quote + "正文");
+  assert.equal(via, "post", "被拒时回退新帖");
+  assert.deepEqual(sent.map((x) => x.cmd), ["aibot_topic_send_reply", "aibot_topic_send_post"], "先评论再回退");
+  assert.ok(sent[1]!.content.startsWith(quote) && sent[1]!.content.includes("正文"), "新帖正文带引用标注");
+  // 没被拒就只评论, 不发新帖。
+  sent.length = 0;
+  const okClient: any = { reply: async (_h: unknown, body: any, cmd: string) => { sent.push({ cmd, content: String(body?.content ?? "") }); return {}; } };
+  assert.equal(await sendTopicReplyOrPost(okClient, log, "topicX", "pQ", "正文", quote + "正文"), "reply");
+  assert.deepEqual(sent.map((x) => x.cmd), ["aibot_topic_send_reply"], "成功时只有评论");
+}
+
+console.log("strict-channel (room 口径): 频道回话 → send_reply 回原帖, 主动说 → send_post, 被拒回退新帖, 帖子 → send_reply");

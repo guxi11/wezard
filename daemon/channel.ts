@@ -278,12 +278,27 @@ export const sendTopicPost = async (client: WSClient, log: Logger, topicId: stri
   return "post";
 };
 
-/** 帖子 room 的出站: 一律评论到根帖 (send_reply)。 */
-export const sendTopicReply = async (client: WSClient, log: Logger, topicId: string, postId: string, content: string): Promise<"reply"> => {
+/** 帖子 room 的出站: 一律评论到根帖 (send_reply)。企微拒 (errcode) 时回 "rejected" —— 调用方决定回退。 */
+export const sendTopicReply = async (client: WSClient, log: Logger, topicId: string, postId: string, content: string): Promise<"reply" | "rejected"> => {
   const body = await call(client, CMD_REPLY, { topic_id: topicId, post_id: postId, content });
-  if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId, postId }, "channel tool reply rejected");
-  else log.info({ topicId, postId, via: "reply", len: content.length }, "channel tool sent");
+  if (body?.errcode) {
+    log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId, postId }, "channel tool reply rejected");
+    return "rejected";
+  }
+  log.info({ topicId, postId, via: "reply", len: content.length }, "channel tool sent");
   return "reply";
+};
+
+/** 评论回帖, 被企微拒时回退发新帖 (2026-11-23 人报: bot 只能评论 **@ 过它** 的帖子, 没 @ 过的会被拒,
+ *  原先只 warn → 交代静默丢失)。fallback 是新帖正文 (通常带引用标注); 没给就用原正文。 */
+export const sendTopicReplyOrPost = async (
+  client: WSClient, log: Logger, topicId: string, postId: string, content: string, fallback?: string,
+): Promise<"reply" | "post"> => {
+  const r = await sendTopicReply(client, log, topicId, postId, content);
+  if (r === "reply") return "reply";
+  log.warn({ topicId, postId }, "channel reply rejected → fallback to post");
+  await sendTopicPost(client, log, topicId, fallback ?? content);
+  return "post";
 };
 
 export const installChannelTransport = (client: WSClient, log: Logger): void => {

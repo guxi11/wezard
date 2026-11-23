@@ -81,8 +81,16 @@ for (const kind of ["say", "reply", "ask"] as const) {
   if (!v.ok) assert.equal(v.status, 403);
 }
 assert.deepEqual(openDuties(store.get("chat:t")!).length, 0, "monitor 的人话不开 duty");
-const act = hub.append("chat:t", { author: M, kind: "trigger", sys: "activate", text: "", re: [human.ok ? human.row.id : ""], to: [A], origin: "tool" });
-assert.ok(act.ok, "activate 放行");
+// 2026-11-23 人定: 判决完全不写消息行 —— monitor 连 trigger activate 行也不能 append。
+const actV = hub.append("chat:t", { author: M, kind: "trigger", sys: "activate", text: "", re: [human.ok ? human.row.id : ""], to: [A], origin: "tool" });
+assert.equal(actV.ok, false, "monitor 不写任何 msg 行 (含 activate)");
+if (!actV.ok) assert.equal(actV.status, 403);
+// 判决走 assign op: 开 duty, 不写消息行。
+const humanId = human.ok ? human.row.id : "";
+const msgsBefore = store.get("chat:t")!.msgs.length;
+hub.write("chat:t", [{ op: "assign", at: 3, room: "chat:t", duty: humanId, to: A, asker: H, by: M }]);
 assert.deepEqual(openDuties(store.get("chat:t")!).map((d) => d.slot), ["wizard:" + A.id]);
+assert.equal(openDuties(store.get("chat:t")!)[0]!.via, "assign");
+assert.equal(store.get("chat:t")!.msgs.length, msgsBefore, "assign 不写消息行");
 
 console.log("monitor ok");

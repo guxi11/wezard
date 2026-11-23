@@ -536,7 +536,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Activate a wizard for the last human message (monitor only)",
       description:
-        "monitor 的判决: 把本 room 最后一条人话在 `to` 名下开成 duty 并唤醒它。不给 `to` = 判定不回应 (只记一行判决, 不开 duty、不投递)。同一条人话只能激活一次。只有 monitor 能调, 别的 wizard 一律 403。",
+        "monitor 的判决: 把本 room 最后一条人话在 `to` 名下开成 duty 并唤醒它。**判决不写消息行** —— 被激活者只看到人的原话 (审计只在 daemon.log)。不给 `to` = 判定不回应 (不开 duty、不投递、不留账本行)。同一条人话只能激活一次。只有 monitor 能调, 别的 wizard 一律 403。",
       inputSchema: currentAddressSchema({
         re: z.string().describe("最后一条人话的消息 id (账本行首方括号里的 id)。"),
         to: z.string().optional().describe("激活谁 (wizard 名); 省略 = 不回应。"),

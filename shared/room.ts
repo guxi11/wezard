@@ -113,6 +113,9 @@ export interface LeaveOp extends OpBase { op: "leave"; who: Who; by: Who; why?: 
 export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number; batch?: true }
 export interface MoveOp extends OpBase { op: "move"; duty: string; from: Who; to: Who; by: Who }
 export interface WatchOp extends OpBase { op: "watch"; who: Who; on: boolean }
+/** monitor 的判决 (2026-11-23 人定: 判决不进消息记录): 不写 msg 行, 直接给 re 那条人话在 `to` 名下开 duty。
+ *  被激活者只看到人的原话 + 「你要交代」; 留痕只在 daemon.log。`to` 缺省 (判不回应) 不落 op。 */
+export interface AssignOp extends OpBase { op: "assign"; duty: string; to: Who; asker: Who; by: Who }
 export interface MsgRow extends OpBase {
   op: "msg";
   id: string;
@@ -148,7 +151,7 @@ export interface MsgRow extends OpBase {
   /** daemon 系统行的机器语义 (undelivered / left / quota …), 用于去重, 不给模型推断。 */
   sys?: string;
 }
-export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | MsgRow;
+export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | AssignOp | MsgRow;
 
 // ── fold ───────────────────────────────────────────────────────────────
 
@@ -177,6 +180,8 @@ export interface Duty {
   for?: string;
   /** 老账本里最近一条 move 行的时刻 (room_transfer 已删, 只读侧折叠) —— 逾期计时把它当一次活动。 */
   movedAt?: number;
+  /** "assign" = monitor 判决直接开的账 (没有 trigger 消息行); 泵靠它 + 人话行本身在未读里唤醒。 */
+  via?: "assign";
   /** 最近一条 holder 写的非终态 status (need / progress / error)。 */
   last?: { status: ReplyStatus; seq: number };
   closed?: { by: string; status: ReplyStatus; at: number };
@@ -289,6 +294,15 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
       s.duties.delete(from.key);
       const key = dutyKey(op.duty, slotOfWho(op.to));
       s.duties.set(key, { ...from, key, slot: slotOfWho(op.to), movedAt: op.at });
+      break;
+    }
+    case "assign": {
+      // monitor 判决: 不占 seq、不写消息行, 只开 duty (重放一致)。
+      const key = dutyKey(op.duty, slotOfWho(op.to));
+      if (!s.duties.has(key)) {
+        const row = s.byId.get(op.duty);
+        s.duties.set(key, { key, msg: op.duty, seq: row?.seq ?? 0, slot: slotOfWho(op.to), asker: op.asker, kind: "human", at: op.at, via: "assign" });
+      }
       break;
     }
     case "msg": {
@@ -515,6 +529,31 @@ const dedupKey = (author: Who, kind: MsgKind, text: string, to: readonly Who[] |
 export const idList = (x: unknown): string[] =>
   x == null ? [] : (Array.isArray(x) ? x : [x]).map((v) => String(v).trim()).filter(Boolean);
 
+/** 这条人话是否已被 monitor 判过 (存量 activate trigger 行 / 新的 assign duty 都算)。 */
+export const wasActivated = (s: RoomState, msgId: string): boolean =>
+  s.msgs.some((m) => m.kind === "trigger" && m.sys === "activate" && (m.re ?? []).includes(msgId))
+  || [...s.duties.values()].some((d) => d.msg === msgId && d.via === "assign");
+
+/** room_activate 新路径的判定 (判决不写消息行): re 必须本 room 最后一条人话, to 至多一个本 room 的 wizard 成员,
+ *  同一条人话只激活一次 (与旧 judge 的 activate 校验同口径)。ok 之后由调用方落一条 assign op。 */
+export const judgeActivate = (
+  s: RoomState, actor: Who, re: readonly string[], to: Who | undefined,
+): { ok: true } | { ok: false; status: 400 | 403 | 409; reason: string } => {
+  if (s.members.get(whoKey(actor))?.role !== "monitor")
+    return { ok: false, status: 403, reason: "只有本 room 的 monitor 能写 activate 判决" };
+  if (re.length !== 1) return { ok: false, status: 400, reason: "re 只收一条 (最后一条人话的消息 id)" };
+  const target = s.byId.get(re[0]!);
+  if (!target) return { ok: false, status: 400, reason: "re 不在这个 room: " + re[0] };
+  if (target.author.kind !== "human" || target.kind !== "say")
+    return { ok: false, status: 400, reason: "activate 的 re 必须是本 room 的人话: " + target.id };
+  if (s.msgs.some((m) => m.seq > target.seq && m.author.kind === "human" && m.kind === "say"))
+    return { ok: false, status: 409, reason: "activate 只能激活本 room 最后一条人话 (它之后还有人说话)" };
+  if (wasActivated(s, target.id)) return { ok: false, status: 409, reason: "这条人话已经被激活过: " + target.id };
+  if (to && to.kind !== "wizard") return { ok: false, status: 400, reason: "activate 只能激活 wizard" };
+  if (to && !s.members.has(whoKey(to))) return { ok: false, status: 400, reason: "只能激活本 room 的成员" };
+  return { ok: true };
+};
+
 /** 10 分钟窗内这个 room 已经花掉的唤醒数 (从账本算, 重启不丢)。 */
 export const wakesInWindow = (s: RoomState, now: number, windowMs = WAKE_WINDOW_MS): number =>
   s.msgs.reduce((n, m) => (now - m.at < windowMs ? n + m.wake.length + (m.interrupt ? 1 : 0) : n), 0);
@@ -557,8 +596,7 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
     if (target.author.kind !== "human" || target.kind !== "say") return fail(400, "activate 的 re 必须是本 room 的人话: " + re[0]);
     if (s.msgs.some((m) => m.seq > target.seq && m.author.kind === "human" && m.kind === "say"))
       return fail(409, "activate 只能激活本 room 最后一条人话 (它之后还有人说话)");
-    if (s.msgs.some((m) => m.kind === "trigger" && m.sys === "activate" && (m.re ?? []).includes(target.id)))
-      return fail(409, "这条人话已经被激活过: " + target.id);
+    if (wasActivated(s, target.id)) return fail(409, "这条人话已经被激活过: " + target.id);
     if ((d.to ?? []).length > 1) return fail(400, "activate 至多激活一个 wizard");
     if ((d.to ?? []).some((t) => t.kind !== "wizard")) return fail(400, "activate 只能激活 wizard");
   }

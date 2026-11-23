@@ -28,12 +28,13 @@
   - room 里有 monitor 成员 → 只唤醒 monitor, **不开 duty** (这一行不进 host 槽位);
   - 没有 monitor → 照旧唤醒 host。
   - @ 机器人的人话 → 照旧给 host。所以入站要把 "@ 了机器人" 作为行上的显式字段写进来, 比如 mention:"bot"。不靠正文猜。
-- **新行类型 trigger sys:"activate"**:
-  - 字段: author = monitor, to = [被激活者], re = [最后一条用户消息 id];
-  - 效果: 在 to 名下为 re 那条开 duty;
-  - 不镜像企微 (trigger 行本来就不镜像), 唤醒 to。
-  - to 为空 = 判定不回应: 只记一行, 不开 duty。
-- **judge 校验**: 只有 monitor 能写 activate; re 必须是本 room 的人话; 同一条人话只能激活一次。
+- **新 op `assign` (2026-11-23 人定: 判决完全不写消息行)**: {duty = 人话 msgId, to, asker = 人话作者, by = monitor}
+  - 效果: 在 to 名下为 duty 那条人话开 duty (via:"assign"), 不占 seq、不写 msg 行、不镜像;
+  - 被激活者只看到人的原话 + 「你要交代: <id> (human, 来自 人)」, 不知道 monitor 存在; 审计只在 daemon.log;
+  - 唤醒泵: 行本身在未读里且有 assign op 开的未关 duty = 待唤醒 (不靠 trigger 行的 wake 列表);
+  - to 为空 = 判定不回应: 不落 op、不开 duty、不留账本行。
+  - **存量兼容**: 旧账本的 trigger sys:"activate" 行照旧重放开 duty (dutiesOpenedBy 的 activate 分支与 t8 渲染保留), 新行为不再产生。
+- **judgeActivate 校验**: 只有 monitor 能判决; re 必须是本 room 最后一条人话; to 是本 room 的 wizard 成员; 同一条人话只能激活一次 (含存量 trigger 行)。
 - **move 行**: 读侧 fold 保留, 老账本里的 move 行照常折叠; 写入方随 room_transfer 一起删。
 
 ### 2.2 monitor 身份与生命周期 (daemon)
@@ -43,7 +44,7 @@
 - **工具面硬限** (参照 approval.ts:2140 guideRefusal, REPL 下钻同 25179b4):
   - 只放行 room_read、read_channel、wizard_roster、room_activate、handoff;
   - 其余工具一律拒绝, 包括 chat_say / chat_reply / chat_ask / notify / send_file / 改文件。
-- **MCP 新工具 room_activate({re, to?})**: re 是最后一条用户消息的 id, to 是名字; 不给 to = 不回应。charter 里给 monitor 一段专用说明, 其它 wizard 的 charter 不列这个工具。
+- **MCP 新工具 room_activate({re, to?})**: re 是最后一条用户消息的 id, to 是名字; 不给 to = 不回应。判决只落 assign op + daemon.log, **不写消息行**(2026-11-23)。charter 里给 monitor 一段专用说明, 其它 wizard 的 charter 不列这个工具。
 - **失败处理**: monitor 没确认收到 (粘贴失败 / uncertain / pane 死了) → 不投递给任何人; 游标不动, 由 wake pump 重试, pane 死了按冷启动重生。
   - 不写 undelivered 行, 不回落 host; 日志在状态变化时记一行 warn。
   - room-watchdog 不对 monitor 写 canceled, 它名下本来就没有 duty。
@@ -61,6 +62,7 @@
 - **出站** (2026-11-23 补, 人报「帖子下评论提问却发了一条新帖」; 选择编码在动作里, 不加工具参数):
   - 频道 room: `chat_reply` 且 re 指向的原话行带 `post` (帖子下的人话) → `send_reply` 评论回那个帖子; 其余 (`chat_say` 主动说 / re 的不是评论) → `send_post` 发新帖。频道 room 的人话行两个来源 (topic_event 新帖 / 未配对的 topic_reply_event 评论) 都带 `post`, 所以对一条新帖正文的回话同样回在它下面;
   - 帖子 room 一律 send_reply, 评论到根帖下面 (不变)。
+  - **企微限制**: bot 只能评论 **@ 过它的帖子**。send_reply 被 errcode 拒时回退 `send_post` 发新帖, 正文开头带 `> 回 <名字>: <原话前 80 字>` 引用标注 (原先只 warn → 交代静默丢失, 2026-11-23 修); 回退记 log.warn。未配对预判未做 (按运行期 errcode 回退, 简单可靠)。
   - 分支判定是 `daemon/channel.ts` `channelOutboundOf` (纯函数): reply 行按 re 顺序查第一条带 post 的原话行。charter 与 chat_say / chat_reply 工具描述同步写明这套语义 (此前只有群语义, 管家自述机制全错)。
   - 删掉按 lastPost / replyOk 挑一个帖子去评论的逻辑 (channel.ts:558、620; daemon/index.ts:1219)。
 

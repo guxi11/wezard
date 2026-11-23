@@ -87,9 +87,10 @@ export const createRoomHub = (p: HubPorts) => {
   const append = (room: string, d: Draft, extra: Partial<JudgeCtx> = {}): Verdict => {
     const s = state(room);
     if (!s) return { ok: false, status: 400, reason: "没有这个 room: " + room };
-    // monitor 的发言权是硬的 (§2.2): 只写 activate 判决行, 其余一律拒 —— 不发言、不派活、不关账。
-    if (s.members.get(whoKey(d.author))?.role === "monitor" && !(d.kind === "trigger" && d.sys === "activate"))
-      return { ok: false, status: 403, reason: "monitor 不发言 / 不派活 / 不关账: 只写 room_activate 的判决行" };
+    // monitor 的发言权是硬的 (§2.2, 2026-11-23 人定): **一行消息都不写** —— 判决走 assign op
+    // (room_activate), 不进消息记录; 不发言、不派活、不关账。
+    if (s.members.get(whoKey(d.author))?.role === "monitor")
+      return { ok: false, status: 403, reason: "monitor 不写任何消息行: 判决用 room_activate (assign op)" };
     const v = judge(s, d, {
       now: now(),
       isParent: (parent, child) => isDirectParent((u) => p.wizardOf(u)?.parentUid, parent, child),
@@ -194,7 +195,13 @@ export const createRoomHub = (p: HubPorts) => {
       if (!s) continue;
       for (const m of s.members.values()) {
         if (m.who.kind !== "wizard") continue;
-        const rows = s.msgs.filter((r) => r.seq > m.seen && r.wake.includes(m.who.id));
+        // 触发行: 原 wake 列表 (游标之后); 或 monitor 判决 assign 在这条人话上开的账 —— 没有 trigger 行,
+        // 行本身在未读里就该投; 已经读过的行 (别的唤醒把游标推过去了) 只有「判决晚于它最近一次唤醒批次」时才补投。
+        const rows = s.msgs.filter((r) => {
+          if (r.seq > m.seen && r.wake.includes(m.who.id)) return true;
+          const d = openDuties(s).find((x) => x.msg === r.id && x.via === "assign" && sameWho(holderOf(s, x), m.who));
+          return !!d && (r.seq > m.seen || d.at > (m.batches[m.batches.length - 1] ?? 0));
+        });
         if (!rows.length) continue;
         const per = out.get(m.who.id) ?? new Map<string, MsgRow[]>();
         per.set(room, rows);
@@ -335,9 +342,11 @@ export const createRoomHub = (p: HubPorts) => {
       for (const d of openDuties(s)) {
         if (!sameWho(holderOf(s, d), who)) continue;
         const row = s.byId.get(d.msg);
-        // 原 ask 唤醒过它, 或 after 补唤醒的 trigger 行 (re 原 ask) 唤醒过它 —— 取最早叫醒它的那一行。
+        // 原 ask 唤醒过它, 或 after / overdue 的 trigger 行 (re 原 ask) 唤醒过它;
+        // monitor 判决 (assign) 开的账没有 trigger 行, 人话行自己就是叫醒它的那一行。
         const waker = row?.wake.includes(uid) ? row
-          : s.msgs.find((r) => r.kind === "trigger" && (r.re ?? []).includes(d.msg) && r.wake.includes(uid));
+          : s.msgs.find((r) => r.kind === "trigger" && (r.re ?? []).includes(d.msg) && r.wake.includes(uid))
+          ?? (d.via === "assign" ? row : undefined);
         if (!waker && !t?.msgs.has(d.msg)) continue;
         if (delivered && (!waker || waker.seq > me.seen)) continue;
         // progress / need 交代过: duty 照常开着等 done, 但这一轮的账算清了 —— 不提醒、不告状。
