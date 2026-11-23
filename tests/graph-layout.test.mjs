@@ -59,10 +59,10 @@ const crossings = (links) => {
   return n;
 };
 
-/** 屏幕上的包围盒重叠对数: 节点与名字是固定像素 (名字 11px = web/chat.js 的 GFS, 窄屏最多 9 字 / 宽屏 11 字), 中心按视野缩放 k
+/** 屏幕上的包围盒重叠对数: 节点与名字是固定像素 (名字 12px = web/chat.js 的 GFS, 窄屏最多 9 字 / 宽屏 11 字), 中心按视野缩放 k
  *  (= 把整张图放进画布所需的缩放, 夹在 0.95~1: 同 gView) 换算到屏幕; room = 胶囊 (26px 高)。 */
 const overlaps = (g, panel) => {
-  const fs = 11, nmax = panel.w <= 420 ? 9 : 11;
+  const fs = 12, nmax = panel.w <= 420 ? 9 : 11;
   const ext = (p) => p.isRoom ? [p.w / 2, p.w / 2, 13, 13]
     : [Math.max(p.r, Math.min(nmax, (p.ref.name || "").length) * 0.55 * fs / 2), Math.max(p.r, Math.min(nmax, (p.ref.name || "").length) * 0.55 * fs / 2), p.r, p.r + 3 + fs];
   const es = g.nodes.map(ext);
