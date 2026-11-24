@@ -354,7 +354,7 @@ const main = async (): Promise<void> => {
     const v = roomHub?.append(room, { author, kind: "say", text, origin: "inbound", ext: streamId,
       bubble: { stream: streamId, expires }, ...(re.length ? { re } : {}),
       ...(a.images?.length ? { files: a.images.map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })) } : {}),
-      ...(to?.length ? { to } : {}) });
+      ...(to?.length ? { to } : {}), ...(a.mentionBot ? { mention: "bot" as const } : {}) });
     if (!v || !v.ok) {
       // 被拒不回退旧路径 (wiring C): 按 verdict 原因回一行系统提示 —— 人话不能丢, 也不能绕过账本。
       const reason = v ? v.reason : "room 接线还没就绪 (启动竞态), 稍后再发一句";

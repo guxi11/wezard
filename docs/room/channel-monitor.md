@@ -67,7 +67,7 @@
 - **入站, 不再伪造 chatid = topicId 的帧 (channel.ts:642 dispatch)**:
   - 没被 @ 的新帖 (topic_event) → 频道 room 的一行人话 (带 post);
   - 评论 (topic_reply_event): 这个帖子已经配上 opk 的 → 帖子 room 的一行人话; 还没配上的 → 频道 room 的一行人话 (带 post);
-  - topic_at_bot: 原生帧照旧进帖子 room (点名 host)。原生帧没到的兜底: 如果帖子已配对, 写进帖子 room; 没配对就写频道 room 并标 mention:"bot"。
+  - topic_at_bot: 原生帧照旧进帖子 room (点名 host —— 入站按 `compat_info.source=channel` 判「@ 了机器人」, 行上记 `mention:"bot"`, 不靠正文猜)。原生帧没到的兜底: 帖子已配对写进帖子 room, 没配对写频道 room, **两条都标** mention:"bot" (这一路本来就是 @, 落到哪个 room 都直达 host)。普通评论 (topic_reply_event) 不标, 照旧交给 monitor 判。
 - **配对**: learnChannelPost 同时记下 post_id ↔ opk ↔ topic_id (channel.ts:760 那一刻三个 id 都在手里)。channel-posts.json 的值从 topic_id 扩成 {channel, post}, 读侧兼容旧格式 (只有 topic_id 的字符串)。
 - **帖子 room 诞生**: 帖子的 room 自己领一个**本 room** 的管家实例当 host (不拉频道 room 那个); 已绑定
   频道里归属由 channel 指针表达, 不再把帖子 host 加进频道 room。

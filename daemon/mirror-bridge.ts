@@ -2608,6 +2608,9 @@ export interface MirrorDispatchArgs {
   rawText?: string;
   /** 人引用了哪段话 (企微的引用只带文字): 剥掉名字头后的净正文; 人话行据它对回账本里被引用的那一行 (re)。 */
   quoted?: string;
+  /** 人这句 @ 了机器人 (inbound 的 atBot 判据): 账本行记 mention:"bot" —— @ 了机器人的人话已有
+   *  确定的接待者 (host / 被点名者), 不再交给 room 的 monitor 判决。 */
+  mentionBot?: boolean;
 }
 
 export interface AttachArgs {

@@ -73,12 +73,13 @@ atBot("p6");
 await sleep(800);
 assert.equal(ingested.length, 3, "别人的原生帧不抵本人的事件");
 
-// ⑥ 已被原生帧配过的帖子再 @ → 兜底直接落帖子 room (不再标 mention)。
+// ⑥ 已被原生帧配过的帖子再 @ → 兜底直接落帖子 room, 照样标 mention:"bot" (人 2026-11-24:
+//    帖子 room 里 @ 的话也要直达 host, 不交给 monitor 判决 —— 与频道 room 同口径)。
 atBot("p1", "tester", "m2-p1");
 await sleep(700);
 assert.equal(ingested.length, 4);
 assert.equal(ingested[3]!.room, "chat:opkA", "已配对: 落帖子 room (base 就是原生帧的 opk 群)");
-assert.equal(ingested[3]!.mention, undefined);
+assert.equal(ingested[3]!.mention, "bot");
 
 // ⑦ 端到端: inbound 的最外层 "message" 回调认出 compat_info.source=channel 并记账。
 const { installInboundRouter } = await import("../daemon/inbound.js");

@@ -417,10 +417,11 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       await record(cfg, topicId, postMsg(post));
       if (reply) await record(cfg, topicId, replyMsg(reply, postId));
       const text = cleanContent(reply?.content ?? post?.content) || "（在频道里 @ 了你，没有正文）";
-      // 兜底: 帖子已配对 → 帖子 room (它就是那个帖子); 没配对 → 频道 room, 标 mention:"bot" (直达 host)。
+      // 兜底: 帖子已配对 → 帖子 room (它就是那个帖子); 没配对 → 频道 room。这一路是 topic_at_bot
+      // (人 @ 了机器人), 落到哪个 room 都一样记 mention:"bot" —— 直达 host, 不交给 room 的 monitor。
       const paired = postBaseOf(cfg, topicId, postId);
       ingest(paired
-        ? { room: paired, author: asker, text, at, msgid }
+        ? { room: paired, author: asker, text, at, msgid, mention: "bot" }
         : { room: channelRoom, post: postId, author: asker, text, at, msgid, mention: "bot" });
       return;
     }

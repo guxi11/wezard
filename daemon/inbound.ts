@@ -400,11 +400,21 @@ const isGroup = (msg: BaseMessage): boolean => msg.chattype === "group" && !!msg
 const sourceOf = (msg: BaseMessage): string => (msg as { compat_info?: { source?: string } }).compat_info?.source ?? "";
 const BUILTIN_BOT_NAMES = ["wezard"] as const;
 
+/** 这条消息里认定的机器人名 (剥离与 atBot 同一个判据): 配置里的名字优先, 群里第一个不像文件的 @token。 */
+const botNameIn = (names: readonly string[], msg: BaseMessage, text: string): string | undefined =>
+  names.find((n) => mentionRe(n).test(text)) ?? (isGroup(msg) ? detectBotName(text) : undefined);
+
 const maybeStripMentions = (names: readonly string[], msg: BaseMessage, text: string): string => {
-  const configured = names.find((n) => mentionRe(n).test(text));
-  const name = configured ?? (isGroup(msg) ? detectBotName(text) : undefined);
+  const name = botNameIn(names, msg, text);
   return name ? stripName(text, name) : text.trim();
 };
+
+/** 这一帧 = 「人 @ 了机器人」: 账本行据此记 mention:"bot" (等同点名 host —— 不再交给 room 的
+ *  monitor 判决, 人 2026-11-24)。两条判据: ① 频道原生帧 (compat_info.source="channel"): 企微只为
+ *  @ 的那一句发原生帧, 正文里反倒没有 @token (实录: 帖子里 @ 的帧 text 直接就是正文); ② 正文里
+ *  真有一个机器人名 (= 上面剥离时的同一判据)。 */
+export const atBot = (names: readonly string[], msg: BaseMessage, text: string): boolean =>
+  sourceOf(msg) === "channel" || !!botNameIn(names, msg, text);
 
 // Render the user's "引用" (quoted message) into a markdown blockquote so the
 // claude prompt carries the upstream context. WeCom delivers `quote` as a
@@ -1240,8 +1250,9 @@ export const installInboundRouter = (
     await replySystem(frame, msg, "[wezard] 引导没接上 (" + (sent.reason ?? "未知原因") + ") — 稍后再发一句。");
     return true;
   };
-  /** `text` 进 prompt (可带引用前缀); `spoken` = 人自己打的那部分, 账本人话行只存它。 */
-  const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = [], spoken = ""): Promise<void> => {
+  /** `text` 进 prompt (可带引用前缀); `spoken` = 人自己打的那部分, 账本人话行只存它;
+   *  `mentionBot` = 这句 @ 了机器人 (见 atBot) —— 账本行记 mention:"bot", 不再交给 monitor 判决。 */
+  const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = [], spoken = "", mentionBot = false): Promise<void> => {
     // 账本行只存人的原话: 信封已删 (谁说的 = 行作者, 哪个群 = 行所在 room), 管家自查 / 点名提示 /
     // 名册增量这些提醒尾巴也不在这里拼 —— 它们在唤醒渲染那一刻才挂 (wake-tail.ts / room-hub)。
     const channel = chatPrincipal(msg);
@@ -1249,7 +1260,7 @@ export const installInboundRouter = (
     // room 模型: 人话行的去重键 = 企微 msgid (账本行 ext), 事件表已退役。
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: spoken || text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body });
+      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: spoken || text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body, ...(mentionBot ? { mentionBot: true } : {}) });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }
@@ -1275,8 +1286,9 @@ export const installInboundRouter = (
   client.on("message.text", async (frame: WsFrame<TextMessage>) => {
     const msg = frame.body;
     if (!msg) return;
-    if (await guideGate(frame, msg, stripAt(msg, msg.text?.content ?? ""))) return;
-    const { text, tag, promoted, who, spoken } = route(msg, stripAt(msg, msg.text?.content ?? ""));
+    const raw = msg.text?.content ?? "";
+    if (await guideGate(frame, msg, stripAt(msg, raw))) return;
+    const { text, tag, promoted, who, spoken } = route(msg, stripAt(msg, raw));
     const known = bridge.hasMirrorTarget(who);
     log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted, chat: chatPrincipal(msg), who, known }, "rx text");
     // 落到一个没有任何会话的聊天时, 把原始回调也记一笔: 频道 / 群 / 单聊的 chatid
@@ -1284,7 +1296,7 @@ export const installInboundRouter = (
     if (!known) log.info({ body: msg }, "rx text — unknown chat (raw)");
     const { stop } = await gate(frame, msg, text, who, tag);
     if (stop) return;
-    await send(frame, msg, who, text, [], spoken);
+    await send(frame, msg, who, text, [], spoken, atBot(botNames, msg, raw));
   });
 
   client.on("message.image", async (frame: WsFrame<ImageMessage>) => {
@@ -1306,7 +1318,7 @@ export const installInboundRouter = (
     // each via macOS clipboard + Ctrl+V into the live TTY (matches Claude
     // Code's documented image paste flow → image content block, no Read tool
     // turn). Spawn-mode falls back to `@<path>` automatically.
-    await send(frame, msg, who, text, [path]);
+    await send(frame, msg, who, text, [path], "", atBot(botNames, msg, ""));
   });
 
   client.on("message.mixed", async (frame: WsFrame<MixedMessage>) => {
@@ -1350,7 +1362,7 @@ export const installInboundRouter = (
     // consumed above; leaving it in would leak into Claude) and attaches the
     // quote only when it isn't already in the target's context.
     const composed = composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, resolve);
-    await send(frame, msg, who, composed.text, images, composed.spoken);
+    await send(frame, msg, who, composed.text, images, composed.spoken, atBot(botNames, msg, rawText));
   });
 
   // 文件 / 视频 (企微只在单聊里推): 落进 inbox, 以一行 `[文件: 路径 (大小)]` 注入 —— 不走剪贴板,
@@ -1367,7 +1379,7 @@ export const installInboundRouter = (
       const got = await downloadToInbox({ client, log, inboxDir }, url, aeskey, msg.msgid, 0);
       // 丢了也照样告诉 agent (同 mixed): 那条流留给 bridge 回这一轮。
       const line = got ? attachmentLine(kind, got.path, got.bytes) : `[对方发来一个${kind === "file" ? "文件" : "视频"}, 下载失败 —— 请让发送者重发]`;
-      await send(frame, msg, who, [text, line].filter(Boolean).join("\n"));
+      await send(frame, msg, who, [text, line].filter(Boolean).join("\n"), [], "", atBot(botNames, msg, ""));
     };
   client.on("message.file", onAttachment("file", (m) => (m as FileMessage).file));
   client.on("message.video", onAttachment("video", (m) => (m as VideoMessage).video));
@@ -1381,7 +1393,7 @@ export const installInboundRouter = (
     const { text, tag, who } = route(msg, heard);
     const { stop } = await gate(frame, msg, text, who, tag);
     if (stop) return;
-    await send(frame, msg, who, text ? `[语音转写] ${text}` : "[对方发来一段语音, 没有转写文本]");
+    await send(frame, msg, who, text ? `[语音转写] ${text}` : "[对方发来一段语音, 没有转写文本]", [], "", atBot(botNames, msg, heard));
   });
 
   // template_card_event is handled in approval module; no listener here.
