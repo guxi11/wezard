@@ -10,8 +10,8 @@ import pino from "pino";
 import { bindWizardStore, loadWizardStore } from "../daemon/wizard.js";
 import { openRoomStore } from "../daemon/rooms.js";
 import { createRoomHub } from "../daemon/room-hub.js";
-import { isBoundRoom, mirrors, openDuties, roomHost, type MsgRow, type Who } from "../shared/room.js";
-import { ensureMeWizard, ensureMeRoom, meRowMirror, meRoomId, meTargetOf, ME_MARK } from "../daemon/me-room.js";
+import { isBoundRoom, mirrors, openDuties, roomHost, type Draft, type MsgRow, type RoomOp, type Who } from "../shared/room.js";
+import { ensureMeWizard, ensureMeRoom, meChannelSay, meRowMirror, meRoomId, meTargetOf, namesMe, ME_MARK } from "../daemon/me-room.js";
 import { targetChatId } from "../daemon/approval.js";
 import { uid, W } from "./room-fixture.js";
 import { ConfigSchema } from "../shared/config.js";
@@ -170,4 +170,47 @@ await handlers.get("message.text")!(msgOf(".me 还有吗"));
 assert.equal(dispatched.at(-1)!.principal, "user:tester#me", "后续 .me 仍进同一会话 (连续对话)");
 assert.equal(istore.all().filter((w) => w.kind === "me").length, 1, "不重复建记录");
 
-console.log("me-room: identity + room ledger + mirror + approval routing + inbound shunt all passed");
+// ── ⑥ 频道 / 帖子: 点名 .me 没 @ 机器人也直达 me, 发生地零行 ──────────────
+assert.equal(namesMe(".me 看一眼"), true);
+assert.equal(namesMe("这周有空看下吗 .me"), true, "句中点名也算 (频道没有开头 tag 的概念)");
+assert.equal(namesMe("\u{1F9D9}\u200D\u2642\uFE0F me 看下"), true, "🧙‍♂️ me 同一套记号");
+assert.equal(namesMe("me 看下"), false, "裸 me 不是点名");
+assert.equal(namesMe("看下 .mailer 那个"), false, "别的 .名字 不归 me");
+
+const cdir = mkdtempSync(join(tmpdir(), "me-channel-"));
+const cstore = openRoomStore(cdir);
+const cme = ensureMeWizard(store, "chatter");
+const cmeRec = store.get(cme)!;
+const coldStarts: string[] = [];
+const mhub = createRoomHub({
+  store: cstore, log, now: () => 5_000,
+  wizardOf: (u) => (u === cmeRec.uid ? { target: cme, name: cmeRec.name } : undefined),
+  nameOf: (w: Who) => (w.kind === "wizard" ? "." + (store.byUid(w.id)?.name ?? w.id) : w.id),
+  roomLabel: (r) => r, mirror: async () => true,
+  live: async () => false, idle: async () => true, interrupt: async () => {}, paste: async () => "ok",
+});
+const cdeps = {
+  store, state: (r: string) => cstore.get(r),
+  write: (r: string, ops: readonly RoomOp[]) => { mhub.write(r, ops); },
+  append: (r: string, d: Draft) => mhub.append(r, d),
+  ensureSession: (t: string) => { coldStarts.push(t); },
+};
+const chSay = (text: string, over: Record<string, unknown> = {}) =>
+  meChannelSay(cdeps, { author: "chatter", text, src: "chat:topic1", post: "p1", ...over });
+
+assert.equal(chSay("这周有空看下吗"), undefined, "没点名 .me → 不接管 (照旧落发生地 room)");
+const c1 = chSay(".me 检查下现在有多少个活跃的 room")!;
+assert.ok(c1?.ok, "点名 .me → 落行");
+assert.equal(c1!.row.room, meRoomId("chatter"), "落他的私有 me-room");
+assert.ok(c1!.row.wake.includes(cmeRec.uid!), "开 duty 唤醒 me");
+assert.equal(cstore.get("chat:topic1"), undefined, "发生地零行 (host / perceptron 看不见这句)");
+assert.deepEqual(coldStarts, [cme], "me 冷着就顺手起会话");
+assert.equal(cstore.get(meRoomId("chatter"))!.byId.get(c1!.row.id)!.src, "chat:topic1", "行上记发生地");
+// 评论 (没 @ 机器人) 一样; 走帖子源时 src 是帖子 room, post 可省。
+const c2 = chSay("这个帖子你跟进一下 \u{1F9D9}\u200D\u2642\uFE0F me", { src: "chat:opk1", post: undefined })!;
+assert.ok(c2.ok);
+assert.equal(c2.row.room, meRoomId("chatter"));
+assert.equal(openDuties(cstore.get(meRoomId("chatter"))!).length, 2, "两条人话各开一笔 host 账 (都欠 me)");
+assert.deepEqual(coldStarts, [cme, cme], "已经热了也交给调用方判 (它自己看 hasMirrorTarget)");
+
+console.log("me-room: identity + room ledger + mirror + approval routing + inbound shunt + channel shunt all passed");

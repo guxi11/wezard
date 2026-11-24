@@ -58,7 +58,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
-import { ensureMeRoom, isMeRoom, meRowMirror, meUserOf } from "./me-room.js";
+import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
@@ -2296,6 +2296,32 @@ const main = async (): Promise<void> => {
     /** 人话落 room: 频道 room / 帖子 room 都先保证存在; mention / post 原样写进行里。
      *  未绑定频道先过引导 (口径②④): 引导接一切人话, 绑定后才轮到 monitor / host。 */
     channelIngest = (e) => {
+      // 帖 / 评论带的图与文件: 与群聊一个口径 —— 图片以 `@path` 随行 (pane 里 CLI 直接 Read),
+      // 文件给一行路径; 账本行同时记 files (rolepage 显示 📎, room_read 可查)。
+      const mediaFiles = [
+        ...(e.images ?? []).map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })),
+        ...(e.files ?? []).map((f) => ({ path: f.path, kind: kindOf(f.path), name: f.name })),
+      ];
+      const text = e.text
+        + (e.images?.length ? "\n" + e.images.map((p) => "@" + p).join(" ") : "")
+        + (e.files?.length ? "\n" + e.files.map((f) => "[文件: " + f.path + "]").join("\n") : "");
+      // .me 点名 (人 2026-11-24, 与群聊里 .me 被 resolve 分流同一规矩): 没 @ 机器人也直达说话人的
+      // me —— 行只落他的私有 me-room, **发生地零行** (host / perceptron 看不见这句)。先于引导 /
+      // 绑定: 这句是点给 me 的, 不是频道的新活。me 冷着就顺手起会话 (泵贴不进没绑定的 pane)。
+      const me = meChannelSay({
+        store: wizardStore(), state: roomState, write: (room, ops) => { hub.write(room, ops); },
+        append: (room, draft) => hub.append(room, draft),
+        ensureSession: (target) => {
+          const store = wizardStore();
+          if (!store || m.hasMirrorTarget(target)) return;
+          void m.newSession(target, settleName(store, chatNameOf(cfg, target), target) || target, { silent: true })
+            .catch(() => undefined);
+        },
+      }, { author: e.author, text, files: mediaFiles, src: e.room, ...(e.post ? { post: e.post } : {}) });
+      if (me) {
+        if (!me.ok) roomLog.warn({ room: meRoomId(e.author), src: e.room, msgid: e.msgid, reason: me.reason }, "channel: .me 人话落行被拒");
+        return;
+      }
       // 绑定优先于引导: 源已绑进某个 room → 这句话落那本账 (引导只管还没归属的频道人话)。
       const bound = roomStore.roomOfSource(e.room);
       if (!bound) {
@@ -2312,15 +2338,6 @@ const main = async (): Promise<void> => {
         roomLog.warn({ room, src: e.room, msgid: e.msgid }, "channel: room 不存在, 人话没落账本 (自愈: 下一条事件重建)");
         return;
       }
-      // 帖 / 评论带的图与文件: 与群聊一个口径 —— 图片以 `@path` 随行 (pane 里 CLI 直接 Read),
-      // 文件给一行路径; 账本行同时记 files (rolepage 显示 📎, room_read 可查)。
-      const mediaFiles = [
-        ...(e.images ?? []).map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })),
-        ...(e.files ?? []).map((f) => ({ path: f.path, kind: kindOf(f.path), name: f.name })),
-      ];
-      const text = e.text
-        + (e.images?.length ? "\n" + e.images.map((p) => "@" + p).join(" ") : "")
-        + (e.files?.length ? "\n" + e.files.map((f) => "[文件: " + f.path + "]").join("\n") : "");
       const v = hub.append(room, {
         author: { kind: "human", id: e.author }, kind: "say", text, origin: "inbound",
         ...(e.post ? { post: e.post } : {}), ...(e.mention ? { mention: e.mention } : {}),

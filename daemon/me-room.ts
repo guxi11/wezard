@@ -11,8 +11,8 @@
 // 全套照常; 出站不因此走群镜像, roomMirror 的 me 分支接管 (本文件 meRowMirror)。
 // 审批卡无需改动: me 会话 target `user:<uid>#me` 在 approval targetChatId
 // 剥 #tag 后就是用户 DM chatid。
-import { DAEMON, whoKey, type MsgRow, type RoomOp, type RoomState, type Who } from "../shared/room.js";
-import { baseOfKey, keyOf, normalizeTag, tagOfKey } from "../shared/session-label.js";
+import { DAEMON, whoKey, type Draft, type FileRef, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who } from "../shared/room.js";
+import { allNames, baseOfKey, keyOf, normalizeTag, tagOfKey } from "../shared/session-label.js";
 import { roomBubble } from "./message-format.js";
 import type { WizardStore } from "./wizard.js";
 
@@ -72,6 +72,41 @@ export const ensureMeRoom = (d: MeRoomDeps, userid: string): string => {
   if (!s?.members.has(whoKey(human))) ops.push({ op: "join", at, room, who: human, ord: ord++, via: "invite", by: DAEMON });
   if (ops.length) d.write(room, ops);
   return room;
+};
+
+/** 这句里点名了 `.me` 吗 (`.me` / `🧙‍♂️ me` 与 `.名字` 同一套记号)。频道 / 帖子没有
+ *  「开头那个 tag 才是路由」的概念 —— 人话整段都在一处, 出现即点名。 */
+export const namesMe = (text: string): boolean => allNames(text).includes(ME_TAG);
+
+export interface MeChannelDeps {
+  store: WizardStore | undefined;
+  state: (room: string) => RoomState | undefined;
+  write: (room: string, ops: readonly RoomOp[]) => void;
+  append: (room: string, d: Draft) => Verdict;
+  /** me 还没起会话时起一个 (与 inbound 派发同一条路: 泵贴不进没有绑定的 pane)。 */
+  ensureSession?: (target: string) => void;
+}
+
+/** 频道 / 帖子人话点名 `.me` (人 2026-11-24): 没 @ 机器人也直达说话人的 me —— 行只落他的
+ *  私有 me-room, **发生地零行** (host / perceptron 看不见这句, 不耗发生地预算), 与群聊里
+ *  `.me` 被 resolve 分流到 me-room 是同一条规矩。返回 undefined = 这句不是点 me, 调用方照旧
+ *  落发生地 room。text / files 由调用方拼好 (与发生地那一行同一口径: 图片 `@path` 随行)。 */
+export const meChannelSay = (
+  d: MeChannelDeps,
+  e: { author: string; text: string; files?: readonly FileRef[]; src?: string; post?: string },
+): Verdict | undefined => {
+  if (!e.author || !namesMe(e.text)) return undefined;
+  const target = ensureMeWizard(d.store, e.author);
+  const uid = d.store?.get(target)?.uid;
+  if (!uid) return undefined;
+  const room = ensureMeRoom({ state: d.state, write: d.write, meUid: () => uid }, e.author);
+  const v = d.append(room, {
+    author: { kind: "human", id: meUser(e.author) }, kind: "say", text: e.text, origin: "inbound",
+    ...(e.src ? { src: e.src } : {}), ...(e.post ? { post: e.post } : {}),
+    ...(e.files?.length ? { files: [...e.files] } : {}),
+  });
+  if (v.ok && !v.duplicate) d.ensureSession?.(target);
+  return v;
 };
 
 export interface MeMirrorDeps {
