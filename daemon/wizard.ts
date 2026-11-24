@@ -206,6 +206,12 @@ export const pickName = (want: string, others: readonly string[], reserved: read
   }
 };
 
+/** 改名回包的「已被占用」提示: **落定名**与 asked 不同才说 (大小写 / 记号不敏感), "" = 不提示。
+ *  类实例的落定名必须传**类名** —— 实例名恒为 `<类名>-<序号>`, 拿它跟 asked 比永远不等,
+ *  于是每次类改名都误报「已被占用」(类撞名是 400, 本来就没有 -N 退避)。 */
+export const renameNotice = (asked: string, landed: string): string =>
+  foldName(asked) && foldName(asked) !== foldName(landed) ? `'.${asked}' 已被占用, 落定为 '.${landed}'` : "";
+
 /** 一个类的全部实例, 按序号 (同号按 target) 稳定排序 —— 与记录在盘上的顺序无关。 */
 const instancesOfRows = (rows: readonly WizardRecord[], classId: string): WizardRecord[] =>
   rows

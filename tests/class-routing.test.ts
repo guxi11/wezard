@@ -17,6 +17,7 @@ import {
   loadWizardStore,
   manifestationOf,
   openInstance,
+  renameNotice,
 } from "../daemon/wizard.js";
 import { stewardRoute } from "../daemon/steward.js";
 import { rewriteStewardBindings } from "../daemon/onboarding.js";
@@ -216,12 +217,20 @@ try {
   {
     const d = dirOf("rebind");
     const wf = join(d, "wizards.json");
-    writeFileSync(wf, rows([rec("chat:R1", { name: "alpha-1", ordinal: 1, bornAt: 1 })]));
+    writeFileSync(wf, rows([
+      rec("chat:R1", { name: "alpha-1", ordinal: 1, bornAt: 1 }),
+      rec("chat:R2#alpha-2", { identity: "chat:R1", name: "alpha-2", ordinal: 2, bornAt: 2 }),
+    ]));
     const cs = loadClassStore(join(d, "classes.json"));
     cs.create({ id: "chat:R1", bot: "", name: "alpha", role: "steward", workspace: "/tmp/r", nextOrdinal: 3 });
     const st = loadWizardStore(wf, () => undefined, cs);
     assert.equal(st.rename("chat:R1", "beta"), "beta-1", "返回的是实例名");
     assert.equal(cs.get("chat:R1")!.name, "beta", "类行是新类名");
+    assert.equal(st.get("chat:R2#alpha-2")!.name, "beta-2", "其余实例同步成 新类名-序号");
+    // 改名回包的「已被占用」按**类名**判定: 实例名 beta-1 拿去比 asked 永远不等, 会误报。
+    assert.equal(renameNotice("beta", cs.get("chat:R1")!.name), "", "全新类名 → 不提示已被占用");
+    assert.equal(renameNotice("BETA", "beta"), "", "大小写不敏感");
+    assert.match(renameNotice("gamma", cs.get("chat:R1")!.name), /已被占用/, "落定名真的不同才提示");
     const cfgFile = join(d, "config.jsonc");
     writeFileSync(cfgFile, "{}\n");
     const cfg = {

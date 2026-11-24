@@ -118,6 +118,7 @@ import {
   identityEditRefusal,
   instancesOf,
   leadSettled,
+  renameNotice,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
@@ -3055,10 +3056,12 @@ const main = async (): Promise<void> => {
       const instances = isInstance && cls ? after : [];
       // 类名 (不是实例名 X-N): 响应与 note 都按绑定/寻址用的那个名字说话。
       const className = isInstance && cls ? (wizards.classes?.get(cls.id)?.name ?? cls.name) : "";
+      // 「已被占用」按落定名判定: 类实例落定的是类名, 不是 <类名>-<序号> (后者比出来永远不等)。
+      const notice = renameNotice(asked, className || name);
       json(res, 200, {
         ok: true,
         ...me,
-        ...(asked && name.toLowerCase() !== asked.toLowerCase() ? { renamed: `'.${asked}' 已被占用, 落定为 '.${name}'` } : {}),
+        ...(notice ? { renamed: notice } : {}),
         ...(isInstance && cls
           ? {
             class: { was: cls.name, name: className, instances: instances.map((w) => w.name) },
