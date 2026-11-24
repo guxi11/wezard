@@ -137,6 +137,9 @@ export interface MsgRow extends OpBase {
   mention?: "bot";
   /** 频道 room 里这一行属于哪个帖子 (post_id; 帖子 room 还没诞生时用它表达归属)。 */
   post?: string;
+  /** 这一行从哪个副源进来 (副源 base principal); 缺省 = 主源 = room id (不落字段)。
+   *  入站落行时写死, 重放不再推断; 出站 re 到它时按它回出去 (P1 只加字段, 读写路径在 P2/P3)。 */
+  src?: string;
   /** 人话交给了本 room 的 monitor (只唤醒 monitor, 不在 host 槽位开 duty)。judge 落定, 重放照旧。 */
   monitor?: true;
   /** 带 interrupt 投递 (先 Esc 打断再投)。 */
@@ -151,7 +154,13 @@ export interface MsgRow extends OpBase {
   /** daemon 系统行的机器语义 (undelivered / left …), 用于去重, 不给模型推断。 */
   sys?: string;
 }
-export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | AssignOp | MsgRow;
+/** 把一个副源 (信息源 base principal: 群 / 频道帖子) 绑进本 room: 该源的入站落本 room,
+ *  re 到本 room 的回复按源回出去。事实只在账本里 (fold 出 bindings); room 字段必须就是承载
+ *  它的那个账本 —— boot 索引对账拿行上自称的 room 与本账本目录比对 (§3.2 对账闸)。 */
+export interface BindOp extends OpBase { op: "bind"; source: string; by: Who; why?: string }
+/** 解绑: 该源回落恒等 (自己那条 1:1 room), 不立即补开任何东西 (lazy)。 */
+export interface UnbindOp extends OpBase { op: "unbind"; source: string; by: Who; why?: string }
+export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | AssignOp | BindOp | UnbindOp | MsgRow;
 
 // ── fold ───────────────────────────────────────────────────────────────
 
@@ -207,7 +216,12 @@ export interface RoomState {
   /** 成员进出的时间线 (fold 出来, 不落第二份): 新成员入座 / 在座成员离开各一条, rolepage 画成系统通知。
    *  已在座者的再次 join (只改 via / by) 不算进出。 */
   memberLog: MemberEvent[];
+  /** 绑进本 room 的副源, key = 源 base principal。room 的归属由承载它的账本决定, 条目里不存 room。 */
+  bindings: Map<string, Binding>;
 }
+
+/** 一条绑定的审计信息 (谁在何时为什么; unbind 即删条目)。 */
+export interface Binding { at: number; by: Who; why?: string }
 
 export interface MemberEvent {
   at: number;
@@ -221,7 +235,7 @@ export interface MemberEvent {
 }
 
 export const emptyRoom = (id: string): RoomState => ({
-  id, seq: 0, nextOrd: 1, members: new Map(), msgs: [], byId: new Map(), duties: new Map(), everMembers: new Map(), memberLog: [],
+  id, seq: 0, nextOrd: 1, members: new Map(), msgs: [], byId: new Map(), duties: new Map(), everMembers: new Map(), memberLog: [], bindings: new Map(),
 });
 
 const slotOfWho = (w: Who): Slot => whoKey(w);
@@ -288,6 +302,9 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
       if (m) m.watch = op.on;
       break;
     }
+    // bind 设 / 覆盖条目, unbind 删条目 —— 判定在 append 时已算死, 重放只照抄。
+    case "bind": s.bindings.set(op.source, { at: op.at, by: op.by, ...(op.why ? { why: op.why } : {}) }); break;
+    case "unbind": s.bindings.delete(op.source); break;
     case "move": {
       const from = s.duties.get(dutyKey(op.duty, slotOfWho(op.from))) ?? s.duties.get(dutyKey(op.duty, HOST_SLOT));
       if (!from || from.closed) break;

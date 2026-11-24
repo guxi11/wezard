@@ -4,10 +4,21 @@
 // 状态是 shared/room.ts 的 fold, 在内存里随 append 增量推进; registry 不落盘, 由目录现扫。
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { applyOp, emptyRoom, parseMsgId, roomHash, type OpenOp, type RoomOp, type RoomState } from "../shared/room.js";
+import { applyOp, emptyRoom, parseMsgId, roomHash, type Binding, type BindOp, type OpenOp, type RoomOp, type RoomState, type UnbindOp } from "../shared/room.js";
 
 export class RoomBroken extends Error {
   constructor(readonly room: string, reason: string) { super("room " + room + " 账本损坏: " + reason); }
+}
+
+const isBindOp = (o: RoomOp): o is BindOp | UnbindOp => o.op === "bind" || o.op === "unbind";
+
+/** 内存索引里的一条: 绑定 + 承载它的 room。 */
+export interface SourceBinding extends Binding { room: string }
+/** boot 对账闸 (「内存态 = 盘上重放」): ok=false 时拒绝 bind/unbind 写, 路由与读侧回落恒等。 */
+export interface BindingGate { ok: boolean; reason?: string }
+/** 闸关着时的绑定写被拒 (P3 的路由据此回 503)。 */
+export class BindGateClosed extends Error {
+  constructor(reason: string) { super("bind 索引对账失败, 拒绝绑定写: " + reason); }
 }
 
 export interface RoomStore {
@@ -18,6 +29,13 @@ export interface RoomStore {
   /** 同步落盘 (fsync) 后推进内存状态。 */
   append: (id: string, ops: readonly RoomOp[]) => RoomState;
   ids: () => string[];
+  /** 副源 → 承载它的 room (boot 从全部账本折出, 纯缓存可重建)。未绑定 / 闸关 = undefined ——
+   *  调用方一律回落恒等 (源自己那条 room), 与存量行为逐字节相同。 */
+  roomOfSource: (source: string) => string | undefined;
+  /** 当前索引快照 (诊断 / 测试)。 */
+  bindings: () => ReadonlyMap<string, SourceBinding>;
+  /** boot 对账闸的判定 (只读)。 */
+  bindingGate: () => BindingGate;
   roomOfMsg: (msgId: string) => string | undefined;
   /** 每个 room 的文件路径 (迁移脚本 / 测试)。 */
   fileOf: (id: string) => string;
@@ -49,6 +67,48 @@ export const openRoomStore = (dir: string): RoomStore => {
   const fileOf = (id: string): string => roomFile(dir, id);
   const ids = (): string[] => readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => decodeURIComponent(f.slice(0, -6)));
   for (const id of ids()) byHash.set(roomHash(id), id);
+
+  // ── boot 绑定索引 + 对账闸 (§3.2) ────────────────────────────────────
+  // 同一批账本走两路推导, 必须逐笔对上: ① 行上自称的容器 (op.room) 按目录序应用成索引;
+  // ② 每个账本自己 fold 出的 bindings (容器 = 文件名)。差一笔 = 内存态 ≠ 盘上重放
+  // (行写错了 room / 同一源绑进两个 room / 账本读不出来) → fail-closed: 拒绝后续 bind/unbind
+  // 写, 路由与读侧回落恒等, 主流程照常。
+  const buildBindingIndex = (): { index: Map<string, SourceBinding>; gate: BindingGate } => {
+    const index = new Map<string, SourceBinding>();
+    const problems: string[] = [];
+    let folded = 0;
+    for (const id of ids().sort()) {
+      let ops: RoomOp[];
+      try {
+        ops = parseJournal(id, readFileSync(fileOf(id), "utf8"));
+      } catch (e) {
+        problems.push("账本读不出 (" + id + "): " + (e instanceof Error ? e.message : String(e)));
+        continue;
+      }
+      for (const op of ops) {
+        if (!isBindOp(op)) continue;
+        if (op.room !== id) { problems.push(op.op + " 行声称 " + op.room + ", 却在 " + id + " 的账本里"); continue; }
+        if (op.op === "unbind") { if (index.get(op.source)?.room === id) index.delete(op.source); continue; }
+        const prev = index.get(op.source);
+        if (prev?.room && prev.room !== id) problems.push("源 " + op.source + " 同时绑在 " + prev.room + " 与 " + id);
+        index.set(op.source, { room: id, at: op.at, by: op.by, ...(op.why ? { why: op.why } : {}) });
+      }
+      const st = ops.reduce(applyOp, emptyRoom(id));
+      folded += st.bindings.size;
+      for (const source of st.bindings.keys()) {
+        const hit = index.get(source);
+        if (hit?.room !== id) problems.push("源 " + source + " 在 " + id + " 的 fold 里有, 索引说 " + (hit?.room ?? "没有"));
+      }
+    }
+    if (folded !== index.size) problems.push("绑定总数对不上: fold " + folded + " 笔 / 索引 " + index.size + " 笔");
+    return problems.length
+      ? { index, gate: { ok: false, reason: problems.slice(0, 5).join("; ") } }
+      : { index, gate: { ok: true } };
+  };
+  const built = buildBindingIndex();
+  const bindIndex = built.index;
+  const gate = built.gate;
+  if (!gate.ok) console.warn("[rooms] 绑定索引对账失败, 拒绝 bind/unbind 写 (路由回落恒等): " + gate.reason);
 
   const load = (id: string): RoomState | undefined => {
     const hit = cache.get(id);
@@ -90,8 +150,13 @@ export const openRoomStore = (dir: string): RoomStore => {
     const st = load(id) ?? emptyRoom(id);
     if (!ops.length) return st;
     if (ops.some((o) => o.room !== id)) throw new Error("append: op.room ≠ " + id);
+    if (!gate.ok && ops.some(isBindOp)) throw new BindGateClosed(gate.reason ?? "");
     write(id, ops);
     ops.forEach((o) => applyOp(st, o));
+    for (const o of ops) {
+      if (o.op === "bind") bindIndex.set(o.source, { room: id, at: o.at, by: o.by, ...(o.why ? { why: o.why } : {}) });
+      else if (o.op === "unbind") { if (bindIndex.get(o.source)?.room === id) bindIndex.delete(o.source); }
+    }
     cache.set(id, st);
     byHash.set(roomHash(id), id);
     return st;
@@ -102,6 +167,9 @@ export const openRoomStore = (dir: string): RoomStore => {
     ensure: (id, open) => load(id) ?? append(id, [{ op: "open", room: id, ...open }]),
     append,
     ids,
+    roomOfSource: (source) => (gate.ok ? bindIndex.get(source)?.room : undefined),
+    bindings: () => bindIndex,
+    bindingGate: () => gate,
     roomOfMsg: (msgId) => {
       const p = parseMsgId(msgId);
       return p ? byHash.get(p.hash) : undefined;
