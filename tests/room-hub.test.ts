@@ -237,6 +237,30 @@ const settle = () => hub.pump();
     "human 那条 duty 还开着 —— 提示正是给这一轮向人交代用的",
   );
 }
+// pane 不在了 (会话 / 绑定还在) → 看门狗写的 sys:"pane-revive" trigger 照样唤醒: 冷的不算忙,
+// 直接贴 (injectText 探活 gone 后 --resume 重建 pane), 手上的 duty 照常列「你要交代」且不关账。
+{
+  const roomP = "chat:wrP";
+  store.ensure(roomP, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(roomP, [{ op: "join", at: 1, room: roomP, who: { kind: "wizard", id: B }, ord: 1, via: "founder", by: DAEMON }]);
+  busy = new Set();
+  const ask = hub.append(roomP, { author: human, kind: "ask", origin: "inbound", to: [{ kind: "wizard", id: B }], text: "把日志看完" });
+  assert.ok(ask.ok);
+  await settle();
+  assert.equal(pasted.at(-1)!.target, "chat:wrG#b");
+  const msg = ask.row.id;
+  livePanes.delete("chat:wrG#b"); // pane 死了; 绑定 / 会话还在
+  hub.append(roomP, {
+    author: DAEMON, kind: "trigger", origin: "daemon", sys: "pane-revive",
+    to: [{ kind: "wizard", id: B }], re: [msg], text: "[wezard] 你的 pane 不在了 (两次扫描确认) —— 正在重建 pane (第 1 次)",
+  }, { budget: Number.MAX_SAFE_INTEGER });
+  await settle();
+  const t = pasted.at(-1)!.text;
+  assert.match(t, /正在重建 pane \(第 1 次\)/, "重建行照常投递 (没有活 pane ≠ 忙, 不等 idle)");
+  assert.match(t, /你要交代/, "手上有 duty: 注入里点明要交代的那条");
+  assert.ok(openDuties(store.get(roomP)!).some((d) => d.msg === msg), "duty 仍开着 (重建不关账)");
+  livePanes.add("chat:wrG#b");
+}
 // 重开 store (模拟 reload): 账本状态一致
 {
   const again = openRoomStore(dir);

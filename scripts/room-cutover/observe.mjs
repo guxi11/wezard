@@ -101,7 +101,8 @@ if (cmd === "log") {
     if (last && r.time - last.at <= 10_000) { last.rows.push(r); last.at = Math.max(last.at, r.time); }
     else scans.push({ at: r.time, rows: [r] });
   }
-  const sums = { holders: 0, stale: 0, suspect: 0, idleFixed: 0, ended: 0, busy: 0, cold: 0 };
+  // ended → revived: 2026-11-24 起 pane 消失是「重建 pane 叫醒」, 不再判实例结束。
+  const sums = { holders: 0, stale: 0, suspect: 0, idleFixed: 0, revived: 0, busy: 0, cold: 0 };
   let maxFailStreak = 0, summaries = 0;
   for (const s of scans) for (const r of s.rows) {
     if (r.holders !== undefined) {

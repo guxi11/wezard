@@ -109,7 +109,7 @@
 - **只要回过 progress / need**, 这一轮就算交代过了 (`dutyAnswered`): 不提醒、不告状, duty 继续开着, 之后没有任何提醒。
 - **处理人在忙**: 看门狗 (`room-watchdog.ts`, `rooms.watchdog.staleMin` 默认 5 分钟、`intervalSec` 默认 60 秒) 只把它计入日志汇总 `busyList`, 不打扰。
 - **pane 活着但闲** (漏了 turn_end): 看门狗补一次 `onIdle`, 走上面那条路 (已提醒过的不重复)。
-- **pane 没了**: 看门狗两次扫描确认后对它所在的每个 room 走 `leaveOps` —— 它名下的 duty 写 `canceled` (唤醒提问者), 再写一行 `instance-ended`。**这是唯一一种自动关账。**
+- **pane 没了**: 看门狗两次扫描确认后落一条 `sys:"pane-revive"` trigger 行把它叫醒, 泵投递时 `injectText` 探活 gone 会 `--resume` 重建 pane 再贴 (2026-11-24 人定; 此前是走 `leaveOps` 写 `canceled` + `instance-ended`, 那是当时唯一的自动关账 —— 已推翻, 见 contract §4a)。
 - **被 stop_wizard 结束 (没有会话绑定)**: 投递时 `gone` → 给提问者写 `undelivered` 系统行 (0077aef), duty 不关。
 - **冷 wizard (没有 pane 绑定)**: 看门狗只计数; 有新行要投时 hub 粘贴会重生它。
 - plan 提醒 (`plan-reminders.ts`, 30 秒一轮) 反而在 owner 还欠着该 plan 的 duty 时**不提醒** —— 它管的是 plan 没人推, 不是 duty 超时。

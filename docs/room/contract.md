@@ -174,9 +174,9 @@ export const hostOf = (members: readonly { who: Who; ord: number }[]): string | 
 - 全局看门狗一个 (rooms.watchdog.intervalSec 缺省 60 / staleMin 缺省 5): 每次一条 `tmux list-panes -a`, 只看「有未结 duty 且 staleMin 内无任何事件」的 wizard。
   - pane 活且闲 → 视为漏了 turn_end, onIdle 一次并补投。
   - **首轮只建基线**: daemon boot 后第一次扫描只记 lastEvent 与 pane 快照, 不取消、不补判闲。重启窗口不得被当成「很久没事件」。
-  - **取消是破坏性操作, 两次扫描确认**: 第一次判 pane 不存在只记「疑似」, 下一次扫描 (间隔 ≥ intervalSec) 仍不存在才执行下面的结束处理; 其间 pane 回来 / 有新事件 / pane id 变化即清疑似。tmux 调用失败或返回空表 → 本轮整体跳过, 但**计连续失败数**: 到 3 轮打一条停摆 warn (只打一次), 恢复时打一条 recovered; failStreak 与 lastScanAt 进汇总行与 /status.watchdog —— 跳过不能变成静默失效。
+  - **要动账本先两次扫描确认**: 第一次判 pane 不存在只记「疑似」, 下一次扫描 (间隔 ≥ intervalSec) 仍不存在才走下面的重建; 其间 pane 回来 / 有新事件 / pane id 变化即清疑似。tmux 调用失败或返回空表 → 本轮整体跳过, 但**计连续失败数**: 到 3 轮打一条停摆 warn (只打一次), 恢复时打一条 recovered; failStreak 与 lastScanAt 进汇总行与 /status.watchdog —— 跳过不能变成静默失效。
   - **解析输入以真机为准**: pane 列表解析的单测 fixture 是真机抓下的原始输出 (tests/fixtures/), 外加含分隔符用例; 不用手写数组 (2026-11-19 `split("\\\\n")` 误杀 bug 的根因就是自造输入)。
-  - **pane 不存在 → 按实例结束**: leaveOps 写 canceled 唤醒提问者, 并在它所在每个 room 落一行 `sys:"instance-ended"` 系统消息 (成员都看得见, 绑定 room 镜像)。**不自动重生**。理由: 自动重生会带着不确定的模型档位与上下文把别人的活接回去, 失败一次还要再兜第二层; 「实例结束了」是账本里说得清、人看得懂的事实。
+  - **pane 不存在 → 重建 pane 叫醒** (2026-11-24 人定, 推翻 11-19 的「按实例结束」): 在它欠账的每个 room 落一条 `kind:"trigger" sys:"pane-revive"` 行 (to = 它, re = 那些 duty), 唤醒泵投递时 `injectText` 探活 gone 会用 `--resume` 重生一块 pane 再把这批贴进去。**不写 canceled、不移出 room、不判实例结束** —— 绑定与转录都还在时, 重建才是唯一正确的动作 (旧理由「重生会带错档位」不成立: respawn 走 `respawnSpec`, 模型 / effort 都是绑定上记着的)。重生封顶 `REVIVE_MAX` (3) 次, 试满只留一条 warn, duty 交给逾期扫描升级; 只有观察到 pane 活着才清零, 计数不随事件重置 (否则又成 reap → 重生 → 注入没落地 的死循环)。**真正没有会话绑定** (`stop_wizard end` / `/kill`) 不算这条路: 泵的 `unattachedVerdict` 判 gone → `reportGone` 写一条 system 行请人重生 / 改派, 那条也不关账。
   - **pane 忙 → 只 warn 不纠偏** (带 busyForMs + openDuties)。理由: 卡死与长活在外部不可分, 猜错就是打断正在干的活; 卡死由人 stop_wizard。
 - pane cap 清扫误杀导致的 pane 消失属于 spawn 侧问题, 单独开活, 不进看门狗。
 

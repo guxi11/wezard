@@ -2349,7 +2349,12 @@ const main = async (): Promise<void> => {
       isBusy: (target) => m.isBusy(target),
       rooms: roomStore.ids,
       stateOf: roomState,
-      write: (room, ops) => hub.write(room, ops),
+      // pane 不在了、会话绑定还在 → 落一条 trigger 行把它叫起来 (2026-11-24): 泵投递时
+      // injectText 探活 gone 会 --resume 重生 pane 再贴。不开预算、不判实例结束。
+      revive: (room, uid, duties, text) => hub.append(room, {
+        author: DAEMON, kind: "trigger", origin: "daemon", sys: "pane-revive",
+        to: [{ kind: "wizard", id: uid }], re: [...duties], text,
+      }, { budget: Number.MAX_SAFE_INTEGER }).ok,
       onIdle: (uid) => hub.onIdle(uid),
       kick: () => void hub.kick(),
       staleMs: () => (cfg.rooms?.watchdog?.staleMin ?? 5) * 60_000,

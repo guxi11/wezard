@@ -1,13 +1,14 @@
 // room 看门狗 (修复单 §1-§3): 假 tmux + 假时钟, 不起真 pane。
-// 覆盖清单 ①-⑨: 两次确认取消 / pane 回来不取消 / 首轮基线零动作 / 真机 fixture 解析 /
-// 分隔符用例 / 停摆与恢复 / 失败两轮零 warn / 一次扫描一行 / tmux 失败与冷 wizard 零结束。
+// 覆盖清单 ①-⑩: 两次确认后重建 pane 叫醒 (不关账, 封顶 REVIVE_MAX) / pane 回来不重建且计数
+// 清零 / 首轮基线零动作 / 真机 fixture 解析 / 分隔符用例 / 停摆与恢复 / 失败两轮零 warn /
+// 一次扫描一行 / 冷 wizard 不归这里 / 探活无定论不清账。
 // 解析输入一律用真机 fixture 或字节构造的字符串, 不许手写数组 (§1 C)。
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRoomStore } from "../daemon/rooms.js";
-import { createRoomWatchdog, parsePaneIds } from "../daemon/room-watchdog.js";
+import { createRoomWatchdog, parsePaneIds, REVIVE_MAX } from "../daemon/room-watchdog.js";
 import { DAEMON, openDuties, type Who } from "../shared/room.js";
 import { uid } from "./room-fixture.js";
 
@@ -60,6 +61,19 @@ const now = () => clock;
 const STALE = 5 * 60_000, INTERVAL = 60_000;
 type Wiz = Record<string, { target: string; name: string; paneId?: string }>;
 
+/** 假的 revive 口子: 照 daemon 的形状落一条 trigger 行 (kind trigger + sys pane-revive +
+ *  to = 处理人 + re = 它欠的 duty), 让断言能直接读账本。 */
+const mkRevive = (store: ReturnType<typeof openRoomStore>) =>
+  (room: string, uid: string, duties: readonly string[], text: string): boolean => {
+    const s = store.get(room);
+    if (!s || !s.members.has("wizard:" + uid) || !duties.length) return false;
+    store.append(room, [{ op: "msg", at: clock, room, id: "c0ffee00." + (s.seq + 1), seq: s.seq + 1, author: DAEMON, ord: 0, speak: "daemon",
+      kind: "trigger", sys: "pane-revive", origin: "daemon", text, to: [{ kind: "wizard", id: uid }], re: [...duties], wake: [uid] }]);
+    return true;
+  };
+const revivesIn = (store: ReturnType<typeof openRoomStore>, room: string) =>
+  store.get(room)!.msgs.filter((m) => m.sys === "pane-revive");
+
 const mkWd = (o: {
   store: ReturnType<typeof openRoomStore>;
   wiz: Wiz;
@@ -76,7 +90,7 @@ const mkWd = (o: {
     wizardOf: (u) => o.wiz[u],
     isBusy: async () => o.busy ?? false,
     rooms: o.store.ids, stateOf: (id) => o.store.get(id),
-    write: (id, ops) => { o.store.append(id, ops); },
+    revive: mkRevive(o.store),
     onIdle: o.onIdle ?? (() => {}), kick: () => {},
     staleMs: () => STALE, intervalMs: () => INTERVAL,
   });
@@ -98,7 +112,7 @@ const mkWd = (o: {
   const base = lines.filter((l) => l.fields.mod === "room-watchdog");
   assert.equal(base.length, 1, "③ 首轮恰好一行汇总");
   assert.equal(base[0]!.fields.baseline, true, "③ 汇总行标 baseline:true");
-  assert.equal(base[0]!.fields.ended, 0, "③ 首轮结束计数 = 0 (O4)");
+  assert.equal(base[0]!.fields.revived, 0, "③ 首轮结束计数 = 0 (O4)");
   console.log("首轮基线扫描日志原文:", JSON.stringify({ level: base[0]!.level, fields: base[0]!.fields, msg: base[0]!.msg }));
   // 基线后 lastEvent=now: 紧接着的一轮不到 stale 窗口, 也不动手。
   clock += 60_000;
@@ -106,7 +120,7 @@ const mkWd = (o: {
   assert.equal(idle, 0, "基线后未到 stale 窗口不动");
 }
 
-// ── ① 一次疑似不取消, 第二次 (≥ intervalSec) 才取消; 重复扫描幂等 ──
+// ── ① 一次疑似不动; 第二次 (≥ intervalSec) 才重建 pane 叫醒; duty 不关、封顶 REVIVE_MAX ──
 {
   const { store, room } = mk();
   setupDuty(store, room, W);
@@ -117,26 +131,37 @@ const mkWd = (o: {
   clock += 6 * 60_000;
   await wd.scan();            // 第一次判不存在 → 疑似
   const s1 = store.get(room)!;
-  assert.equal(openDuties(s1).length, 1, "① 一次疑似不取消");
-  assert.ok(!s1.msgs.some((m) => m.sys === "instance-ended"), "① 疑似轮不写 instance-ended");
+  assert.equal(openDuties(s1).length, 1, "① 一次疑似不动");
+  assert.equal(revivesIn(store, room).length, 0, "① 疑似轮不唤醒");
   const susp = lines.filter((l) => l.fields.mod === "room-watchdog" && l.level !== "warn");
   assert.equal(susp[susp.length - 1]!.fields.suspect, 1, "① 疑似计数进汇总行");
   clock += 30_000;
   await wd.scan();            // 距首次疑似 < intervalSec → 仍只是疑似
-  assert.equal(openDuties(store.get(room)!).length, 1, "① 间隔不到 intervalSec 不取消");
+  assert.equal(revivesIn(store, room).length, 0, "① 间隔不到 intervalSec 不唤醒");
   clock += 31_000;            // ≥ 60s
-  await wd.scan();            // 第二次确认 → 取消 + instance-ended
+  await wd.scan();            // 第二次确认 → 重建 pane 叫醒 (泵投递时 --resume 重生)
   const s2 = store.get(room)!;
-  assert.equal(openDuties(s2).length, 0, "① 第二次 (≥ intervalSec) 才取消");
-  assert.ok(s2.msgs.some((m) => m.kind === "reply" && m.status === "canceled" && (m.re ?? []).includes("a1b2c3d4.1")), "① canceled reply 落账唤醒提问者");
-  assert.equal(s2.msgs.filter((m) => m.sys === "instance-ended").length, 1, "① 恰好一行 instance-ended");
-  assert.ok(s2.msgs.some((m) => m.sys === "instance-ended" && m.text.includes("1 条未结 duty")), "① 正文计数按 room 算");
-  const warns = lines.filter((l) => l.level === "warn");
-  assert.equal(warns.length, 1, "① 结束事件保留一行 warn");
-  const before = s2.msgs.length;
+  assert.equal(openDuties(s2).length, 1, "① duty 仍然开着 (不取消)");
+  assert.ok(!s2.msgs.some((m) => m.kind === "reply" && m.status === "canceled"), "① 不写 canceled");
+  assert.ok(!s2.msgs.some((m) => m.sys === "instance-ended"), "① 不判实例结束");
+  assert.ok(s2.members.has("wizard:" + W), "① 仍是成员 (不退出 room)");
+  const rv = revivesIn(store, room);
+  assert.equal(rv.length, 1, "① 恰好一条 pane-revive");
+  assert.equal(rv[0]!.kind, "trigger", "① 是 trigger 行 (不镜像进群)");
+  assert.deepEqual(rv[0]!.re, ["a1b2c3d4.1"], "① re 指向它欠的 duty (泵据此挂「你要交代」)");
+  assert.deepEqual(rv[0]!.wake, [W], "① 唤醒它本人");
+  const last = lines.filter((l) => l.fields.mod === "room-watchdog").at(-1)!;
+  assert.equal(last.fields.revived, 1, "① 汇总行记 revived");
+  // 封顶: 一直起不来的 pane 不再每次确认都 spawn; 试满只 warn 一次, duty 照旧开着。
+  for (let i = 0; i < 8; i++) { clock += 6 * 60_000; await wd.scan(); }
+  const s3 = store.get(room)!;
+  assert.equal(revivesIn(store, room).length, REVIVE_MAX, "① 重建次数封顶 REVIVE_MAX");
+  assert.equal(openDuties(s3).length, 1, "① 试满上限也不关账");
+  assert.equal(lines.filter((l) => l.level === "warn" && l.msg.includes("试满上限")).length, 1, "① 试满只 warn 一次");
+  const before = s3.msgs.length;
   clock += 6 * 60_000;
   await wd.scan();
-  assert.equal(store.get(room)!.msgs.length, before, "① duty 已关, 重复扫描天然不再写");
+  assert.equal(store.get(room)!.msgs.length, before, "① 封顶后重复扫描不再写账");
 }
 
 // ── ② 两次之间 pane 回来 → 不取消; touch / pane id 变化 → 清疑似 ──
@@ -157,7 +182,32 @@ const mkWd = (o: {
   const s = store.get(room)!;
   assert.equal(openDuties(s).length, 1, "② pane 回来不取消");
   assert.ok(!s.msgs.some((m) => m.sys === "instance-ended"), "② 无 instance-ended");
+  assert.equal(revivesIn(store, room).length, 0, "② pane 回来不发重建");
   assert.ok(idle >= 1, "② pane 活且闲 → 补判闲 (onIdle)");
+}
+{
+  // 观察到 pane 活着 = 重建计数清零: 同一块 target 之后再死, 还能再重建 (不是一次性额度)。
+  const { store, room } = mk();
+  setupDuty(store, room, W);
+  const wiz: Wiz = { [W]: { target: "chat:wrG", name: "w", paneId: "%1" } };
+  let panes = ["%9"];
+  const { wd } = mkWd({ store, wiz, panes: () => panes });
+  await wd.scan();            // 基线
+  clock += 6 * 60_000;
+  await wd.scan();            // 疑似
+  clock += 60_000;
+  await wd.scan();            // 确认 → 重建 #1
+  assert.equal(revivesIn(store, room).length, 1, "重建 #1");
+  panes = ["%1"];             // 重建成功: pane 活着
+  clock += 60_000;
+  await wd.scan();
+  panes = ["%9"];             // 又死了
+  clock += 6 * 60_000;
+  await wd.scan();            // 重新疑似
+  clock += 60_000;
+  await wd.scan();            // 确认 → 重建 #2
+  assert.equal(revivesIn(store, room).length, 2, "观察到 pane 活着后计数清零, 还能再重建");
+  assert.equal(openDuties(store.get(room)!).length, 1, "两次重建都不关账");
 }
 {
   // touch 清疑似: 疑似之后有新事件 → 下一轮按新疑似时刻重新起算。
@@ -175,8 +225,9 @@ const mkWd = (o: {
   clock += 6 * 60_000;
   await wd.scan();            // 重新疑似 (at = clock)
   clock += 6 * 60_000;
-  await wd.scan();            // 这才够 intervalSec → 取消
-  assert.equal(openDuties(store.get(room)!).length, 0, "重新起算后第二次确认才取消");
+  await wd.scan();            // 这才够 intervalSec → 重建
+  assert.equal(revivesIn(store, room).length, 1, "重新起算后第二次确认才重建");
+  assert.equal(openDuties(store.get(room)!).length, 1, "重建后 duty 仍开着");
 }
 
 // ── ⑧ 3 个忙 wizard 一次扫描只出 1 行日志 (busyList 折进行内) ──
@@ -235,9 +286,39 @@ const mkWd = (o: {
   const s = store.get(room)!;
   assert.equal(openDuties(s).length, 1, "⑨ 冷 wizard 不算结束 (重生归 hub)");
   assert.ok(!s.msgs.some((m) => m.sys === "instance-ended"), "⑨ 零 instance-ended");
+  assert.equal(revivesIn(store, room).length, 0, "⑨ 冷 wizard 不归看门狗重建 (泵粘贴即重生)");
   const last = lines.filter((l) => l.fields.mod === "room-watchdog").at(-1)!;
   assert.equal(last.fields.cold, 1, "⑨ cold 计数进汇总行");
-  assert.equal(last.fields.ended, 0, "⑨ ended = 0");
+  assert.equal(last.fields.revived, 0, "⑨ revived = 0");
+}
+
+// ── ⑩ 探活拿不到定论 (tmux 失败 / 返回 0 个 pane) → 不清账: 不重建也不关账, 恢复后重新确认 ──
+{
+  const { store, room } = mk();
+  setupDuty(store, room, W);
+  const wiz: Wiz = { [W]: { target: "chat:wrG", name: "w", paneId: "%1" } };
+  let mode: "alive" | "missing" | "fail" | "empty" = "alive";
+  const wd = createRoomWatchdog({
+    now,
+    listPanes: async () => mode === "fail" ? { ok: false, error: "tmux boom" }
+      : mode === "empty" ? { ok: true, panes: [] }
+      : { ok: true, panes: mode === "alive" ? ["%1"] : ["%9"] },
+    wizardOf: (u) => wiz[u],
+    isBusy: async () => false,
+    rooms: store.ids, stateOf: (id) => store.get(id),
+    revive: mkRevive(store),
+    onIdle: () => {}, kick: () => {},
+    staleMs: () => STALE, intervalMs: () => INTERVAL,
+  });
+  await wd.scan();                                        // 基线
+  mode = "missing"; clock += 6 * 60_000; await wd.scan();  // 疑似
+  mode = "fail"; clock += 60_000; await wd.scan();         // tmux 失败: 整轮跳过
+  mode = "empty"; clock += 60_000; await wd.scan();        // 0 个 pane: 整轮跳过
+  assert.equal(revivesIn(store, room).length, 0, "⑩ 无定论的轮次不重建");
+  assert.equal(openDuties(store.get(room)!).length, 1, "⑩ 也不关账");
+  mode = "missing"; clock += 60_000; await wd.scan();      // 恢复后仍是那块死 pane → 重建
+  assert.equal(revivesIn(store, room).length, 1, "⑩ 恢复后按第一次疑似起算, 够间隔即重建");
+  assert.equal(openDuties(store.get(room)!).length, 1, "⑩ 重建仍不关账");
 }
 
 // ── ⑥ 连续 5 次失败只 1 条停摆 warn; 第 6 次成功 1 条 recovered 且归零 (⑨ tmux 失败零结束) ──
@@ -253,7 +334,7 @@ const mkWd = (o: {
     wizardOf: (u) => wiz[u],
     isBusy: async () => false,
     rooms: store.ids, stateOf: (id) => store.get(id),
-    write: (id, ops) => { store.append(id, ops); },
+    revive: mkRevive(store),
     onIdle: () => { throw new Error("⑥ 失败轮不该到这"); }, kick: () => {},
     staleMs: () => STALE, intervalMs: () => INTERVAL,
   });
@@ -289,7 +370,7 @@ const mkWd = (o: {
     wizardOf: (u) => wiz[u],
     isBusy: async () => false,
     rooms: store.ids, stateOf: (id) => store.get(id),
-    write: (id, ops) => { store.append(id, ops); },
+    revive: mkRevive(store),
     onIdle: () => {}, kick: () => {},
     staleMs: () => STALE, intervalMs: () => INTERVAL,
   });
@@ -339,5 +420,5 @@ const mkWd = (o: {
   assert.equal(idle, 2, "宽限一轮后才补判闲");
 }
 
-console.log("room-watchdog: parse fixture+分隔符; 基线零动作; 两次确认取消/pane 回来不取消; 停摆与恢复; 一次扫描一行; 冷 wizard 与 tmux 失败零结束");
+console.log("room-watchdog: parse fixture+分隔符; 基线零动作; 两次确认后重建 pane (duty 不关, 封顶 REVIVE_MAX)/pane 回来不重建; 停摆与恢复; 一次扫描一行; 冷 wizard 与探活无定论不清账");
 process.exit(0);

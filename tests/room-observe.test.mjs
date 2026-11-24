@@ -24,9 +24,9 @@ writeFileSync(logPath, [
   line(2, 30, "room: delivered", { mod: "room", room: "chat:wrO", msgId: "a1b2c3d4.1", target: "chat:wrO", lagMs: 340 }),
   line(3, 40, "新 warn 文案", { mod: "y" }),
   line(4, 40, "新 warn 文案", { mod: "y" }),
-  line(5, 30, "room-watchdog 扫描", { mod: "room-watchdog", baseline: true, holders: 2, stale: 0, suspect: 0, idleFixed: 0, ended: 0, busy: 0, cold: 1, failStreak: 0, lastScanAt: T0 }),
-  line(65, 30, "room-watchdog 扫描", { mod: "room-watchdog", holders: 2, stale: 1, suspect: 1, idleFixed: 1, ended: 0, busy: 1, cold: 0, failStreak: 2, lastScanAt: T0 + 65_000 }),
-  line(65.03, 40, "实例结束: pane 两轮扫描不存在", { mod: "room-watchdog", target: "chat:wrO" }),  // 同一次扫描的 warn (2s 内)
+  line(5, 30, "room-watchdog 扫描", { mod: "room-watchdog", baseline: true, holders: 2, stale: 0, suspect: 0, idleFixed: 0, revived: 0, busy: 0, cold: 1, failStreak: 0, lastScanAt: T0 }),
+  line(65, 30, "room-watchdog 扫描", { mod: "room-watchdog", holders: 2, stale: 1, suspect: 1, idleFixed: 1, revived: 1, busy: 1, cold: 0, failStreak: 2, lastScanAt: T0 + 65_000 }),
+  line(65.03, 40, "pane 两轮扫描不存在, 重建已试满上限", { mod: "room-watchdog", target: "chat:wrO" }),  // 同一次扫描的 warn (2s 内)
   "不是 JSON 的坏行",
 ].join("\n") + "\n");
 
@@ -36,7 +36,7 @@ writeFileSync(logPath, [
   assert.match(out, /info: 4/, "info 计数 (mirrored/delivered/两条 watchdog)");
   assert.match(out, /warn: 3/, "warn 计数");
   assert.match(out, /2\t\[新\] 新 warn 文案/, "新出现的 warn 文案带 [新] 与次数");
-  assert.match(out, /1\t\[新\] 实例结束/, "watchdog 的 warn 也是新文案");
+  assert.match(out, /1\t\[新\] pane 两轮扫描不存在/, "watchdog 的 warn 也是新文案");
   assert.match(out, /新出现的 warn 文案 2 条/, "只列 since 后的; 窗口外的旧文案不进聚合");
   assert.ok(!out.includes("老 warn 文案"), "since 之前的 warn 不出现在输出里 (只参与新旧对比)");
 }
@@ -58,7 +58,7 @@ writeFileSync(logPath, [
   assert.match(out, /每次扫描行数最大值: 2/, "warn 与汇总行聚成同一次扫描");
   assert.match(out, /总行数: 3/);
   assert.match(out, /"holders":4/, "两条汇总行 holders 相加");
-  assert.match(out, /"ended":0/);
+  assert.match(out, /"revived":1/, "两条汇总行的 revived 相加");
   assert.match(out, /"cold":1/);
   assert.match(out, /failStreak 最大值: 2/);
 }
