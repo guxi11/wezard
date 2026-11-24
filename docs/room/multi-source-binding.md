@@ -1,6 +1,6 @@
 # room ↔ 信息源多对一绑定 · 设计稿
 
-状态: **待拍板** (未写实现)。分支基于当前 main; 改动面见 §10。
+状态: **已拍板** (2026-11-24 人定五点, 见 §11; 未写实现)。分支 v3; 改动面见 §10。
 
 ## 0. 背景与问题
 
@@ -92,7 +92,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 - 帖子源的 `{channel, post}` 仍从 `channel-posts.json` 查 —— 绑定不改企微侧地址, 只改「话进哪个账本」。
 - 主动发往**副源** (非 re 场景): 本轮不给 say 加 source 参数 (非目标, 保持最小面); 需要时 re 那个源里的行即可。
-- 出站无额度 (出站预算已于 2026-11-20 删除); 副源多了以后一个 room 可能集中打一个源 —— 观察后再议是否加按源上限 (待拍板 §11-4)。
+- 出站无额度 (出站预算已于 2026-11-20 删除); 副源多了以后一个 room 可能集中打一个源 —— 拍板 §11-4: 不设按源上限, 不再回来。
 
 ## 5. host 判定 (绑定的决策面)
 
@@ -137,7 +137,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 ## 6. 权限与审计
 
-- `room_bind` / `room_unbind`: 目标 room 的 **host 或人** 可写; 判定 host 不是目标 room 的 host 时 (场景②) —— **待拍板 §11-3**: A. 必须先 `chat_ask` 目标 host (推荐, 与协作纪律一致) / B. 允许直接绑, daemon 写 system 行通知目标 host。
+- `room_bind` / `room_unbind`: 目标 room 的 **host 或人** 可写; 判定 host 不是目标 room 的 host 时 (场景②) —— 已拍板 §11-3=A: 必须先 `chat_ask` 目标 host。
 - 审计 = bind op 本身 (by/why 在行上); rolepage 在 room 卡片列绑定的源 (读 fold)。
 - 工具面三处联动 (docs/dev-guide.md 清单): `mcp/tools.ts` 注册 + `daemon/` 路由 + `renderCharter` 一行 (何时用 / 谁能绑 / 解绑回落)。
 
@@ -170,10 +170,10 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 `shared/room.ts` (op/fold/judge 硬门/读侧) · `daemon/rooms.ts` (索引装载) · `daemon/index.ts` (roomMirror 分流 / channelIngest / channelPostBorn 延迟+新 host 拉进频道 room / settleBoundChannel boot 补拉 / ensureBoundRoom 查索引) · `daemon/steward.ts` (stewardRoute 查索引) · `daemon/inbound.ts` (dispatch 前源解析) · `mcp/tools.ts` + `daemon/room-bind.ts` (新) · `shared/config.ts` (rooms.binding.*) · `daemon/wizard.ts` charter 行 · web/rolepage 绑定展示 · docs/dev-guide.md · CHANGELOG。
 
-## 11. 待人拍板
+## 11. 拍板结果 (2026-11-24, 经 wezardd-8)
 
-1. **绑定存储**: A 账本 op + boot 索引 (推荐, 契约同构) / B 侧表。
-2. **首触超时**: host 10 分钟不判 → 自动另起 room (推荐) —— 时长与「不判就兜底」本身是否接受。
-3. **跨 room 绑定权限**: 场景②里判定 host 绑进别人的 room: A 先 chat_ask 目标 host (推荐) / B 直接绑 + 通知。
-4. **按源限流**: 出站已无额度, 副源集中时是否要加按源上限。
-5. **解绑语义**: 帖子源解绑后帖子 room 保持「下一条消息时才诞生」(推荐) 还是立即补开。
+1. **绑定存储** = A: 账本 bind/unbind op 为唯一事实 + boot 索引。
+2. **首触超时** = 接受: host 10 分钟不判 → 自动另起 room (出口 3)。
+3. **跨 room 绑定权限** = A: 绑进别人的 room 先 chat_ask 目标 host。
+4. **出站预算** = 不设按源上限; 按(room) 的出站额度已整体删除 (a3653e2), 本设计不引入任何出站预算。
+5. **解绑语义** = lazy: 帖子源解绑后帖子 room 等下一条消息再诞生, 不立即补开。
