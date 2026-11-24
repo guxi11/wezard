@@ -1,5 +1,6 @@
 import type { ClearAttempt } from "./handoff.js";
 import { envelopeFor, parseEnvelope, renderTail } from "../shared/reminder.js";
+import { isCliRetryNotice, isCliStateReceipt } from "../shared/cli-local-status.js";
 import { turnOpening } from "./turn-opening.js";
 import { charterInContext, charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
@@ -179,9 +180,8 @@ const findJsonlBySid = (sid: string, only?: CliBackend): string | undefined => {
 const normalizeForPath = (path: string, raw: unknown): TranscriptLine | null =>
   backendForPath(path).normalizeTranscriptLine(raw) as TranscriptLine | null;
 
-// /model、/effort 的本地回执 (spawn 兜底路径 / set_model 敲出来的) 是守护进程自己的
-// 操作痕迹, 不是聊天内容 —— 不镜像、不进详情页。
-const MODEL_RECEIPT_RE = /^(?:Set model to|Kept model as|Set effort level to|Kept effort|Switch model)\b/;
+// /model、/effort、/login 的本地回执是 CLI 自己的操作痕迹, 不是聊天内容 —— 不镜像、
+// 不进详情页。原文按后端/版本变 (见 shared/cli-local-status.ts), 判据在那里一处维护。
 
 // Local-command noise on user lines: Claude marks the caveat / command-stdout
 // records isMeta; codebuddy persists them as PLAIN user messages (no isMeta
@@ -720,7 +720,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       const stdoutMatch = c.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
       if (stdoutMatch && stdoutMatch[1]) {
         const skillOutput = stdoutMatch[1].replace(/\[[0-9;]*m/g, "").trim();
-        if (MODEL_RECEIPT_RE.test(skillOutput)) return out;
+        if (isCliStateReceipt(skillOutput)) return out;
         if (skillOutput) {
           out.push({ kind: "skill_output", body: `⚙️ ${skillOutput}` });
         }
@@ -848,7 +848,8 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       if (b?.type === "text" && typeof b.text === "string") {
         flushPending();
         const t = b.text.trim();
-        if (t && !deps.isOwnAssistantSend?.(t)) out.push({ kind: "text", body: t, final: textFinal });
+        // CLI 自己的自动重试提示不是模型发言: 重试成功时它是噪声, 失败时 CLI 会再写一句真失败。
+        if (t && !isCliRetryNotice(t) && !deps.isOwnAssistantSend?.(t)) out.push({ kind: "text", body: t, final: textFinal });
       } else if (b?.type === "tool_use" && deps.includeTools) {
         const name = b.name ?? "tool";
         const toolUseId = b.id ?? "";
@@ -934,6 +935,8 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
     const stdout = line.content.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)?.[1] ?? "";
     if (!stdout.trim()) return []; // pure invocation record or empty stdout
     const cleaned = stripAnsi(stdout);
+    // 同一种回执也走这条记录 (别的 CLI 版本把 /model 落在 system/local_command 下)。
+    if (isCliStateReceipt(cleaned)) return [];
     const anchored = anchorSkillOutput(cleaned);
     if (!anchored) return [];
     // Fenced code block so WeCom renders the aligned /context panel monospaced
@@ -8607,8 +8610,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Confirm the /model picker. Early Enter (before the picker renders)
         // would leave it unconfirmed, so settle first; a late Enter is a
         // harmless no-op in the empty input box. On confirm, claude writes
-        // "Set model to …" as <local-command-stdout> — the tail mirrors that
-        // back to the chat as a ⚙️ bubble, which IS the readback.
+        // "Set model to …" as <local-command-stdout> — that receipt is CLI-local
+        // state and stays out of the chat (shared/cli-local-status.ts); the caller
+        // reads it off the pane through model-select, not from WeCom.
         if (isModelSwitch && a.tmuxPane) {
           await sleep(1000);
           const e = await runTmux(["send-keys", "-t", a.tmuxPane, "Enter"]);
