@@ -389,8 +389,10 @@ export const hasMonitor = (s: RoomState): boolean =>
 /** 感知候选: 本 room 的 wizard 成员里, 除 perceptron 自己之外的每一个 —— 判决只对这些人的职责做分析。 */
 export const perceptronCandidates = (s: RoomState): Who[] =>
   [...s.members.values()].filter((m) => m.who.kind === "wizard" && m.role !== "monitor").map((m) => m.who);
-/** 感知门控 (2026-11-24 人定): 候选 ≥2 才需要感知 —— 只剩 host 一个时未点名人话没有歧义, 照旧落 host。 */
-export const perceptronWanted = (s: RoomState): boolean => perceptronCandidates(s).length >= 2;
+/** 感知门控 (2026-11-24 人二次拍板 9e7dbc47.9): 存在 wizard 成员 (不含 perceptron 自己) 就需要感知 ——
+ *  含单管家 room / 频道: 它也要感知「没点名给它的消息是否需要它回应」, 不再回落 host 兜底。
+ *  单聊 / .me / 引导中的 room 由 daemon 侧不建 perceptron (那几类人话有明确去处)。 */
+export const perceptronWanted = (s: RoomState): boolean => perceptronCandidates(s).length >= 1;
 
 /** 起名 / 改名只有当前 host 能做 (人也不行 —— 人的意见走人话)。 */
 export const canRename = (s: RoomState, who: Who): boolean => sameWho(roomHost(s), who);
@@ -769,8 +771,9 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   if (dup && d.origin !== "inbound") return { ok: true, row: dup, duplicate: true, degraded: [] };
 
   // ⑧ 唤醒 + 回合预算
-  // 绑定 room 里没点名、也没 @ 机器人的人话: 有 perceptron 且存在需要感知的候选 (≥2, 2026-11-24 人定) 时
-  // 交给它处置 (只唤醒它, 不在 host 槽位开 duty); 否则照旧落 host。迁移重放的行不进感知。
+  // 绑定 room 里没点名、也没 @ 机器人的人话: 有 perceptron 且存在候选 (≥1, 2026-11-24 人二次拍板:
+  // 单管家也要感知) 时交给它处置 (只唤醒它, 不在 host 槽位开 duty, 不回落 host); 否则照旧落 host
+  // (没有 perceptron 的 room: 单聊 / .me / 引导中)。迁移重放的行不进感知。
   const toMonitor = isHuman && d.kind === "say" && isBoundRoom(s.id) && d.mention !== "bot"
     && d.origin !== "migrate" && !to.some((t) => t.kind === "wizard") && hasMonitor(s) && perceptronWanted(s);
   const seq = s.seq + 1;

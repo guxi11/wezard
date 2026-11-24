@@ -2222,8 +2222,8 @@ const main = async (): Promise<void> => {
       return room;
     };
     // ── 频道 / 帖子 room 与 monitor (§2.2 / §2.3) ───────────────────────
-    /** 一个 room 一个 perceptron (原 monitor, 2026-11-24 人定): 门控 = 存在需要感知的未点名
-     *  wizard 成员 (候选 ≥2, perceptronCandidates)。**不预起 pane** —— 只建身份 + 入座, 首次唤醒由
+    /** 一个 room 一个 perceptron (原 monitor, 2026-11-24 人定): 门控 = 存在 wizard 成员 (含单管家,
+     *  人二次拍板 9e7dbc47.9)。**不预起 pane** —— 只建身份 + 入座, 首次唤醒由
      *  泵冷启动 (档位走 steward-model 的 monitor 规则, 不落 CLI 默认), 闲时 pane 可被资源回收。 */
     /** 一个 room 自己的管家实例 (人 2026-11-23: 不同的 room 要用不同的实例): 频道绑的那个身份在
      *  **这个 room** 的化身 —— 没有就领号新开 (类) / 另落一条同身份记录。绝不把别的 room 的实例
@@ -2241,8 +2241,15 @@ const main = async (): Promise<void> => {
       const st0 = roomState(room);
       if (!st0) return;
       if (hasMonitor(st0)) return;
-      // 门控 (2026-11-24 人定): 有需要感知的未点名 wizard 成员才建; 只剩 host 一个时未点名人话没有歧义。
-      if (perceptronCandidates(st0).length < 2) return;
+      // 门控 (2026-11-24 人二次拍板 9e7dbc47.9): 只要存在 wizard 成员 (含单管家 room / 频道) 就感知 ——
+      // 独狼管家也要感知「没点名给它的消息是否需要它回应」, 不再按成员数、不回落 host 兜底。
+      // 例外: 单聊 (人私聊 = 直接说给全局管家) / .me 独立对话 / 引导中的群与频道 (人话要落引导化身,
+      // perceptron 会把它抢走)。
+      if (room.startsWith("user:") || room.startsWith("me:")) return;
+      if (needsOnboarding(cfg, wizardStore(), room)) return;
+      const channelRoom = channelRoomOf(cfg, room);
+      if (channelRoom && !channelMonitorWanted(cfg, wizardStore(), channelRoom)) return;
+      if (!perceptronCandidates(st0).length) return;
       const target = keyOf(baseOfKey(room), "monitor");
       const rec = wizards.get(target);
       wizards.upsert(target, {

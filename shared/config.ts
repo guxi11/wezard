@@ -142,8 +142,8 @@ const Mirror = z.object({
 
 const Channel = z.object({
   // room 感知器 perceptron (2026-11-24 起, 键名沿用 channel.monitor; 概念上取代原 monitor):
-  // 门控 = room 里存在需要感知的未点名 wizard 成员 (候选 ≥2) 才建 —— 频道 / 帖子 / 群一视同仁。
-  // 人话落进 room 只唤醒它, 由它给一份应回应名单 (perceive op, 空判决不落记录)。
+  // 门控 = room 里存在 wizard 成员 (含单管家, 人二次拍板 9e7dbc47.9) 即建 —— 频道 / 帖子 / 群一致,
+  // 单聊与 .me 除外。人话落进 room 只唤醒它, 由它给一份应回应名单 (perceive op, 空判决不落记录)。
   monitor: z.object({
     enabled: z.boolean().default(true).describe("为需要感知的 room 自动建一个 perceptron (没点名的人话由它判该谁回应)"),
     tier: z.string().default("light").describe("perceptron 使用的模型档位 (读账本 + 一次判断, 轻档够)"),

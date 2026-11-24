@@ -1,8 +1,8 @@
 # 频道 / 帖子 room 与 monitor —— 定稿 (2026-11-23)
 
-> **修订 (2026-11-24, monitor → perceptron, 人拍板 9e7dbc47.4 / 090407fa.3)**:
+> **修订 (2026-11-24, monitor → perceptron, 人拍板 9e7dbc47.4 / 090407fa.3; 门控二次纠正 9e7dbc47.9)**:
 > ① 判决输出**名单** (多目标) + `reason`, 落一条 `perceive` op (`{duty, to[], asker, by, why?}`) —— 仍不写消息行, 名单逐个开 duty, fold 记 verdict 供 rolepage (人话行挂「感知 → .A, .B · 理由」chip); **空判决不落任何记录**。
-> ② **门控替换 §2.2 的「频道落定即建」**: 是否建 / 是否接管 = 该 room 是否存在需要感知的未点名 wizard 成员 (非 perceptron wizard 成员 ≥2, `perceptronWanted`), 频道 / 帖子 / **群**一视同仁; 单管家 room 未点名人话照旧落 host。judge 的 `toMonitor` 另加 `origin!=="migrate"`。
+> ② **门控替换 §2.2 的「频道落定即建」, 且不按成员数 (人二次拍板: channel 里只有一个 wizard 也需要感知)**: 是否建 / 是否接管 = 该 room 是否存在 wizard 成员 (含单管家 room / 频道), 频道 / 帖子 / **群**一视同仁, **不回落 host 兜底**; 例外: 单聊 (人私聊 = 直接说给全局管家) / `.me` 独立对话 / 引导中的群与频道 (`needsOnboarding` / `channelMonitorWanted` 守卫) —— 这几类照旧落 host。judge 的 `toMonitor` 另加 `origin!=="migrate"`。
 > ③ **懒建不预起 pane**: 建 perceptron 的唯一入口是 room-hub append 钩子 (第一条需要感知的人话触发), 只建身份 + join; 首次唤醒由泵冷启动 (档位由 steward-model 强制), 闲时可被 pane 资源回收。原 ensureMonitor 的预建调用点 (boot / 频道落定 / 换绑 / steward 自愈) 全部删除。
 > ④ 宪章 / 工具描述改写: 候选 = 本 room wizard 成员减自己, 逐个**结合其职责**判断, 名单「少而准」; 概念面改叫 perceptron (账本 role 值与 WizardKind 沿用 "monitor", 旧 assign op / activate trigger 行重放兼容)。
 

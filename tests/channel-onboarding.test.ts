@@ -72,12 +72,12 @@ const S = W(uid(5));   // 管家
   assert.deepEqual(channelGuideJoinOps(s, "chat:topicU", G, 2_000), []);
 
   // 旧版本给未绑定频道建过 monitor: 引导接手前先请它退场, 否则人话只听它的。
-  // 2026-11-24 门控: 感知器要候选 ≥2 才接管 —— 房里得有第二个成员, 「抢唤醒」才成立。
-  const stale = mkRoom("chat:topicU2", [G, S]);
+  // (2026-11-24 门控: 有 wizard 成员即接管 —— 引导化身在场也一样会被抢走。)
+  const stale = mkRoom("chat:topicU2", [G]);
   applyOp(stale, { op: "join", at: 1_500, room: stale.id, who: M, ord: stale.nextOrd, via: "invite", by: DAEMON, role: "monitor" });
   assert.deepEqual(say(stale, { author: H("u1"), text: "抢一句", origin: "inbound" }).wake, [M.id], "monitor 在场时人话先被它抢走");
   for (const op of channelMonitorLeaveOps(stale, 3_000)) applyOp(stale, op);
-  assert.equal(stale.members.size, 2, "monitor 已退场");
+  assert.equal(stale.members.size, 1, "monitor 已退场");
   assert.equal(roomHost(stale), G);
   assert.deepEqual(say(stale, { author: H("u2"), text: "再来", origin: "inbound" }).wake, [G.id], "引导接回人话");
 }
@@ -102,17 +102,11 @@ const S = W(uid(5));   // 管家
   for (const op of hostJoinOps(s, S, 2_100)) applyOp(s, op);
   applyOp(s, { op: "join", at: 2_200, room: s.id, who: M, ord: s.nextOrd, via: "invite", by: DAEMON, role: "monitor" });
   assert.equal(roomHost(s), S, "管家当 host (monitor 不抢)");
-  // 2026-11-24 门控: 只有管家一个 wizard 时未点名人话不进感知, 照旧落 host。
+  // 2026-11-24 门控 (人二次拍板): 单管家频道也进感知 —— 未点名人话交给 perceptron, 不回落 host。
   const row = say(s, { author: H("u1"), text: "看这个", origin: "inbound" });
-  assert.deepEqual(row.wake, [S.id], "单管家: 照旧唤醒 host");
-  assert.equal(row.monitor, undefined);
-  assert.deepEqual(openDuties(s).map((d) => d.slot), ["host"]);
-  // 候选 ≥2 (第二个成员入座) 才交给 perceptron。
-  applyOp(s, { op: "join", at: 2_300, room: s.id, who: W(uid(3)), ord: s.nextOrd, via: "invite", by: DAEMON });
-  const row2 = say(s, { author: H("u1"), text: "再看这个", origin: "inbound" });
-  assert.deepEqual(row2.wake, [M.id], "候选 ≥2: 只唤醒 perceptron");
-  assert.equal(row2.monitor, true);
-  assert.deepEqual(openDuties(s).filter((d) => d.msg === row2.id), [], "判定前不在 host 槽位开 duty");
+  assert.deepEqual(row.wake, [M.id], "单管家: 未点名人话只唤醒 perceptron");
+  assert.equal(row.monitor, true);
+  assert.deepEqual(openDuties(s), [], "判定前不在 host 槽位开 duty");
 }
 
 // ── ③ 已绑定的频道: 频道 room 建出来就是管家 founder + monitor, 没有引导 ──

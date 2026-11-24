@@ -33,14 +33,15 @@ const withMonitor = () => {
   assert.equal(roomHost(s), A);
 }
 
-// ②b 门控 (2026-11-24 人定): 候选 <2 (只剩 host 一个 wizard) 时即使有 perceptron 也不归它 —— 照旧落 host。
+// ②b 门控 (2026-11-24 人二次拍板 9e7dbc47.9): 单管家 room 也要感知 —— 未点名人话交给 perceptron,
+// 不开 duty、不回落 host 兜底 (它自己去判该不该由管家回应)。
 {
   const s = mkRoom("chat:wrG", [A]);
   applyOp(s, { op: "join", at: 2_000, room: s.id, who: M, ord: s.nextOrd, via: "invite", by: A, role: "monitor" });
   const row = say(s, { author: H1, kind: "say", text: "在吗" });
-  assert.equal(row.monitor, undefined, "候选不足: 不进感知");
-  assert.deepEqual(row.wake, [A.id], "照旧唤醒 host");
-  assert.deepEqual(openDuties(s).map((d) => d.slot), ["host"], "照旧开 host 槽位 duty");
+  assert.equal(row.monitor, true, "单管家也进感知");
+  assert.deepEqual(row.wake, [M.id], "只唤醒 perceptron, 不回落 host");
+  assert.deepEqual(openDuties(s), [], "不在 host 槽位开 duty");
 }
 
 // ②c 迁移重放的人话不进感知 (origin migrate) —— 迁移行本就不开任何 duty (dutiesOpenedBy 同判)

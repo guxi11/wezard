@@ -55,7 +55,8 @@ export interface HubPorts {
   replyHintWindow?: () => number;
   /** 感知门控的懒建钩子 (2026-11-24): 人话 say 落绑定 room、未点名、未 @bot、本 room 还没有
    *  perceptron 时, append 在进 judge **之前**回调它 (它写 join op 使 hasMonitor 成立),
-   *  judge 的 toMonitor 据此把这一行交给 perceptron。门控在 index.ts (候选 ≥2 才建)。 */
+   *  judge 的 toMonitor 据此把这一行交给 perceptron。门控在 index.ts (有 wizard 成员即建,
+   *  单聊 / .me / 引导中不建)。 */
   ensurePerceptron?: (room: string) => void;
 }
 
