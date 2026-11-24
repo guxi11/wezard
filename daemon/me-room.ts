@@ -2,7 +2,7 @@
 // 每个用户一个 me wizard (注册表普通记录, kind "me", 以自己名义) + 一个私有 me-room
 // (id `me:<userid>`)。用户在任何地方说 `.me …` 都路由到他自己的 me —— 行只落
 // me-room, 发生地 room 零行 (不开、不唤醒 monitor/host、不耗发生地预算);
-// me 的回复按发生地 frame 覆盖占位气泡回发 (带独立对话标注); 发生地是频道 / 帖子
+// me 的回复按发生地 frame 覆盖占位气泡回发 (正文末尾带独立对话标注); 发生地是频道 / 帖子
 // (那行带 src) 就评论回原帖, 被拒回退新帖 (人 2026-11-24 拍板); 其余 (群聊 / 主动开口)
 // 落用户私聊。me 不进已有 room (wiring B 的 auto-join 对 me 分流到 me-room),
 // 找 host / 其他 wizard 走 chat_ask 自动落的 dm/adhoc —— 与普通 wizard 一致。
@@ -20,8 +20,8 @@ import type { WizardStore } from "./wizard.js";
 
 /** 保留别名: `.me` / `🧙‍♂️ me` 路由到说话人自己的分身 (inbound resolve 分流)。 */
 export const ME_TAG = "me";
-/** me 回复的固定标注: 让人一眼看出这是独立在外的 .me 对话、不进本群记录。 */
-export const ME_MARK = "〔.me 独立对话 · 不入本群记录〕";
+/** me 回复的末尾固定标注: 让人一眼看出这是独立在外的 .me 对话、不进本群记录。 */
+export const ME_MARK = "独立对话 · 不入本群记录";
 
 /** userid 归一到 id 字符集 (WeCom userid 本就 [A-Za-z0-9_-], 实际恒等)。 */
 const meUser = (userid: string): string => normalizeTag(userid);
@@ -142,7 +142,7 @@ export interface MeMirrorDeps {
 }
 
 /** me-room 出站 (roomMirror 的 me 分支): 占位气泡覆盖 > 人话发生在频道/帖子就评论回原帖
- *  (被拒回退新帖) > 文件走用户私聊 > 正文兜底私发。带 ME_MARK 标注。
+ *  (被拒回退新帖) > 文件走用户私聊 > 正文兜底私发。正文末尾带 ME_MARK 标注。
  *  空正文无文件不出站 (与 mirrors() 同口径)。 */
 export const meRowMirror = async (row: MsgRow, cover: MsgRow | undefined, d: MeMirrorDeps): Promise<boolean> => {
   const user = "user:" + meUserOf(row.room);
@@ -151,7 +151,7 @@ export const meRowMirror = async (row: MsgRow, cover: MsgRow | undefined, d: MeM
   const files = row.files ?? [];
   if (!text && !files.length) return false;
   const plain = text || (files.length ? "📎 " + files.map((f) => f.name).join(", ") : "");
-  const md = roomBubble(authorTarget, ME_MARK + "\n" + plain);
+  const md = roomBubble(authorTarget, plain + "\n\n" + ME_MARK);
   if (cover?.ext && text && await d.coverBubble(cover.ext, md)) return true;
   // 人话是在频道 / 帖子里点的名 (那行带 src): 答复评论回原帖, 被拒回退新帖 (带引用),
   // 不再发私聊 (人 2026-11-24 拍板「评论回原帖」)。私聊只留给认不出发生地的情形。
