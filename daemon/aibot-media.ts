@@ -6,7 +6,7 @@ import type { WSClient } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
 import { errText } from "./last-response.js";
-import { planMedia, type SendMedia } from "./media.js";
+import { planMedia, type MediaKind, type MediaSpec, type SendMedia } from "./media.js";
 import { connFor } from "./reach.js";
 
 // SDK 1.0.7 把每个回执的等待写死 5s (aibot-node-sdk #27), 大文件分片的回执常 6–8s 才到,
@@ -32,31 +32,42 @@ const ackState = new WeakMap<AckKnob, { n: number; orig: number }>();
 /** `chat:wr…#slot` → `wr…`: SDK 只认裸 chatid / userid。 */
 const chatIdOf = (target: string): string => baseOfKey(target).replace(/^(user|chat|group):/, "");
 
-export const aibotSendMedia = (face: WSClient, log: Logger): SendMedia => async (target, spec) => {
+/** 上传一份本地媒体, 换 media_id —— 频道帖子 / 评论的 image_list · inline_file_list 要它
+ *  (那条路不能走 sendMediaMessage: 频道没有群 chatid)。校验与 sendMedia 共用 planMedia。 */
+export const uploadMediaId = async (
+  face: WSClient, target: string, spec: MediaSpec, log: Logger,
+): Promise<{ ok: true; kind: MediaKind; name: string; bytes: number; mediaId: string } | { ok: false; reason: string }> => {
   const plan = planMedia(spec);
   if (!plan.ok) return plan;
   const chatId = chatIdOf(target);
   if (!chatId) return { ok: false, reason: `认不出收件聊天: ${target}` };
-  // 素材 id 归上传它的那个机器人: 上传走这个聊天归属的连接 (chatId 上的 `~<bot>`, 见 bot-mux),
-  // 推送交给 face —— 它按同一个后缀改道并剥掉后缀, 两步必落在同一条连接上。
   const client = connFor(face, chatId);
   if (!client.isConnected) return { ok: false, reason: "企微长连接没连上, 稍后再试" };
   const { kind, name, bytes } = plan;
-  const upload = async (): Promise<string> => {
-    const restore = widenAck(client);
-    try {
-      return (await client.uploadMedia(readFileSync(spec.path), { type: kind, filename: name })).media_id;
-    } finally {
-      restore();
-    }
-  };
+  const restore = widenAck(client);
   try {
-    const video = kind === "video" ? { title: spec.title, description: spec.description } : undefined;
-    await face.sendMediaMessage(chatId, kind, await upload(), video);
-    log.info({ chatId, kind, name, bytes }, "tx media");
-    return { ok: true, kind, name, bytes };
+    const mediaId = (await client.uploadMedia(readFileSync(spec.path), { type: kind, filename: name })).media_id;
+    log.info({ chatId, kind, name, bytes }, "tx media (upload)");
+    return { ok: true, kind, name, bytes, mediaId };
   } catch (e) {
-    log.warn({ chatId, kind, name, bytes, err: errText(e) }, "tx media failed");
-    return { ok: false, reason: `企微拒收 (${kind} ${name}): ${errText(e)}` };
+    log.warn({ chatId, kind, name, bytes, err: errText(e) }, "tx media upload failed");
+    return { ok: false, reason: `企微拒收上传 (${name}): ${errText(e)}` };
+  } finally {
+    restore();
+  }
+};
+
+export const aibotSendMedia = (face: WSClient, log: Logger): SendMedia => async (target, spec) => {
+  const up = await uploadMediaId(face, target, spec, log);
+  if (!up.ok) return up;
+  const chatId = chatIdOf(target);
+  const video = up.kind === "video" ? { title: spec.title, description: spec.description } : undefined;
+  try {
+    await face.sendMediaMessage(chatId, up.kind, up.mediaId, video);
+    log.info({ chatId, kind: up.kind, name: up.name, bytes: up.bytes }, "tx media");
+    return { ok: true, kind: up.kind, name: up.name, bytes: up.bytes };
+  } catch (e) {
+    log.warn({ chatId, kind: up.kind, name: up.name, bytes: up.bytes, err: errText(e) }, "tx media failed");
+    return { ok: false, reason: `企微拒收 (${up.kind} ${up.name}): ${errText(e)}` };
   }
 };

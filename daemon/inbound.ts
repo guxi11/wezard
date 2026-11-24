@@ -1,6 +1,6 @@
 // Inbound text router. Hands the message off to the mirror bridge.
 import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, FileMessage, VideoMessage, VoiceMessage, BaseMessage, QuoteContent } from "@wecom/aibot-node-sdk";
-import { attachmentLine, inboxName, saveToInbox } from "./media.js";
+import { attachmentLine, inboxName, saveToInbox, sniffExt } from "./media.js";
 import type { Logger } from "pino";
 import { PRIMARY_BOT, type Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
@@ -560,18 +560,6 @@ const isAllowed = (allow: readonly string[], principals: string[]): boolean => {
 // target can post back without being in `allowFrom`. A session bound to that
 // chat is the authorization signal.
 const isMirrorTarget = (bridge: MirrorBridge, who: string): boolean => bridge.hasMirrorTarget(who);
-
-// Sniff extension from magic bytes; falls back to .bin. WeCom doesn't always
-// give us a filename for images, and we want claude's Read tool to recognize
-// the file (it dispatches on extension).
-const sniffExt = (buf: Buffer): string => {
-  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return ".png";
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return ".jpg";
-  if (buf.length >= 6 && buf.subarray(0, 6).toString("ascii").startsWith("GIF8")) return ".gif";
-  if (buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") return ".webp";
-  if (buf.length >= 12 && buf.subarray(4, 12).toString("ascii") === "ftypheic") return ".heic";
-  return ".bin";
-};
 
 interface DownloadDeps {
   client: WSClient;

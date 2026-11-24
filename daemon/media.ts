@@ -86,6 +86,16 @@ export const inboxName = (msgid: string, index: number, filename: string): strin
   return `${safe(msgid) || "msg"}_${index}_${safe(filename) || "file"}`;
 };
 
+/** 按魔数补扩展名; 认不出 = .bin。企微不总给文件名, agent 靠扩展名认类型 (Read 按它分派)。 */
+export const sniffExt = (buf: Buffer): string => {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return ".png";
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return ".jpg";
+  if (buf.length >= 6 && buf.subarray(0, 6).toString("ascii").startsWith("GIF8")) return ".gif";
+  if (buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") return ".webp";
+  if (buf.length >= 12 && buf.subarray(4, 12).toString("ascii") === "ftypheic") return ".heic";
+  return ".bin";
+};
+
 const sweptAt = new Map<string, number>();
 /** 删 dir 下超过 ttl 的文件; 同一目录一小时最多扫一次 (挂在每次落盘之后, 懒执行)。 */
 export const sweepInbox = (dir: string, ttl = INBOX_TTL_MS, now = Date.now()): number => {

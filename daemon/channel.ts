@@ -16,6 +16,7 @@ import type { Config } from "../shared/config.js";
 import { sleep } from "../shared/std.js";
 import { learnChannelPost, postBaseOf } from "./channel-posts.js";
 import { expandHome } from "../shared/paths.js";
+import { inboxName, saveToInbox, sniffExt } from "./media.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
 
 const TOPIC_EVENT = "aibot_topic_event_callback";
@@ -71,6 +72,94 @@ const FILE_RE = /\$\{inline_file(?::[^}]*)?\}/g;
 const cleanContent = (s: unknown): string =>
   String(s ?? "").replace(MENTION_RE, "").replace(FILE_RE, "").trim();
 const clip = (s: string, n = 300): string => (s.length > n ? s.slice(0, n) + "…" : s);
+
+// ── 帖 / 评论里的媒体 ───────────────────────────────────────────────────
+// 官方 PostInfo / ReplyInfo 的正文 (content) 只有 markdown, 图片与内嵌文件在**另一个字段**里:
+// image_list[] / inline_file_list[] ({download_url, cookie_name, cookie_value}, 1 小时有效)。
+// 2026-11-24 之前只读 content, 于是纯图片的帖 / 评论 text 为空 → 整条被丢 (人 12:30 那次的
+// 「还看不到图吗」即此); 带字带图的只留字。现在事件时刻就带着 cookie 把图拉进 inbox,
+// 行上带本地路径 —— 与群聊图片一个口径 (agent 按路径 Read)。
+type MediaRef = { url: string; cookieName?: string; cookieValue?: string };
+export interface ChannelMedia {
+  /** 已落 inbox 的本地绝对路径。 */
+  images: string[];
+  /** 内嵌文件: 本地路径 + 企微给的原文件名。 */
+  files: Array<{ path: string; name: string }>;
+}
+const NO_MEDIA: ChannelMedia = { images: [], files: [] };
+/** ChannelHuman 的媒体字段: 没有就不写 (账本行不为空字段多一截)。 */
+const mediaOf = (m: ChannelMedia): Pick<ChannelHuman, "images" | "files"> => ({
+  ...(m.images.length ? { images: m.images } : {}), ...(m.files.length ? { files: m.files } : {}),
+});
+
+/** 回包里有几份媒体 (纯读字段, 不下载) —— 日志与「空正文但有图」的判定用。 */
+export const mediaCountOf = (item: unknown): { images: number; files: number } => {
+  const it = item as { image_list?: unknown; inline_file_list?: unknown } | undefined;
+  return {
+    images: Array.isArray(it?.image_list) ? it.image_list.length : 0,
+    files: Array.isArray(it?.inline_file_list) ? it.inline_file_list.length : 0,
+  };
+};
+
+const cookieOf = (x: { cookie_name?: unknown; cookie_value?: unknown }): Pick<MediaRef, "cookieName" | "cookieValue"> =>
+  x.cookie_name && x.cookie_value ? { cookieName: String(x.cookie_name), cookieValue: String(x.cookie_value) } : {};
+
+const mediaRefsOf = (item: unknown): { images: MediaRef[]; files: Array<MediaRef & { name: string }> } => {
+  const it = item as { image_list?: any[]; inline_file_list?: any[] } | undefined;
+  const images = (Array.isArray(it?.image_list) ? it.image_list : [])
+    .filter((m) => m?.download_url)
+    .map((m) => ({ url: String(m.download_url), ...cookieOf(m) }));
+  const files = (Array.isArray(it?.inline_file_list) ? it.inline_file_list : [])
+    .filter((f) => f?.download_url)
+    .map((f) => ({ url: String(f.download_url), ...cookieOf(f), name: String(f.file_name || "file") }));
+  return { images, files };
+};
+
+/** 拉一份频道媒体: 普通 HTTPS GET + cookie (频道素材没有 aeskey, 不是长连接加密媒体,
+ *  不能走 client.downloadFile)。失败只 warn —— 一条拉不到不该把整句话吞掉。 */
+const fetchMedia = async (ref: MediaRef, log: Logger, msgid: string): Promise<Buffer | undefined> => {
+  try {
+    const res = await fetch(ref.url, {
+      headers: ref.cookieName && ref.cookieValue ? { cookie: ref.cookieName + "=" + ref.cookieValue } : {},
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) { log.warn({ msgid, status: res.status }, "channel media: http not ok"); return undefined; }
+    return Buffer.from(await res.arrayBuffer());
+  } catch (e) {
+    log.warn({ msgid, err: (e as Error).message }, "channel media: download failed");
+    return undefined;
+  }
+};
+
+const downloadMedia = async (cfg: Config, log: Logger, item: unknown, msgid: string): Promise<ChannelMedia> => {
+  const refs = mediaRefsOf(item);
+  const n = mediaCountOf(item);
+  if (!refs.images.length && !refs.files.length) {
+    // debug 口径: 回包到底带没带媒体 (字段长度), 用来在真机上确认企微真的把图放在 image_list 里。
+    if (n.images || n.files) log.warn({ msgid, ...n }, "channel media: refs unreadable (no download_url)");
+    return NO_MEDIA;
+  }
+  const dir = expandHome(cfg.wrc.mirror.inboxDir);
+  const images: string[] = [];
+  const files: Array<{ path: string; name: string }> = [];
+  let i = 0;
+  for (const ref of refs.images) {
+    const buf = await fetchMedia(ref, log, msgid);
+    if (!buf) continue;
+    const saved = saveToInbox(dir, inboxName(msgid, i++, "image" + sniffExt(buf)), buf);
+    if ("reason" in saved) { log.warn({ msgid, reason: saved.reason }, "channel media: not saved"); continue; }
+    images.push(saved.path);
+  }
+  for (const ref of refs.files) {
+    const buf = await fetchMedia(ref, log, msgid);
+    if (!buf) continue;
+    const saved = saveToInbox(dir, inboxName(msgid, i++, ref.name), buf);
+    if ("reason" in saved) { log.warn({ msgid, reason: saved.reason }, "channel media: not saved"); continue; }
+    files.push({ path: saved.path, name: ref.name });
+  }
+  log.info({ msgid, ...n, savedImages: images.length, savedFiles: files.length }, "channel media saved");
+  return { images, files };
+};
 
 const replyBody = (frame: unknown): any =>
   (frame as { body?: unknown } | undefined)?.body ?? frame;
@@ -136,18 +225,20 @@ const authorOf = (creator: any): string => {
   return Number(c.type) === 1 ? "bot:" + String(c.aibotid ?? "?").slice(0, 10) : String(c.userid ?? "user");
 };
 
-const postMsg = (p: any): ChannelMsg | undefined => {
+const postMsg = (p: any, media: ChannelMedia = NO_MEDIA): ChannelMsg | undefined => {
   const id = String(p?.post_id ?? "");
   const text = cleanContent(p?.content);
-  if (!id || !text) return undefined;
-  return { id, kind: "post", postId: id, at: atOf(p?.create_time), author: authorOf(p?.creator), text };
+  if (!id || (!text && !media.images.length && !media.files.length)) return undefined;
+  return { id, kind: "post", postId: id, at: atOf(p?.create_time), author: authorOf(p?.creator), text,
+    ...(media.images.length ? { images: media.images } : {}), ...(media.files.length ? { files: media.files } : {}) };
 };
 
-const replyMsg = (r: any, postId: string): ChannelMsg | undefined => {
+const replyMsg = (r: any, postId: string, media: ChannelMedia = NO_MEDIA): ChannelMsg | undefined => {
   const id = String(r?.reply_id ?? "");
   const text = cleanContent(r?.content);
-  if (!id || !text) return undefined;
-  return { id, kind: "reply", postId: String(r?.post_id ?? postId), at: atOf(r?.create_time), author: authorOf(r?.creator), text };
+  if (!id || (!text && !media.images.length && !media.files.length)) return undefined;
+  return { id, kind: "reply", postId: String(r?.post_id ?? postId), at: atOf(r?.create_time), author: authorOf(r?.creator), text,
+    ...(media.images.length ? { images: media.images } : {}), ...(media.files.length ? { files: media.files } : {}) };
 };
 
 /** 最近消息里活跃的其他机器人 (§6 邻居感知): bot:<id> → 条数, 自己 (selfBot) 已剔除。 */
@@ -179,7 +270,7 @@ const backfill = async (client: WSClient, cfg: Config, log: Logger, topicId: str
   backfilled.add(topicId);
   if ((await s.count(topicId)) >= h.mainPosts) return;
   const posts = await fetchRecent(client, topicId, h.mainPosts, log);
-  for (const m of posts.map(postMsg).filter((x): x is ChannelMsg => !!x)) await s.append(topicId, m);
+  for (const m of posts.map((p) => postMsg(p)).filter((x): x is ChannelMsg => !!x)) await s.append(topicId, m);
   log.info({ topicId, n: posts.length }, "channel history backfilled");
 };
 
@@ -208,7 +299,7 @@ const searchRemote = async (d: ChannelDeps, topicId: string, query: string, limi
   if (!ids.length) return [];
   const b = await call(d.client, CMD_GET_POSTS, { topic_id: topicId, type: 0, post_id_list: ids.slice(0, Math.max(1, limit)) });
   const posts: any[] = b?.post_list ?? [];
-  return posts.map(postMsg).filter((m): m is ChannelMsg => !!m);
+  return posts.map((p) => postMsg(p)).filter((m): m is ChannelMsg => !!m);
 };
 
 /** 先本地 grep (便宜、立刻), 不够再走官方搜索 (语义索引只在服务端)。 */
@@ -228,7 +319,13 @@ const stamp = (ms: number): string => {
   return hh + ":" + mm;
 };
 
-const renderLines = (list: ChannelMsg[]): string => list.map((m) => "[" + stamp(m.at) + "] " + m.author + ": " + clip(m.text, 400)).join("\n");
+/** read_channel 的一行: 正文 + 媒体 (图片 / 文件给本地路径, agent 直接 Read)。 */
+const mediaTag = (m: ChannelMsg): string =>
+  [...(m.images ?? []).map((p) => "[图: " + p + "]"), ...(m.files ?? []).map((f) => "[文件: " + f.name + " " + f.path + "]")].join(" ");
+const renderLines = (list: ChannelMsg[]): string => list.map((m) => {
+  const tag = mediaTag(m);
+  return "[" + stamp(m.at) + "] " + m.author + ": " + clip(m.text, 400) + (tag ? " " + tag : "");
+}).join("\n");
 
 export interface ChannelReadReq { topic: string; query?: string; limit?: number; since?: number; until?: number }
 
@@ -245,7 +342,7 @@ export const readChannel = async (d: ChannelDeps, req: ChannelReadReq): Promise<
   const local = (await ensureStore(d.cfg)?.slice(topicId, { ...(req.since !== undefined ? { since: req.since } : {}), ...(req.until !== undefined ? { until: req.until } : {}), limit })) ?? [];
   const list = local.length
     ? local
-    : (await fetchRecent(d.client, topicId, Math.min(limit, 20), d.log)).map(postMsg).filter((m): m is ChannelMsg => !!m);
+    : (await fetchRecent(d.client, topicId, Math.min(limit, 20), d.log)).map((p) => postMsg(p)).filter((m): m is ChannelMsg => !!m);
   return { ok: true, text: list.length ? "频道 " + topicId + " · " + list.length + " 条\n" + renderLines(list) : "频道 " + topicId + " 没有读到消息 (没见过这个频道, 或还没缓存)" };
 };
 
@@ -271,16 +368,33 @@ export const channelOutboundOf = (
   return { action: "post" };
 };
 
-export const sendTopicPost = async (client: WSClient, log: Logger, topicId: string, content: string): Promise<"post"> => {
-  const body = await call(client, CMD_POST, { topic_id: topicId, content });
+/** 频道出站带的素材 (已上传换来 media_id 的那种): 图片走 image_list, 其余走 inline_file_list
+ *  (content 里必须出现对应的 `${inline_file:<placeholder>}`, 由 topicBody 补)。 */
+export interface TopicMedia {
+  imageIds?: string[];
+  files?: Array<{ mediaId: string; name: string }>;
+}
+
+const topicBody = (content: string, media?: TopicMedia): Record<string, unknown> => {
+  const files = media?.files ?? [];
+  const inline = files.map((f, i) => ({ placeholder: "p" + (i + 1), media_id: f.mediaId }));
+  const withInline = files.length
+    ? content + "\n" + files.map((_, i) => "${inline_file:p" + (i + 1) + "}").join(" ")
+    : content;
+  const images = (media?.imageIds ?? []).map((id) => ({ media_id: id }));
+  return { content: withInline, ...(images.length ? { image_list: images } : {}), ...(inline.length ? { inline_file_list: inline } : {}) };
+};
+
+export const sendTopicPost = async (client: WSClient, log: Logger, topicId: string, content: string, media?: TopicMedia): Promise<"post"> => {
+  const body = await call(client, CMD_POST, { topic_id: topicId, ...topicBody(content, media) });
   if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel tool post rejected");
   else log.info({ topicId, via: "post", len: content.length }, "channel tool sent");
   return "post";
 };
 
 /** 帖子 room 的出站: 一律评论到根帖 (send_reply)。企微拒 (errcode) 时回 "rejected" —— 调用方决定回退。 */
-export const sendTopicReply = async (client: WSClient, log: Logger, topicId: string, postId: string, content: string): Promise<"reply" | "rejected"> => {
-  const body = await call(client, CMD_REPLY, { topic_id: topicId, post_id: postId, content });
+export const sendTopicReply = async (client: WSClient, log: Logger, topicId: string, postId: string, content: string, media?: TopicMedia): Promise<"reply" | "rejected"> => {
+  const body = await call(client, CMD_REPLY, { topic_id: topicId, post_id: postId, ...topicBody(content, media) });
   if (body?.errcode) {
     log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId, postId }, "channel tool reply rejected");
     return "rejected";
@@ -293,12 +407,12 @@ export const sendTopicReply = async (client: WSClient, log: Logger, topicId: str
  *  「只能评论 @ 过它的帖子」的说法不成立; 回退仅作真被拒的兜底, 不按 @ 与否预判。原先只 warn → 交代
  *  静默丢失)。fallback 是新帖正文 (通常带引用标注); 没给就用原正文。 */
 export const sendTopicReplyOrPost = async (
-  client: WSClient, log: Logger, topicId: string, postId: string, content: string, fallback?: string,
+  client: WSClient, log: Logger, topicId: string, postId: string, content: string, fallback?: string, media?: TopicMedia,
 ): Promise<"reply" | "post"> => {
-  const r = await sendTopicReply(client, log, topicId, postId, content);
+  const r = await sendTopicReply(client, log, topicId, postId, content, media);
   if (r === "reply") return "reply";
   log.warn({ topicId, postId }, "channel reply rejected → fallback to post");
-  await sendTopicPost(client, log, topicId, fallback ?? content);
+  await sendTopicPost(client, log, topicId, fallback ?? content, media);
   return "post";
 };
 
@@ -340,6 +454,10 @@ export interface ChannelHuman {
   text: string;
   at: number;
   msgid: string;
+  /** 已落 inbox 的图片路径 (纯图片的人话 text 为空, 靠它落行)。 */
+  images?: string[];
+  /** 内嵌文件: 本地路径 + 原名。 */
+  files?: Array<{ path: string; name: string }>;
   /** 人 @ 了机器人 (等同点名 host)。 */
   mention?: "bot";
 }
@@ -416,15 +534,17 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const post = await fetchPost(client, topicId, postId, log);
       const reply = replyId ? await fetchReply(client, topicId, postId, replyId, log) : null;
       if (!post) log.warn({ topicId, postId }, "channel: post content not found");
-      await record(cfg, topicId, postMsg(post));
-      if (reply) await record(cfg, topicId, replyMsg(reply, postId));
-      const text = cleanContent(reply?.content ?? post?.content) || "（在频道里 @ 了你，没有正文）";
+      const hit = reply ?? post;
+      const media = await downloadMedia(cfg, log, hit, msgid);
+      await record(cfg, topicId, postMsg(post, reply ? NO_MEDIA : media));
+      if (reply) await record(cfg, topicId, replyMsg(reply, postId, media));
+      const text = cleanContent(hit?.content) || "（在频道里 @ 了你，没有正文）";
       // 兜底: 帖子已配对 → 帖子 room (它就是那个帖子); 没配对 → 频道 room。这一路是 topic_at_bot
       // (人 @ 了机器人), 落到哪个 room 都一样记 mention:"bot" —— 直达 host, 不交给 room 的 monitor。
       const paired = postBaseOf(cfg, topicId, postId);
       ingest(paired
-        ? { room: paired, author: asker, text, at, msgid, mention: "bot" }
-        : { room: channelRoom, post: postId, author: asker, text, at, msgid, mention: "bot" });
+        ? { room: paired, author: asker, text, at, msgid, mention: "bot", ...mediaOf(media) }
+        : { room: channelRoom, post: postId, author: asker, text, at, msgid, mention: "bot", ...mediaOf(media) });
       return;
     }
 
@@ -443,11 +563,12 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       seen.add(msgid);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const post = await fetchPost(client, topicId, postId, log);
-      await record(cfg, topicId, postMsg(post));
+      const media = await downloadMedia(cfg, log, post, msgid);
+      await record(cfg, topicId, postMsg(post, media));
       const text = cleanContent(post?.content);
-      if (!text) return;
+      if (!text && !media.images.length && !media.files.length) return;
       // 没被 @ 的新帖: 频道 room 的一行人话 (带 post); 不 @ 机器人就不过 host, 由 monitor 判激活。
-      ingest({ room: channelRoom, post: postId, author: asker, text, at, msgid });
+      ingest({ room: channelRoom, post: postId, author: asker, text, at, msgid, ...mediaOf(media) });
       return;
     }
 
@@ -463,14 +584,15 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       seen.add(replyId);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const reply = await fetchReply(client, topicId, postId, replyId, log);
-      await record(cfg, topicId, replyMsg(reply, postId));
+      const media = await downloadMedia(cfg, log, reply, msgid);
+      await record(cfg, topicId, replyMsg(reply, postId, media));
       const text = cleanContent(reply?.content);
-      if (!text) return;
+      if (!text && !media.images.length && !media.files.length) return;
       // 评论: 帖子已配对 → 帖子 room; 还没配对 → 频道 room (带 post)。
       const paired = postBaseOf(cfg, topicId, postId);
       ingest(paired
-        ? { room: paired, author: asker, text, at, msgid }
-        : { room: channelRoom, post: postId, author: asker, text, at, msgid });
+        ? { room: paired, author: asker, text, at, msgid, ...mediaOf(media) }
+        : { room: channelRoom, post: postId, author: asker, text, at, msgid, ...mediaOf(media) });
       return;
     }
 

@@ -20,6 +20,10 @@ export interface ChannelMsg {
   /** userid, 或 `bot:<aibotid 前十位>`。 */
   author: string;
   text: string;
+  /** 帖 / 评论带的图片: 已落 inbox 的本地绝对路径 (读的时候 agent 直接 Read)。 */
+  images?: string[];
+  /** 内嵌文件 (`${inline_file:…}` 占位符对应的那份): 本地路径 + 原名。 */
+  files?: Array<{ path: string; name: string }>;
 }
 
 export interface ChannelStoreOptions {

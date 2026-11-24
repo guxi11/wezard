@@ -20,7 +20,7 @@ import { installWeixinPort } from "./weixin-port.js";
 import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, wecomBindSink, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
 import { bindChatReach } from "./reach.js";
 import { kindOf, type SendMedia } from "./media.js";
-import { aibotSendMedia } from "./aibot-media.js";
+import { aibotSendMedia, uploadMediaId } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
 import { registerMcpHttp } from "./mcp-http.js";
@@ -30,7 +30,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, rende
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
-import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicReply, sendTopicReplyOrPost, type ChannelHuman } from "./channel.js";
+import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicReply, sendTopicReplyOrPost, type ChannelHuman, type TopicMedia } from "./channel.js";
 import { channelOf, channelRefOf, learnChannelRoom, postRefOf, postsOfChannel } from "./channel-posts.js";
 import { channelMonitorLeaveOps, channelMonitorWanted, channelRoomOf, channelGuideJoinOps, hostJoinOps, planChannelGuideTurn, postRoomBirthOps, type ChannelGuideTurn } from "./channel-onboarding.js";
 import { rebindChannel } from "./channel-rebind.js";
@@ -752,10 +752,10 @@ const main = async (): Promise<void> => {
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
     const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self), text, "\n\n"));
     /** 同 postAs, 但去到的是频道 room (chat:<topic_id>) —— 一律发新帖 (send_post)。 */
-    const postAsTopic = (self: string, dest: string, text: string): void => {
+    const postAsTopic = (self: string, dest: string, text: string, media?: TopicMedia): void => {
       const topicId = dest.replace(/^chat:/, "");
       void sendTopicPost(ws.client, log.child({ mod: "channel" }), topicId,
-        linkTags(dest, headed(ownHead(self), text, "\n\n")))
+        linkTags(dest, headed(ownHead(self), text, "\n\n")), media)
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
     };
     /** 回话的引用标注: 评论被拒回退成新帖时, 让人知道这条在回谁的原话 (企微只允许评论 @ 过 bot 的帖子)。 */
@@ -767,16 +767,16 @@ const main = async (): Promise<void> => {
       return "> 回 " + roomNameOf(src!.author) + ": " + text.slice(0, 80) + (text.length > 80 ? "…" : "") + "\n\n";
     };
     /** 频道 room 的回话: 评论回原帖; 被企微拒 (没 @ 过 bot 的帖子) 回退发新帖, 正文带引用标注。 */
-    const postAsChannelReply = (self: string, dest: string, post: string, text: string, quote: string): void => {
+    const postAsChannelReply = (self: string, dest: string, post: string, text: string, quote: string, media?: TopicMedia): void => {
       const topicId = dest.replace(/^chat:/, "");
       const full = linkTags(dest, headed(ownHead(self), text, "\n\n"));
-      void sendTopicReplyOrPost(ws.client, log.child({ mod: "channel" }), topicId, post, full, quote ? quote + full : full)
+      void sendTopicReplyOrPost(ws.client, log.child({ mod: "channel" }), topicId, post, full, quote ? quote + full : full, media)
         .catch((e: unknown) => log.warn({ topicId, post, err: errText(e) }, "channel post reply failed"));
     };
     /** 帖子 room (chat:<opk…>) —— 一律评论到根帖 (send_reply)。 */
-    const postAsReply = (self: string, dest: string, channel: string, post: string, text: string): void => {
+    const postAsReply = (self: string, dest: string, channel: string, post: string, text: string, media?: TopicMedia): void => {
       void sendTopicReply(ws.client, log.child({ mod: "channel" }), channel, post,
-        linkTags(dest, headed(ownHead(self), text, "\n\n")))
+        linkTags(dest, headed(ownHead(self), text, "\n\n")), media)
         .catch((e: unknown) => log.warn({ channel, post, err: errText(e) }, "channel post reply failed"));
     };
     const retiringWizardTargets = new Set<string>();
@@ -1279,6 +1279,14 @@ const main = async (): Promise<void> => {
       if (room.startsWith("adhoc:")) return memberLabel([...(s?.members.values() ?? [])].map((x) => roomNameOf(x.who))) || room;
       return chatNameOf(cfg, room) || room;
     };
+    /** 频道 room 判据: 进程内见过的 topic (事件登记) **或** channel-posts 认识且没有根帖的频道。
+     *  只看 isTopicChat 不够 —— reload 后 topics 是空的, 频道 room 会被当成帖子 room, 出站走
+     *  send_reply(post_id="") 被企微 40058 拒掉 (2026-11-24 实测: send_file 进频道首条即此)。 */
+    const isChannelRoom = (base: string): boolean => {
+      if (isTopicChat(base)) return true;
+      const ref = channelRefOf(cfg, base);
+      return !!ref && !ref.post;
+    };
     /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。
      * 返回 true = 已成功交给传输 (hub 拿它打 O3 的 room: mirrored; 内部失败各路径自己 warn)。 */
     const roomMirror = async (row: MsgRow, cover?: MsgRow): Promise<boolean> => {
@@ -1311,7 +1319,31 @@ const main = async (): Promise<void> => {
       if (cover?.ext && body && bubbleSourceOf(cover) === out) {
         if (await coverBubble(cover.ext, md)) return true;
       }
-      if (row.files?.length) {
+      const plan = planOutbound(out, row, {
+        wxOwns: (id) => wx.owns(id),
+        isTopic: isChannelRoom,
+        postRefOf: (base) => postRefOf(cfg, base),
+        channelAction: (r) => channelOutboundOf(r, (id) => roomState(chat)?.byId.get(id)?.post),
+      });
+      // 频道 / 帖子没有群 chatid: 素材先换 media_id, 随 send_post / send_reply 的
+      // image_list (图片) / inline_file_list (其余) 一起带 —— 直接用 sendMediaMessage 发到
+      // 那里只会被频道出站补丁当「不支持的 msgtype」丢掉 (channel.ts)。
+      const toTopic = plan.via === "channel" || plan.via === "post";
+      let topicMedia: TopicMedia | undefined;
+      if (row.files?.length && toTopic) {
+        const imageIds: string[] = [];
+        const inline: Array<{ mediaId: string; name: string }> = [];
+        for (const f of row.files) {
+          const up = await uploadMediaId(ws.client, out, { path: f.path, kind: f.kind, name: f.name }, log);
+          if (!up.ok) { log.warn({ mod: "room", room: chat, file: f.path, reason: up.reason }, "room: 频道素材上传失败 (只影响传输, 不回滚)"); continue; }
+          if (up.kind === "image") imageIds.push(up.mediaId);
+          else inline.push({ mediaId: up.mediaId, name: up.name });
+        }
+        if (imageIds.length || inline.length) {
+          topicMedia = { ...(imageIds.length ? { imageIds } : {}), ...(inline.length ? { files: inline } : {}) };
+        }
+        if (!body && !topicMedia) return false;
+      } else if (row.files?.length) {
         let filesOk = true;
         for (const f of row.files) {
           const r = await sendMedia(out, { path: f.path, kind: f.kind, name: f.name, ...(row.text.trim() ? { description: row.text } : {}) });
@@ -1319,12 +1351,6 @@ const main = async (): Promise<void> => {
         }
         if (!body) return filesOk;
       }
-      const plan = planOutbound(out, row, {
-        wxOwns: (id) => wx.owns(id),
-        isTopic: isTopicChat,
-        postRefOf: (base) => postRefOf(cfg, base),
-        channelAction: (r) => channelOutboundOf(r, (id) => roomState(chat)?.byId.get(id)?.post),
-      });
       if (plan.via === "wx") {
         const r = wx.sendFinal(plan.chatId, wxMarkdown(md), row.id);
         if (r.state === "failed") { log.warn({ mod: "room", room: chat, src: out, reason: r.reason }, "room: wx 镜像失败"); return false; }
@@ -1336,23 +1362,23 @@ const main = async (): Promise<void> => {
           // 企微只允许评论 @ 过 bot 的帖子; 被拒就回退新帖 (带引用), 不让交代静默丢失。
           const quote = replyQuote(row);
           const post = plan.post ?? "";
-          if (authorTarget) postAsChannelReply(authorTarget, out, post, body, quote);
+          if (authorTarget) postAsChannelReply(authorTarget, out, post, body, quote, topicMedia);
           else {
             const full = linkTags(out, md);
-            void sendTopicReplyOrPost(ws.client, log.child({ mod: "room" }), plan.topicId, post, full, quote ? quote + full : full)
+            void sendTopicReplyOrPost(ws.client, log.child({ mod: "room" }), plan.topicId, post, full, quote ? quote + full : full, topicMedia)
               .catch((e) => log.warn({ mod: "room", room: chat, src: out, post, err: errText(e) }, "room: topic 评论回帖失败"));
           }
           return true;
         }
-        if (authorTarget) postAsTopic(authorTarget, out, body);
-        else void sendTopicPost(ws.client, log.child({ mod: "room" }), plan.topicId, linkTags(out, md))
+        if (authorTarget) postAsTopic(authorTarget, out, body, topicMedia);
+        else void sendTopicPost(ws.client, log.child({ mod: "room" }), plan.topicId, linkTags(out, md), topicMedia)
           .catch((e) => log.warn({ mod: "room", room: chat, src: out, err: errText(e) }, "room: topic 镜像失败"));
         return true; // 已交给传输; 异步失败由上面的 catch 记 warn
       }
       if (plan.via === "post") {
         // 帖子: 一律评论到根帖 (副源帖子 = 绑进本 room 的那条帖; 企微侧地址仍查 channel-posts)。
-        if (authorTarget) postAsReply(authorTarget, out, plan.channel, plan.post, body);
-        else void sendTopicReply(ws.client, log.child({ mod: "room" }), plan.channel, plan.post, linkTags(out, md))
+        if (authorTarget) postAsReply(authorTarget, out, plan.channel, plan.post, body, topicMedia);
+        else void sendTopicReply(ws.client, log.child({ mod: "room" }), plan.channel, plan.post, linkTags(out, md), topicMedia)
           .catch((e) => log.warn({ mod: "room", room: chat, src: out, err: errText(e) }, "room: post 镜像失败"));
         return true;
       }
@@ -2286,10 +2312,19 @@ const main = async (): Promise<void> => {
         roomLog.warn({ room, src: e.room, msgid: e.msgid }, "channel: room 不存在, 人话没落账本 (自愈: 下一条事件重建)");
         return;
       }
+      // 帖 / 评论带的图与文件: 与群聊一个口径 —— 图片以 `@path` 随行 (pane 里 CLI 直接 Read),
+      // 文件给一行路径; 账本行同时记 files (rolepage 显示 📎, room_read 可查)。
+      const mediaFiles = [
+        ...(e.images ?? []).map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })),
+        ...(e.files ?? []).map((f) => ({ path: f.path, kind: kindOf(f.path), name: f.name })),
+      ];
+      const text = e.text
+        + (e.images?.length ? "\n" + e.images.map((p) => "@" + p).join(" ") : "")
+        + (e.files?.length ? "\n" + e.files.map((f) => "[文件: " + f.path + "]").join("\n") : "");
       const v = hub.append(room, {
-        author: { kind: "human", id: e.author }, kind: "say", text: e.text, origin: "inbound",
+        author: { kind: "human", id: e.author }, kind: "say", text, origin: "inbound",
         ...(e.post ? { post: e.post } : {}), ...(e.mention ? { mention: e.mention } : {}),
-        ...(src ? { src } : {}),
+        ...(src ? { src } : {}), ...(mediaFiles.length ? { files: mediaFiles } : {}),
       });
       if (!v.ok) roomLog.warn({ room, src: e.room, msgid: e.msgid, reason: v.reason }, "channel: 人话落行被拒");
     };
