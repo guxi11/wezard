@@ -8,7 +8,7 @@ import { openRoomStore } from "../daemon/rooms.js";
 import { createRoomHub } from "../daemon/room-hub.js";
 import { createOverdueScan } from "../daemon/room-overdue.js";
 import { applyOp, DAEMON, type MsgRow, type Who } from "../shared/room.js";
-import { buildDescendantActivity, groupSysOf, overdueDue } from "../shared/room-overdue.js";
+import { buildDescendantActivity, buildOpenChildDuties, groupSysOf, overdueDue } from "../shared/room-overdue.js";
 import { room as mkRoom, say, uid, W } from "./room-fixture.js";
 
 const MIN = 60_000;
@@ -116,28 +116,30 @@ assert.ok(ask.ok);
 const id = ask.ok ? ask.row.id : "";
 const askAt = ask.ok ? ask.row.at : 0;
 const failRooms = new Set<string>();
-const mkScan = () => createOverdueScan({
-  log, now: () => clock, thresholds: () => ({ remindMin: 60, groupMin: 120 }), rooms: store.ids,
+const mkScan = (over: { remindMin?: number; isBusy?: (u: string) => Promise<boolean> | boolean } = {}) => createOverdueScan({
+  log, now: () => clock, thresholds: () => ({ remindMin: over.remindMin ?? 60, groupMin: 120 }), rooms: store.ids,
   stateOf: (r) => store.get(r),
   append: (r, d, extra) => { if (failRooms.has(r)) throw new Error("corrupt"); return hub.append(r, d, extra); },
   wizardOf: (u) => names[u], nameOf, roomLabel: (r) => r,
+  ...(over.isBusy ? { isBusy: over.isBusy } : {}),
 });
 const scan = mkScan();
 const Z = { remind: 0, group: 0, mirrored: 0 };
+const remindsIn = (room: string): number => store.get(room)!.msgs.filter((m) => m.sys === "overdue-remind").length;
 clock = askAt + 30 * MIN;
-assert.deepEqual(scan.scan(), Z);
+assert.deepEqual(await scan.scan(), Z);
 clock = askAt + 61 * MIN;
-assert.deepEqual(scan.scan(), { ...Z, remind: 1 });
+assert.deepEqual(await scan.scan(), { ...Z, remind: 1 });
 const trig = store.get(dm)!.msgs.find((m) => m.sys === "overdue-remind")!;
 assert.equal(trig.kind, "trigger");
 assert.deepEqual(trig.re, [id]);
 assert.ok(trig.wake.includes(uid(2)), "trigger 唤醒处理人");
-assert.deepEqual(scan.scan(), Z, "不重复");
+assert.deepEqual(await scan.scan(), Z, "不重复");
 // ① remind 还没被读到 (游标未越过): 120 分钟也不报 group
 clock = askAt + 121 * MIN;
-assert.deepEqual(scan.scan(), Z, "B 没读到 remind → group 等着");
+assert.deepEqual(await scan.scan(), Z, "B 没读到 remind → group 等着");
 store.append(dm, [{ op: "seen", at: clock, room: dm, who: B, seq: trig.seq }]);
-assert.deepEqual(scan.scan(), { ...Z, group: 1, mirrored: 1 });
+assert.deepEqual(await scan.scan(), { ...Z, group: 1, mirrored: 1 });
 const g = store.get(dm)!.msgs.find((m) => m.sys?.startsWith("overdue-group"))!;
 assert.equal(g.kind, "system");
 assert.deepEqual(g.wake, [], "group 行不唤醒任何人");
@@ -145,9 +147,9 @@ const home = store.get("chat:wrG")!.msgs.find((m) => m.sys === "overdue-group")!
 assert.ok(home, "home 群有通知行");
 assert.deepEqual(home.wake, []);
 assert.match(home.text, /\.b 名下 .* \(来自 \.lead, 在 adhoc:g2\) 已 121 分钟/);
-assert.deepEqual(scan.scan(), Z, "group 也不重复");
+assert.deepEqual(await scan.scan(), Z, "group 也不重复");
 // 重新 new 一个 scan 实例 (等于 daemon 重启): 去重在账本里, 不重复
-assert.deepEqual(mkScan().scan(), Z, "新实例不重复");
+assert.deepEqual(await mkScan().scan(), Z, "新实例不重复");
 
 // ② 唤醒预算用尽 (10 分钟内 20 次): remind 仍然真的唤醒
 {
@@ -162,7 +164,7 @@ assert.deepEqual(mkScan().scan(), Z, "新实例不重复");
   assert.ok(k.ok);
   for (let i = 0; i < 25; i++) hub.append(r2, { author: A, kind: "say", origin: "tool", to: [B], text: "噪音 " + i });
   clock = base + 61 * MIN;
-  mkScan().scan();
+  await mkScan().scan();
   const t2 = store.get(r2)!.msgs.find((m) => m.sys === "overdue-remind")!;
   assert.ok(t2 && t2.wake.includes(uid(2)), "预算用尽 remind 也带 wake");
 }
@@ -182,7 +184,7 @@ assert.deepEqual(mkScan().scan(), Z, "新实例不重复");
   failRooms.add(bad);
   const before = store.get(dm)!.msgs.length;
   clock += 300 * MIN;
-  const out = mkScan().scan();
+  const out = await mkScan().scan();
   assert.ok(out.remind >= 1, "好 room 的 duty 照常处理: " + JSON.stringify(out));
   assert.ok(store.get(dm)!.msgs.length >= before);
   failRooms.clear();
@@ -197,15 +199,94 @@ assert.deepEqual(mkScan().scan(), Z, "新实例不重复");
   hub.append(bound, { author: { kind: "human", id: "user:u1" }, kind: "say", origin: "inbound", text: "在吗" });
   const sc = mkScan();
   clock += 61 * MIN;
-  sc.scan();
+  await sc.scan();
   const tr = store.get(bound)!.msgs.find((m) => m.sys === "overdue-remind")!;
   assert.ok(tr, "绑定 room 的人话 duty 也提醒");
   store.append(bound, [{ op: "seen", at: clock, room: bound, who: E, seq: tr.seq }]);
   clock += 61 * MIN;
-  const homeBefore = store.get("chat:wrG")!.msgs.length;
-  assert.deepEqual(sc.scan(), { ...Z, group: 1 });
+  const homeNotices = (): number => store.get("chat:wrG")!.msgs.filter((m) => m.sys === "overdue-group").length;
+  const homeBefore = homeNotices();
+  // 只看本 room: scan 现在会 await (探忙), 期间 hub 的泵可能把别的 room 的提醒投出去 → 那边的
+  // group 级是否触发取决于投递时刻, 不是这条用例要断言的东西。
+  const out2 = await sc.scan();
+  assert.equal(out2.remind, 0, "没有新的 remind");
   assert.equal(store.get(bound)!.msgs.filter((m) => m.sys?.startsWith("overdue-group")).length, 1);
-  assert.equal(store.get("chat:wrG")!.msgs.length, homeBefore, "绑定 room 不走 home 群");
+  assert.equal(homeNotices(), homeBefore, "绑定 room 不走 home 群");
+}
+// ⑦ progress 与普通 duty 同一套阈值 (3 分钟): progress 只把计时推到自己那一行, 不豁免、不单独计时
+{
+  const r = "adhoc:p3";
+  store.ensure(r, { at: 1, kind: "adhoc", by: DAEMON });
+  hub.write(r, [
+    { op: "join", at: 1, room: r, who: A, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: r, who: B, ord: 2, via: "spawn", by: A },
+  ]);
+  const k = hub.append(r, { author: A, kind: "ask", to: [B], text: "进度账" });
+  assert.ok(k.ok);
+  const sc3 = mkScan({ remindMin: 3 });
+  clock += 10 * MIN;
+  hub.append(r, { author: B, kind: "reply", re: [k.ok ? k.row.id : ""], status: "progress", statusGiven: true, text: "做着" });
+  const progAt = clock;
+  clock = progAt + 2 * MIN;
+  await sc3.scan();
+  assert.equal(remindsIn(r), 0, "progress 后 2 分钟不催");
+  clock = progAt + 3 * MIN;
+  await sc3.scan();
+  assert.equal(remindsIn(r), 1, "progress duty 满 3 分钟照催");
+}
+// ⑧ 处理人忙 (跑着这一轮 / 停在审批框上) 不催; 闲下来下一轮再催; 探不出来当忙
+{
+  const mkAskRoom = (id: string): string => {
+    store.ensure(id, { at: 1, kind: "adhoc", by: DAEMON });
+    hub.write(id, [
+      { op: "join", at: 1, room: id, who: A, ord: 1, via: "founder", by: DAEMON },
+      { op: "join", at: 2, room: id, who: B, ord: 2, via: "spawn", by: A },
+    ]);
+    hub.append(id, { author: A, kind: "ask", to: [B], text: "忙不忙" });
+    return id;
+  };
+  const rBusy = mkAskRoom("adhoc:busy1");
+  clock += 3 * MIN;
+  await mkScan({ remindMin: 3, isBusy: async () => true }).scan();
+  assert.equal(remindsIn(rBusy), 0, "处理人忙 → 不催");
+  await mkScan({ remindMin: 3, isBusy: async () => false }).scan();
+  assert.equal(remindsIn(rBusy), 1, "闲下来 → 催");
+  const rErr = mkAskRoom("adhoc:busy2");
+  clock += 3 * MIN;
+  await mkScan({ remindMin: 3, isBusy: async () => { throw new Error("tmux 挂了"); } }).scan();
+  assert.equal(remindsIn(rErr), 0, "探不出来当忙, 这一轮不催");
+}
+// ⑨ 跨 room 的下游未关 → 只催下游; 下游关了才催上游 (「执行者已 done、上游没转告人」)
+{
+  names[uid(3)] = { target: "chat:wrG#c", name: "c" };
+  const parent = "adhoc:pchain", childRoom = "adhoc:cchain";
+  store.ensure(parent, { at: 1, kind: "adhoc", by: DAEMON });
+  hub.write(parent, [
+    { op: "join", at: 1, room: parent, who: A, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: parent, who: B, ord: 2, via: "spawn", by: A },
+  ]);
+  store.ensure(childRoom, { at: 1, kind: "adhoc", by: DAEMON });
+  hub.write(childRoom, [
+    { op: "join", at: 1, room: childRoom, who: B, ord: 1, via: "spawn", by: A },
+    { op: "join", at: 2, room: childRoom, who: C, ord: 2, via: "spawn", by: B },
+  ]);
+  const up = hub.append(parent, { author: A, kind: "ask", to: [B], text: "上游" });
+  assert.ok(up.ok);
+  const down = hub.append(childRoom, { author: B, kind: "task", to: [C], for: up.ok ? up.row.id : "", text: "下游" });
+  assert.ok(down.ok);
+  const sc3 = mkScan({ remindMin: 3 });
+  clock += 3 * MIN;
+  await sc3.scan();
+  assert.equal(remindsIn(childRoom), 1, "先催下游的处理人");
+  assert.equal(remindsIn(parent), 0, "下游还开着 → 不催上游");
+  hub.append(childRoom, { author: C, kind: "reply", re: [down.ok ? down.row.id : ""], status: "done", text: "交付了" });
+  const doneAt = clock;
+  clock = doneAt + 2 * MIN;
+  await sc3.scan();
+  assert.equal(remindsIn(parent), 0, "下游刚关, 上游重新计时");
+  clock = doneAt + 3 * MIN;
+  await sc3.scan();
+  assert.equal(remindsIn(parent), 1, "下游都关了 → 催上游把结果转告人");
 }
 // ⑥ 派出去的子件 (for 血缘, 可跨 room) 的活动也算 holder 的活动
 {
@@ -254,5 +335,32 @@ assert.deepEqual(mkScan().scan(), Z, "新实例不重复");
   const act = buildDescendantActivity([s, r1]);
   assert.equal(act("没有这条"), 0);
   assert.equal(act(ask.id), 0, "没人派出子件 → 0");
+}
+// ⑦ 递归式: 下游还开着只催下游 (叶子), 上游压住; 下游关掉后上游才按自己的空闲时长收提醒
+{
+  const { s, ask } = mk(); // A → B
+  const child = mkRoom("dm:leaf", [B, C]);
+  const task = say(child, { author: B, kind: "task", to: [C], for: ask.id, text: "下游" }, { now: 1 * MIN });
+  const O3 = { remindMs: 3 * MIN, groupMs: 120 * MIN };
+  const lv = (now: number) => {
+    const states = [s, child];
+    const open = buildOpenChildDuties(states);
+    const idx = buildDescendantActivity(states);
+    return [
+      ...overdueDue(s, now, O3, undefined, idx, open).map((h) => "p:" + h.holder.id.slice(-1)),
+      ...overdueDue(child, now, O3, undefined, idx, open).map((h) => "c:" + h.holder.id.slice(-1)),
+    ];
+  };
+  assert.deepEqual(lv(4 * MIN), ["c:3"], "下游先收, 上游被压住");
+  assert.deepEqual(lv(10 * MIN), ["c:3"], "同一空闲周期不重复催; 上游仍压着");
+  say(child, { author: C, kind: "reply", re: [task.id], status: "done", text: "好" }, { now: 11 * MIN });
+  assert.deepEqual(lv(13 * MIN), [], "下游刚关 (关账那一刻是活动), 上游重新计时");
+  assert.deepEqual(lv(14 * MIN), ["p:2"], "下游都关了 → 催上游");
+  // 孤儿下游 (处理人不在册) 不拦上游: 催不动它, 再压住上游整条链就静默了
+  const { s: s2, ask: ask2 } = mk();
+  const orphan = mkRoom("dm:orphan", [B, C]);
+  say(orphan, { author: B, kind: "task", to: [C], for: ask2.id, text: "孤儿" }, { now: 1 * MIN });
+  assert.equal(buildOpenChildDuties([s2, orphan])(ask2.id), true);
+  assert.equal(buildOpenChildDuties([s2, orphan], (u) => u !== C.id)(ask2.id), false, "处理人不在册 → 不算拦住");
 }
 console.log("room-overdue ok");

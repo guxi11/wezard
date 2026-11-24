@@ -242,12 +242,12 @@ const heldBy = (s: ReturnType<typeof room>, w: Who) => dutiesHeldBy(s, w);
   });
   const at = n.ok ? n.row.at : 0;
   clock = at + 130 * MIN;
-  assert.deepEqual(mkScan().scan(), { remind: 0, group: 1, mirrored: 0 }, "绑定 room: 本群一行, 不再转 home");
+  assert.deepEqual(await mkScan().scan(), { remind: 0, group: 1, mirrored: 0 }, "绑定 room: 本群一行, 不再转 home");
   const row = store.get(g)!.msgs.find((m) => m.sys === "overdue-group@T1")!;
   assert.match(row.text, /⏰ T1 有一条 \.b 的提问 .* 130 分钟没回/);
   assert.deepEqual(row.wake, []);
   assert.ok(mirrored.some((t) => t.includes("130 分钟没回")), "镜像进企微");
-  assert.deepEqual(mkScan().scan(), { remind: 0, group: 0, mirrored: 0 }, "不重复");
+  assert.deepEqual(await mkScan().scan(), { remind: 0, group: 0, mirrored: 0 }, "不重复");
   // B 名下那条 (最后一句是 need, 人那条还开着) 没有被 remind
   assert.equal(store.get(g)!.msgs.some((m) => m.sys === "overdue-remind"), false);
   // 人答了 → 叫醒 B (只 B 被投递, host A 不被)
@@ -267,7 +267,7 @@ const heldBy = (s: ReturnType<typeof room>, w: Who) => dutiesHeldBy(s, w);
   const ak = hub.append(ad, { author: B, kind: "ask", origin: "tool", to: [T1], text: "私下问你" });
   assert.ok(ak.ok);
   clock = (ak.ok ? ak.row.at : 0) + 125 * MIN;
-  const out = mkScan().scan();
+  const out = await mkScan().scan();
   assert.equal(out.group, 1);
   assert.equal(out.mirrored, 1, "转给提问者的 home 群让人看见");
   const home = store.get(g)!.msgs.filter((m) => m.sys === "overdue-group").pop()!;

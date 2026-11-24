@@ -12,6 +12,10 @@
 // 派出去的子件也算 holder 的活动: duty 的 msg id 被别的 task / ask 行当作 `for` (血缘) 时, 那些子行自身的时刻、
 // 它们 room 里非 daemon 行对它们的回应 (含子件 done 关账那一刻) 以及孙辈的同类活动, 都并入 lastActivity
 // (`descendantActivityOf`, 跨 room 由调用方建一次索引传进来); 子件也静止超时才照常提醒。
+// **递归式催促, 只催叶子**: `for` 名下还挂着一个未关、处理人仍在册的 wizard duty 时, 这条 duty 不催 ——
+// 先催下游的处理人 (`buildOpenChildDuties`, 跨 room 建一次); 下游都关掉了, 上游才按自己的空闲时长收提醒。
+// 这正是「执行者已 done、上游没转告人」的收口: 子件关账那一刻是活动, 计时从那里重来, remindMin 后催上游。
+// progress duty 与普通未答 duty 同一套阈值: progress 只把 lastActivity 推到那一行 (重新计时), 不豁免、不单独计时。
 import { DAEMON, HOST_SLOT, holderOf, openDuties, sameWho, whoKey, type Duty, type MsgRow, type RoomState, type Who } from "./room.js";
 
 export type OverdueLevel = "remind" | "group";
@@ -50,8 +54,28 @@ export const buildDescendantActivity = (states: Iterable<RoomState>): Descendant
   return (id) => walk(id, 1, new Set([id]));
 };
 
-const lastActivity = (s: RoomState, d: Duty, holder: Who, descendant: DescendantActivity): number =>
-  Math.max(
+/** 下游未关的 duty 查询: msg id → 它 `for` 名下是否还挂着一个**可催的**未关 duty。 */
+export type OpenChildDuties = (msgId: string) => boolean;
+
+/** 跨 room 建「下游还开着」索引 (递归式催促的抑制条件)。一条子 bound duty 算数 (会拦住上游) 的条件:
+ *  未关, 处理人是 wizard, 仍是那个 room 的成员, 且名册上认得 —— 与 `overdueDue` 会去催的条件一致。
+ *  查无此人 / 已离开的孤儿 duty 不算数: 催不动它, 再拦住上游就整条链静默了 (它会走 watchdog 的
+ *  canceled 路径收尾, 上游照常收提醒)。只看直接子件: 每一层自己都会被 `overdueDue` 逐条判定, 逐层
+ *  抑制自然就是递归的, 不必在这里做深度遍历。 */
+export const buildOpenChildDuties = (states: Iterable<RoomState>, known: (uid: string) => boolean = () => true): OpenChildDuties => {
+  const blocking = new Set<string>(); // 可催的未关 duty 的 msg id
+  const parents = new Map<string, string[]>(); // for → 子行 id
+  for (const s of states) {
+    for (const d of openDuties(s)) {
+      const h = holderOf(s, d);
+      if (h?.kind === "wizard" && s.members.has(whoKey(h)) && known(h.id)) blocking.add(d.msg);
+    }
+    for (const r of s.msgs) if (r.for) parents.set(r.for, [...(parents.get(r.for) ?? []), r.id]);
+  }
+  return (id) => (parents.get(id) ?? []).some((c) => blocking.has(c));
+};
+
+const lastActivity = (s: RoomState, d: Duty, holder: Who, descendant: DescendantActivity): number => Math.max(
     d.at,
     descendant(d.msg),
     d.movedAt ?? 0,
@@ -74,7 +98,7 @@ const groupGiven = (s: RoomState, d: Duty, holder: Who, since: number): boolean 
 
 export const overdueDue = (
   s: RoomState, now: number, o: OverdueThresholds, known: (uid: string) => boolean = () => true,
-  descendantActivity: DescendantActivity = () => 0,
+  descendantActivity: DescendantActivity = () => 0, openChild: OpenChildDuties = () => false,
 ): OverdueHit[] =>
   openDuties(s).flatMap((duty): OverdueHit[] => {
     const holder = holderOf(s, duty);
@@ -86,6 +110,8 @@ export const overdueDue = (
         ? [{ duty, holder, level: "group", idleMs: now - last }] : [];
     }
     if (holder.kind !== "wizard" || !known(holder.id) || ballWithHuman(s, duty)) return [];
+    // 下游还开着: 先催下游 (它自己也在这一轮被逐条判定), 上游两级都不催。
+    if (openChild(duty.msg)) return [];
     const last = lastActivity(s, duty, holder, descendantActivity);
     const idleMs = now - last;
     const reminds = remindsTo(s, duty, holder, last);

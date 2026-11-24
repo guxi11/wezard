@@ -2475,16 +2475,24 @@ const main = async (): Promise<void> => {
     // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单 (paste 端口的 touch 见 hub ports)。
     const watchdogTimer = setInterval(() => void roomWatchdog.scan(), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
     watchdogTimer.unref?.();
-    // duty 逾期两级提醒: 与看门狗同节拍, 阈值每轮现读 (hot)。
+    // duty 逾期两级提醒: 与看门狗同节拍, 阈值每轮现读 (hot)。处理人忙 (跑着这一轮 / 停在审批框上)
+    // 就这一轮不催; 下游还有未关 duty 时只催下游 (递归式, 见 shared/room-overdue)。
     const overdue = createOverdueScan({
       log: roomLog, now: () => Date.now(),
       thresholds: () => ({ remindMin: cfg.rooms?.overdue?.remindMin ?? 60, groupMin: cfg.rooms?.overdue?.groupMin ?? 120 }),
       rooms: roomStore.ids, stateOf: roomState, append: (room, d, extra) => hub.append(room, d, extra),
       wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
+      isBusy: async (uid) => {
+        const rec = roomWizardOf(uid);
+        return rec ? await m.isBusy(rec.target) : false;
+      },
     });
-    const overdueTimer = setInterval(() => { try { overdue.scan(); } catch (e) { roomLog.warn({ err: (e as Error).message }, "overdue: 扫描失败"); } }, (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
+    const overdueScan = (): void => {
+      overdue.scan().catch((e) => roomLog.warn({ err: (e as Error).message }, "overdue: 扫描失败"));
+    };
+    const overdueTimer = setInterval(overdueScan, (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
     overdueTimer.unref?.();
-    setTimeout(() => { try { overdue.scan(); } catch { /* 下一轮再来 */ } }, 20_000).unref?.();
+    setTimeout(overdueScan, 20_000).unref?.();
     // ── 新群引导的两端 (契约 §4): 人话落 room → guide 当 founder 说话 → 绑定后交给管家 ────
     /** 引导期: 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。引导从此只能在 room
      *  里说话 (chat_reply), 绑定后那条 duty 连原话一起交给管家。 */
