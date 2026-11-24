@@ -56,6 +56,22 @@ for (const steward of [false, true]) {
 const stewardChapter = chapter(renderCharter({ ...base, steward: true }), "## 我是这个 room 的 host (L1)");
 for (const fragment of ["分派、收回执、向人交代", "chat_ask", "chat_reply", "多步的活默认开一个跟进 room", "delegate"])
   assert.ok(stewardChapter.includes(fragment), `host contract must include ${fragment}`);
+// 同一个 room 里 host 复述 member 的话 (2026-11-24 人报): 可见性要按 room 种类写死 —— 绑定 room 人看得见
+// 每个成员的话, 关账只补新信息; dm / adhoc 人看不见, 结论才要带回主 room。
+for (const fragment of [
+  "绑定 room 里人看得见你和每个成员说的每一行",
+  "同伴已经答过的, 别再替它转述一遍",
+  "dm / adhoc 里人看不见",
+])
+  assert.ok(charter.includes(fragment), `charter must state room visibility: ${fragment}`);
+assert.ok(
+  stewardChapter.includes("它那条 done 回复已经作为群消息发给人了"),
+  "host: member 的 done 回复人已经看见, 不许再复述",
+);
+assert.ok(
+  !charter.includes("结论要人知道就用你自己的话讲"),
+  "「用你自己的话讲」是复述的许可, 已换成按 room 种类区分",
+);
 
 const lead = renderCharter({ ...base, lead: true });
 assert.ok(!hasHeading(charter, "## 我是这件活的 lead"));

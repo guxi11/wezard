@@ -235,6 +235,17 @@ export const createRoomHub = (p: HubPorts) => {
       const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500));
       const held = openDuties(s).filter((d) => sameWho(holderOf(s, d), who));
       const owe = held.filter((d) => triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));
+      // 绑定 room 里同伴说的每一行都真的进了企微 (mirrors) —— 人已经看见。它手上还欠着人的话时,
+      // 这一轮多半正要向人交代: 说清这一点, 免得 host 把同伴的结论再转述一遍
+      // (人报: 同一个 room 里 host 复述 member 的话)。只数本批真会出站的 reply / say ——
+      // 派活的 ask、trigger 不算「同伴说了一句」。
+      const seenByHuman = !isBoundRoom(room) ? [] : [...new Set(u.rows
+        .filter((r) => (r.kind === "reply" || r.kind === "say") && mirrors(r))
+        .map((r) => p.nameOf(r.author)))];
+      const peerSeen = seenByHuman.length && held.some((d) => d.asker.kind === "human");
+      const humanHint = peerSeen
+        ? "人已经在群里看过上面 " + seenByHuman.join(" / ") + " 的发言 —— 向人关账只补人还不知道的 (commit / 取舍 / 下一步), 它说过的别再复述。"
+        : "";
       // 它反问过人、人另发一条新话 (不带引用) 作答: 原 duty 没被本批触发行碰到, 但答复很可能就在上面 —— 附在后面提醒一并关掉 (只是提示, 不改 seen / turns)。
       const answered = held.filter((d) => !owe.includes(d) && d.last?.status === "need" && d.asker.kind === "human" && triggers.some((t) => sameWho(t.author, d.asker)));
       const oweLine = owe.length || answered.length
@@ -242,7 +253,7 @@ export const createRoomHub = (p: HubPorts) => {
           ...owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")"),
           ...answered.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + " · 你反问过, 对方的答复可能就在上面)"),
         ].join("; ") + usage : "";
-      parts.push([head, ...lines, ...(oweLine ? [oweLine] : [])].join("\n"));
+      parts.push([head, ...lines, ...(humanHint ? [humanHint] : []), ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
       msgs.push(...triggers.map((t) => t.id));
     }

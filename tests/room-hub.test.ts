@@ -211,6 +211,32 @@ const settle = () => hub.pump();
   assert.equal(hub.defaultFor(A), ask1.ok ? ask1.row.id : "", "trigger 行的 re 指向 duty 也算唤醒它的那一条");
   await hub.onIdle(A);
 }
+// 绑定 room 里同伴的 done 回复人已经看见: 向人关账的「你要交代」点明这一点, 不让 host 复述
+{
+  const roomR = "chat:wrR";
+  store.ensure(roomR, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(roomR, [
+    { op: "join", at: 1, room: roomR, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: roomR, who: { kind: "wizard", id: B }, ord: 2, via: "spawn", by: { kind: "wizard", id: A } },
+  ]);
+  const h = hub.append(roomR, { author: human, kind: "say", origin: "inbound", text: "为什么 X 不对" });
+  assert.ok(h.ok);
+  await settle();
+  assert.ok(!pasted.at(-1)!.text.includes("别再复述"), "只有人话那一轮: 没有同伴发言, 不挂不复述提示");
+  const ask = hub.append(roomR, { author: { kind: "wizard", id: A }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: B }], text: "查一下 X" });
+  assert.ok(ask.ok);
+  const rep = hub.append(roomR, { author: { kind: "wizard", id: B }, kind: "reply", origin: "tool", re: [ask.row.id], text: "原因是 Y" });
+  assert.ok(rep.ok && rep.row.status === "done");
+  await settle();
+  const note = pasted.at(-1)!.text;
+  assert.match(note, /原因是 Y/, "同伴的回复照常列给 host 读");
+  assert.match(note, /人已经在群里看过上面 \.b 的发言/, "提示: 同伴这一行真的进了群, 人已经看见");
+  assert.match(note, /它说过的别再复述/, "提示: 关账不许复述同伴的话");
+  assert.ok(
+    openDuties(store.get(roomR)!).some((d) => d.msg === h.row.id && d.asker.kind === "human"),
+    "human 那条 duty 还开着 —— 提示正是给这一轮向人交代用的",
+  );
+}
 // 重开 store (模拟 reload): 账本状态一致
 {
   const again = openRoomStore(dir);

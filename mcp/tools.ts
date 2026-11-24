@@ -395,7 +395,7 @@ export const createWezardServer = (): McpServer => {
       title: "Close (or field) a duty — the only completion signal",
       description:
         "答一条或多条 duty。room 由 `re` 定 —— 消息 id 全机唯一, 自带 room, 不用给。status: " + STATUS_DOC +
-        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问用 need, 长活中间报一句用 progress。**频道 room 里 re 到一条评论 = 评论回原帖下面** (要新开一帖用 chat_say); 帖子 room 里一律评论回根帖。",
+        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问用 need, 长活中间报一句用 progress。绑定 room 里同伴说的话人已经看见 —— 关账只补人还不知道的 (commit / 取舍 / 下一步), 别把同伴说过的结论再复述一遍; dm / adhoc 里人看不见, 结论要带回主 room。**频道 room 里 re 到一条评论 = 评论回原帖下面** (要新开一帖用 chat_say); 帖子 room 里一律评论回根帖。",
       inputSchema: currentAddressSchema({
         re: z.union([z.string(), z.array(z.string())]).describe("要答的那些消息 id (信封 / 注入的未读行头部的 `[<id>]`)。"),
         text: z.string().optional().describe("答复正文; 不给 (且你是处理人) = passed。"),
