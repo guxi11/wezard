@@ -54,7 +54,23 @@ export interface RoomFact {
   channel?: { id: string; name: string };
   /** 帖子 room 的根帖 id (send_reply 用)。 */
   rootPost?: string;
+  /** 绑进本 room 的副源 (multi-source-binding; fold 出 bindings, unbind 即消失)。 */
+  sources: RoomSourceFact[];
 }
+
+/** 一条绑定源的显示形状: 群 / 频道帖; 有名用名, 无名用 id 简写。 */
+export interface RoomSourceFact {
+  id: string;
+  name: string;
+  kind: "group" | "post";
+  at: number;
+}
+
+/** 源 id 的简写 (去掉 chat: 前缀, 过长截断) —— 没名字时的回落。 */
+const shortSourceId = (id: string): string => {
+  const bare = id.replace(/^chat:/, "");
+  return bare.length > 10 ? bare.slice(0, 8) + "…" : bare;
+};
 
 /** channel-posts 映射的读侧形状 (由调用方注入; shared 不 import daemon)。
  *  channel room → { channel: 裸 topic_id }; 帖子 room → { channel, post: 根帖 id }。 */
@@ -108,6 +124,10 @@ export const buildRoomFact = (s: RoomState, n: RenderNames, channelOf?: ChannelO
       });
       return list;
     })(),
+    sources: [...s.bindings.entries()].sort((a, b) => a[1].at - b[1].at).map(([id, b]) => {
+      const label = n.roomLabel(id);
+      return { id, name: label && label !== id ? label : shortSourceId(id), kind: channelOf?.(id)?.post ? "post" as const : "group" as const, at: b.at };
+    }),
     ...(lastRow && preview ? { last: { seq: lastRow.seq, at: lastRow.at, author: lastRow.author, authorName: n.nameOf(lastRow.author), preview } } : {}),
     openDuties: openDuties(s).length,
   };
