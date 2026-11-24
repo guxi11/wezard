@@ -480,6 +480,54 @@ export const mirrors = (row: RoomOp): boolean =>
   row.op === "msg" && isBoundRoom(row.room) && row.origin !== "inbound" && row.origin !== "migrate" && row.kind !== "trigger"
   && (String(row.text ?? "").trim() !== "" || (row.files?.length ?? 0) > 0);
 
+// ── 出站: 一行的目标源 (§4.2, 纯判定; 传输句柄由 daemon 注入) ──────────
+
+/** 这一行的目标源: reply 跟它所 re 那一行的 src (缺省 = 主源 = room id), 其余 (say / file / …) 回主源。
+ *  re 一条都查不到 (不在本 room 账本) → 回落主源并置 fellBack, 调用方记日志 —— 不炸也不丢话。 */
+export const outboundSourceOf = (row: Pick<MsgRow, "kind" | "re" | "room">, rowOf: (id: string) => MsgRow | undefined):
+  { source: string; fellBack: boolean } => {
+  if (row.kind !== "reply") return { source: row.room, fellBack: false };
+  const hit = (row.re ?? []).map(rowOf).find((r) => !!r);
+  if (!hit) return { source: row.room, fellBack: true };
+  return { source: hit.src || row.room, fellBack: false };
+};
+
+/** 人话行的发生源 (src, 缺省主源): 占位气泡盖在哪条流上。cover 机制本身不动, 只拿它确认
+ *  盖的流与这行的目标源是同一个 —— 不是就别盖, 免得把回复塞进另一个源的流里。 */
+export const bubbleSourceOf = (row: Pick<MsgRow, "src" | "room">): string => row.src || row.room;
+
+export type OutboundPlan =
+  | { via: "wx"; chatId: string }
+  | { via: "channel"; topicId: string; action: "post" | "reply"; post?: string }
+  | { via: "post"; channel: string; post: string }
+  | { via: "group"; chatId: string };
+
+export interface OutboundDeps {
+  /** 自管道 (wx) 是否接管这个裸 chat id。 */
+  wxOwns: (chatId: string) => boolean;
+  /** 该 base 是不是频道 (chat:<topic_id>)。 */
+  isTopic: (base: string) => boolean;
+  /** 帖子 base 的 {频道, 根帖} (channel-posts 映射); 没配对 = undefined。 */
+  postRefOf: (base: string) => { channel: string; post: string } | undefined;
+  /** 频道 room 里这行该评论哪条帖 (现行 channelOutboundOf 口径); 缺省 = 发新帖。 */
+  channelAction?: (row: MsgRow) => { action: "post" } | { action: "reply"; post: string };
+}
+
+/** 目标源 → 传输 (设计稿 §4.2 表): wx > 频道 > 帖子 (有配对) > 群。
+ *  帖子源仍查 channel-posts 的 {频道, 根帖} 拿企微侧地址; 绑定本身不改企微地址。 */
+export const planOutbound = (source: string, row: MsgRow, d: OutboundDeps): OutboundPlan => {
+  const chatId = source.replace(/^(user|chat|group):/, "");
+  if (d.wxOwns(chatId)) return { via: "wx", chatId };
+  if (d.isTopic(source)) {
+    const topicId = source.replace(/^chat:/, "");
+    const a = d.channelAction?.(row) ?? { action: "post" as const };
+    return a.action === "reply" ? { via: "channel", topicId, action: "reply", post: a.post } : { via: "channel", topicId, action: "post" };
+  }
+  const ref = d.postRefOf(source);
+  if (ref) return { via: "post", channel: ref.channel, post: ref.post };
+  return { via: "group", chatId };
+};
+
 /** 人话行的占位气泡由**第一条** re 它且带正文的 reply 覆盖; 之后的作为新消息。 */
 export const coversBubble = (s: RoomState, row: MsgRow): string | undefined => {
   if (row.kind !== "reply" || !row.text.trim()) return undefined;

@@ -61,7 +61,7 @@ import { ensureMeRoom, isMeRoom, meRowMirror, meUserOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, planDm, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, bubbleSourceOf, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, outboundSourceOf, planDm, planOutbound, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -1284,7 +1284,10 @@ const main = async (): Promise<void> => {
         });
       }
       const chat = row.room;
-      const chatId = chat.replace(/^(user|chat|group):/, "");
+      // 出站目标源 (设计稿 §4.2): reply 跟所 re 那行的 src (缺省 = 主源), say / file / notify 回主源。
+      // src 缺省路径 = out === chat = 现行为, 存量账本一比特不变。
+      const { source: out, fellBack } = outboundSourceOf(row, (id) => roomState(chat)?.byId.get(id));
+      if (fellBack) log.warn({ mod: "room", room: chat, re: row.re }, "room: reply 的 re 在本 room 账本里查不到, 出站回落主源");
       const authorTarget = row.author.kind === "wizard" ? roomWizardOf(row.author.id)?.target : undefined;
       const plain = row.text.trim() || (row.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : "");
       // 收话人: 显式点名的 wizard (to) + 被答复那条消息的 wizard 作者 (re), 去掉自己与重复。
@@ -1296,51 +1299,57 @@ const main = async (): Promise<void> => {
       // 头像 / 尾部署名都由 tracker 从正文头反解 —— 覆盖占位气泡也必须带这个头,
       // 否则那条气泡既没有身份也没有 rolepage 链接 (它就是人点名的那个 wizard 的答复)。
       const md = roomBubble(authorTarget, body);
-      if (cover?.ext && body) {
+      // 占位气泡盖在人话行的发生源上; 与这行的目标源不是同一个就不盖 (退回普通发送, 流由 hardTimer 收口)。
+      if (cover?.ext && body && bubbleSourceOf(cover) === out) {
         if (await coverBubble(cover.ext, md)) return true;
       }
       if (row.files?.length) {
         let filesOk = true;
         for (const f of row.files) {
-          const r = await sendMedia(chat, { path: f.path, kind: f.kind, name: f.name, ...(row.text.trim() ? { description: row.text } : {}) });
+          const r = await sendMedia(out, { path: f.path, kind: f.kind, name: f.name, ...(row.text.trim() ? { description: row.text } : {}) });
           if (!r.ok) { filesOk = false; log.warn({ mod: "room", room: chat, file: f.path, reason: r.reason }, "room: 镜像媒体发送失败 (只影响传输, 不回滚)"); }
         }
         if (!body) return filesOk;
       }
-      if (wx.owns(chatId)) {
-        const r = wx.sendFinal(chatId, wxMarkdown(md), row.id);
-        if (r.state === "failed") { log.warn({ mod: "room", room: chat, reason: r.reason }, "room: wx 镜像失败"); return false; }
+      const plan = planOutbound(out, row, {
+        wxOwns: (id) => wx.owns(id),
+        isTopic: isTopicChat,
+        postRefOf: (base) => postRefOf(cfg, base),
+        channelAction: (r) => channelOutboundOf(r, (id) => roomState(chat)?.byId.get(id)?.post),
+      });
+      if (plan.via === "wx") {
+        const r = wx.sendFinal(plan.chatId, wxMarkdown(md), row.id);
+        if (r.state === "failed") { log.warn({ mod: "room", room: chat, src: out, reason: r.reason }, "room: wx 镜像失败"); return false; }
         return true;
       }
-      if (isTopicChat(chat)) {
-        // 频道 room: 回话 (reply 且 re 到带 post 的评论行) = 评论回原帖; 主动说 = 新帖 (§2.3)。
-        const out = channelOutboundOf(row, (id) => roomState(chat)?.byId.get(id)?.post);
-        if (out.action === "reply") {
+      if (plan.via === "channel") {
+        // 频道: 回话 (reply 且 re 到带 post 的评论行) = 评论回原帖; 主动说 = 新帖 (§2.3)。
+        if (plan.action === "reply") {
           // 企微只允许评论 @ 过 bot 的帖子; 被拒就回退新帖 (带引用), 不让交代静默丢失。
           const quote = replyQuote(row);
-          if (authorTarget) postAsChannelReply(authorTarget, chat, out.post, body, quote);
+          const post = plan.post ?? "";
+          if (authorTarget) postAsChannelReply(authorTarget, out, post, body, quote);
           else {
-            const full = linkTags(chat, md);
-            void sendTopicReplyOrPost(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), out.post, full, quote ? quote + full : full)
-              .catch((e) => log.warn({ mod: "room", room: chat, post: out.post, err: errText(e) }, "room: topic 评论回帖失败"));
+            const full = linkTags(out, md);
+            void sendTopicReplyOrPost(ws.client, log.child({ mod: "room" }), plan.topicId, post, full, quote ? quote + full : full)
+              .catch((e) => log.warn({ mod: "room", room: chat, src: out, post, err: errText(e) }, "room: topic 评论回帖失败"));
           }
           return true;
         }
-        if (authorTarget) postAsTopic(authorTarget, chat, body);
-        else void sendTopicPost(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), linkTags(chat, md))
-          .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: topic 镜像失败"));
+        if (authorTarget) postAsTopic(authorTarget, out, body);
+        else void sendTopicPost(ws.client, log.child({ mod: "room" }), plan.topicId, linkTags(out, md))
+          .catch((e) => log.warn({ mod: "room", room: chat, src: out, err: errText(e) }, "room: topic 镜像失败"));
         return true; // 已交给传输; 异步失败由上面的 catch 记 warn
       }
-      const postRef = postRefOf(cfg, chat);
-      if (postRef) {
-        // 帖子 room: 一律评论到根帖。
-        if (authorTarget) postAsReply(authorTarget, chat, postRef.channel, postRef.post, body);
-        else void sendTopicReply(ws.client, log.child({ mod: "room" }), postRef.channel, postRef.post, linkTags(chat, md))
-          .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: post 镜像失败"));
+      if (plan.via === "post") {
+        // 帖子: 一律评论到根帖 (副源帖子 = 绑进本 room 的那条帖; 企微侧地址仍查 channel-posts)。
+        if (authorTarget) postAsReply(authorTarget, out, plan.channel, plan.post, body);
+        else void sendTopicReply(ws.client, log.child({ mod: "room" }), plan.channel, plan.post, linkTags(out, md))
+          .catch((e) => log.warn({ mod: "room", room: chat, src: out, err: errText(e) }, "room: post 镜像失败"));
         return true;
       }
-      if (authorTarget) postAs(authorTarget, chat, body);
-      else notifyChat(chat, md);
+      if (authorTarget) postAs(authorTarget, out, body);
+      else notifyChat(out, md);
       return true;
     };
     const roomLog = log.child({ mod: "room" });
