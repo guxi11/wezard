@@ -148,7 +148,7 @@ export interface MsgRow extends OpBase {
   origin: MsgOrigin;
   ext?: string;
   bubble?: { stream: string; expires: number };
-  /** daemon 系统行的机器语义 (undelivered / left / quota …), 用于去重, 不给模型推断。 */
+  /** daemon 系统行的机器语义 (undelivered / left …), 用于去重, 不给模型推断。 */
   sys?: string;
 }
 export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | AssignOp | MsgRow;

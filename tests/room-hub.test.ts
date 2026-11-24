@@ -79,7 +79,7 @@ const settle = () => hub.pump();
 }
 // interrupt: 对方忙 → 先 Esc 再投; 不带 interrupt 时忙就等
 {
-  await hub.onIdle(A); // §8a 出站额度按轮清零: A 上一轮已发满 3 条工具行, 这里轮终再开新一轮
+  await hub.onIdle(A); // 轮终: 清掉 A 本轮的 turn 状态
   busy = new Set(["chat:wrG#b"]);
   hub.append(room, { author: { kind: "wizard", id: A }, kind: "say", origin: "tool", to: [{ kind: "wizard", id: B }], text: "普通" });
   const n0 = pasted.length;

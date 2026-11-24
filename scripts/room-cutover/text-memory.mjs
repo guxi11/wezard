@@ -18,7 +18,7 @@ const RULES = [
     to: "- 终句不进群、不关账; 交付结论走 chat_reply({re, text, status}), 正文里写不写 @name 都没有路由副作用。" },
   // 2026-11-19 19:15 该文件被压缩重写, 规则按新文本重定 (旧三条前缀已不存在)。
   { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "strict: 存量群 implicit",
-    to: "room 模型(2026-11-19 切换): 沟通只剩 room 账本 (~/.wezard/state/rooms/*.jsonl, 目录从配置 stateDir 派生); 完成的唯一信号=duty 处理人的 chat_reply status (done/passed/canceled), 终句零语义; 成员即发言权, 出站额度每轮≤3/每 room 每分钟≤10 (系统行与人话不计), 唤醒预算每 room 10 分钟 20 次; 未交代的 duty 当轮提醒一次, 再闲升级一条 system 行进 room 并镜像进群; 结论一条 chat_reply 讲完, 带文件同轮 send_file 不重复正文; 打断只用 interrupt:true (限直属 parent / host / 人); sparePool.maxTotal 配 4/源码 2。" },
+    to: "room 模型(2026-11-19 切换): 沟通只剩 room 账本 (~/.wezard/state/rooms/*.jsonl, 目录从配置 stateDir 派生); 完成的唯一信号=duty 处理人的 chat_reply status (done/passed/canceled), 终句零语义; 成员即发言权 (出站无额度), 唤醒预算每 room 10 分钟 20 次; 未交代的 duty 当轮提醒一次, 再闲升级一条 system 行进 room 并镜像进群; 结论一条 chat_reply 讲完, 带文件同轮 send_file 不重复正文; 打断只用 interrupt:true (限直属 parent / host / 人); sparePool.maxTotal 配 4/源码 2。" },
   { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", sub: "room 重构(人 11-19 裁决, 未上线)",
     to: "room 重构(人 11-19 裁决, 11-19 已切换上线)" },
   { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "回执: receipts.json 全 superseded", to: null },

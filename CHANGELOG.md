@@ -27,6 +27,7 @@
 - **频道里回一条没 @ 过 bot 的帖子评论, 交代被企微拒后静默丢失 (人 2026-11-23「当 channel 里的消息没有艾特机器人时, 能回复这条帖子吗」)** — 企微限制: bot 只能评论 **@ 过它**的帖子。`sendTopicReply` 现在被 errcode 拒时返回 `"rejected"`, 新增 `sendTopicReplyOrPost` 回退 `send_post` 发新帖, 正文开头带 `> 回 <名字>: <原话前 80 字>` 引用标注 (回退记 log.warn), 不再静默丢失; 帖子 room 的出站不变。未配对预判未做 (按运行期 errcode 回退)。文档 channel-monitor.md §2.3, charter 与 `chat_reply` / `chat_say` 描述写明这条限制, 测试 `tests/strict-channel.test.ts` ⑥。
 
 ### Removed
+- **room 出站额度的残留文案清掉 (人 2026-11-24「没有出站预算了, 是很老的逻辑了吧, 清掉」)** — 判定本身已在 a3653e2 删除 (`daemon/room-quota.ts` / `tests/room-quota.test.ts` / room-hub 的 admit 闸与 onIdle 计数清零, 409 那条路径不再存在), 这次清指向它的文案: 契约 §3a 的 system 行清单、设计稿 §147 的「额度全量生效」、多源绑定设计稿 §4/§9/§11-4 (「出站预算按 room」改为「出站无额度 · 按源限流」观察项)、`shared/room.ts` 的 `sys` 语义注释、`tests/room-hub.test.ts` 的 §8a 注释、切换脚本 `scripts/room-cutover/text-memory.mjs` 写进 workspace 记忆的那句。唤醒预算 (20 / room / 10 分钟) 与 interrupt 预算不是出站预算, 保留。老 CHANGELOG 条目与 docs/room 的历史记录 (cutover / fix-task / verify) 按记录不动。
 - **`room_transfer` 退役 (交接 = 把接手方拉进 room, 再自己 `room_leave`)** — **BREAKING**: 删 MCP 工具 `room_transfer`、`POST /room/transfer`、charter 工具清单与 `mcp/output.ts` 的渲染分支; 老账本里的 `move` 行仍由 fold 读侧折叠 (逾期计时照算活动), 新群引导的 duty 交接不走它。docs/room/contract.md 与 技术说明.md 同步。
 - **频道一次性判官退役** — **BREAKING**: 删 `wrc.channel.judge` 配置、`runJudgeOnce` / `askJudge` / `buildJudgePrompt` / `parseVerdict` / `judgeAndMaybe` 与 `tests/channel-judge.test.ts` —— 频道里是否回应改由 room 的 monitor 判 (上面的 activate 行), 频道事件也不再伪造 `chatid=topic_id` 的群帧进 inbound。
 
