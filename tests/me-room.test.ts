@@ -7,11 +7,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
-import { bindWizardStore, loadWizardStore } from "../daemon/wizard.js";
+import { bindWizardStore, identityWorkspaceOf, loadWizardStore } from "../daemon/wizard.js";
 import { openRoomStore } from "../daemon/rooms.js";
 import { createRoomHub } from "../daemon/room-hub.js";
 import { isBoundRoom, mirrors, openDuties, roomHost, type Draft, type MsgRow, type RoomOp, type Who } from "../shared/room.js";
-import { ensureMeWizard, ensureMeRoom, meChannelSay, meRowMirror, meRoomId, meTargetOf, namesMe, ME_MARK } from "../daemon/me-room.js";
+import { ensureMeWizard, ensureMeRoom, meChannelSay, meRowMirror, meRoomId, meTargetOf, meWorkspaceOf, namesMe, ME_MARK } from "../daemon/me-room.js";
 import { targetChatId } from "../daemon/approval.js";
 import { uid, W } from "./room-fixture.js";
 import { ConfigSchema } from "../shared/config.js";
@@ -34,6 +34,17 @@ assert.equal(store.get(meTargetOf("tester")), rec, "幂等不重复 upsert");
 const t2 = ensureMeWizard(store, "other");
 assert.equal(t2, "user:other#me", "每用户一个");
 assert.notEqual(store.get(t2)!.name, rec.name);
+
+// ①b 默认工作区 = 用户的 wezard 配置根 (人 2026-11-24 纠正「换成用户 wezard 配置目录」),
+//    不是业务仓库; 存量记录缺它 (旧版本没写) 才补, 已给的不覆盖。
+assert.equal(meWorkspaceOf("/Users/x/.wezard/config.jsonc"), "/Users/x/.wezard");
+assert.equal(meWorkspaceOf(""), "", "没有 sourcePath 就不写, 留给 CLI 缺省");
+assert.equal(rec.workspace, undefined, "建时没给工作区就不写这个字段");
+assert.equal(ensureMeWizard(store, "tester", "/Users/x/.wezard"), t1, "幂等");
+assert.equal(store.get(t1)!.workspace, "/Users/x/.wezard", "存量记录缺工作区 → 补上");
+assert.equal(identityWorkspaceOf(store, t1), "/Users/x/.wezard", "起会话读的就是它");
+ensureMeWizard(store, "tester", "/elsewhere/.wezard");
+assert.equal(store.get(t1)!.workspace, "/Users/x/.wezard", "已有值不被覆盖");
 
 // ── ② me-room: 开房 (me=host, 人入座) + judge 全套沿用 ──────────────────
 const ME = W(uid(9));
@@ -190,7 +201,7 @@ const mhub = createRoomHub({
   live: async () => false, idle: async () => true, interrupt: async () => {}, paste: async () => "ok",
 });
 const cdeps = {
-  store, state: (r: string) => cstore.get(r),
+  store, workspace: "/Users/x/.wezard", state: (r: string) => cstore.get(r),
   write: (r: string, ops: readonly RoomOp[]) => { mhub.write(r, ops); },
   append: (r: string, d: Draft) => mhub.append(r, d),
   ensureSession: (t: string) => { coldStarts.push(t); },
@@ -204,6 +215,7 @@ assert.ok(c1?.ok, "点名 .me → 落行");
 assert.equal(c1!.row.room, meRoomId("chatter"), "落他的私有 me-room");
 assert.ok(c1!.row.wake.includes(cmeRec.uid!), "开 duty 唤醒 me");
 assert.equal(cstore.get("chat:topic1"), undefined, "发生地零行 (host / perceptron 看不见这句)");
+assert.equal(store.get(cme)!.workspace, "/Users/x/.wezard", "频道这条路也把配置根写成 me 的工作区");
 assert.deepEqual(coldStarts, [cme], "me 冷着就顺手起会话");
 assert.equal(cstore.get(meRoomId("chatter"))!.byId.get(c1!.row.id)!.src, "chat:topic1", "行上记发生地");
 // 评论 (没 @ 机器人) 一样; 走帖子源时 src 是帖子 room, post 可省。

@@ -58,7 +58,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
-import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf } from "./me-room.js";
+import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf, meWorkspaceOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
@@ -2309,12 +2309,15 @@ const main = async (): Promise<void> => {
       // me —— 行只落他的私有 me-room, **发生地零行** (host / perceptron 看不见这句)。先于引导 /
       // 绑定: 这句是点给 me 的, 不是频道的新活。me 冷着就顺手起会话 (泵贴不进没绑定的 pane)。
       const me = meChannelSay({
-        store: wizardStore(), state: roomState, write: (room, ops) => { hub.write(room, ops); },
+        store: wizardStore(), workspace: meWorkspaceOf(sourcePath), state: roomState,
+        write: (room, ops) => { hub.write(room, ops); },
         append: (room, draft) => hub.append(room, draft),
         ensureSession: (target) => {
           const store = wizardStore();
           if (!store || m.hasMirrorTarget(target)) return;
-          void m.newSession(target, settleName(store, chatNameOf(cfg, target), target) || target, { silent: true })
+          // 工作区取记录上的 (meWorkspaceOf 落的那条): 不写 cwd 会落 wrc.cwd —— me 不属于业务仓库。
+          const cwd = identityWorkspaceOf(store, target) || undefined;
+          void m.newSession(target, settleName(store, chatNameOf(cfg, target), target) || target, { silent: true, ...(cwd ? { cwd } : {}) })
             .catch(() => undefined);
         },
       }, { author: e.author, text, files: mediaFiles, src: e.room, ...(e.post ? { post: e.post } : {}) });

@@ -11,6 +11,7 @@
 // 全套照常; 出站不因此走群镜像, roomMirror 的 me 分支接管 (本文件 meRowMirror)。
 // 审批卡无需改动: me 会话 target `user:<uid>#me` 在 approval targetChatId
 // 剥 #tag 后就是用户 DM chatid。
+import { dirname } from "node:path";
 import { DAEMON, whoKey, type Draft, type FileRef, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who } from "../shared/room.js";
 import { allNames, baseOfKey, keyOf, normalizeTag, tagOfKey } from "../shared/session-label.js";
 import { roomBubble } from "./message-format.js";
@@ -30,11 +31,23 @@ export const meUserOf = (room: string): string => meUser(room.slice(3));
 export const meTargetOf = (userid: string): string => keyOf("user:" + meUser(userid), ME_TAG);
 export const isMeTarget = (target: string): boolean => baseOfKey(target).startsWith("user:") && tagOfKey(target) === ME_TAG;
 
+/** me 的默认工作区 (人 2026-11-24 纠正「不要这个目录, 换成用户 wezard 配置目录」): 用户的
+ *  wezard 配置根 —— 就是 config 的 sourcePath 所在目录 (缺省 `~/.wezard`), 不是某条业务仓库。
+ *  me 是用户自己的分身, 不属于任何项目。 */
+export const meWorkspaceOf = (sourcePath: string): string => (sourcePath ? dirname(sourcePath) : "");
+
 /** 惰性落 me wizard 记录 (首次 .me 时): 普通记录 + kind "me"、无 parent, 名字
- *  `me-<userid>` 起手 (撞名退 -N), 绝不占保留字 "me"。幂等。返回 target。 */
-export const ensureMeWizard = (store: WizardStore | undefined, userid: string): string => {
+ *  `me-<userid>` 起手 (撞名退 -N), 绝不占保留字 "me"。幂等。返回 target。
+ *  `workspace` = me 的默认工作区 (meWorkspaceOf); 存量记录缺它 (旧版本没写) 就补上,
+ *  已经有的不动 —— 显式给过的值优先。 */
+export const ensureMeWizard = (store: WizardStore | undefined, userid: string, workspace = ""): string => {
   const target = meTargetOf(userid);
-  if (!store || store.get(target)) return target;
+  if (!store) return target;
+  const prev = store.get(target);
+  if (prev) {
+    if (workspace && !prev.workspace) store.upsert(target, { workspace });
+    return target;
+  }
   store.upsert(target, {
     kind: "me",
     identity: target,
@@ -43,6 +56,7 @@ export const ensureMeWizard = (store: WizardStore | undefined, userid: string): 
     lead: undefined,
     leadOf: undefined,
     description: "用户的个人分身 (.me): 用户在任何地方说 .me 都路由到这里, 对话只进私有 me-room, 不进任何群账本; 回复发回用户说话的地方。它是普通 wizard —— 不进已有 room, 找 host / 其他 wizard 用 chat_ask 开 dm。向用户交代用 chat_reply (re 用户在 me-room 的行)。",
+    ...(workspace ? { workspace } : {}),
   });
   store.claim(target, normalizeTag("me-" + meUser(userid)) || "me-proxy");
   return target;
@@ -80,6 +94,8 @@ export const namesMe = (text: string): boolean => allNames(text).includes(ME_TAG
 
 export interface MeChannelDeps {
   store: WizardStore | undefined;
+  /** me 的默认工作区 (meWorkspaceOf(sourcePath))。 */
+  workspace?: string;
   state: (room: string) => RoomState | undefined;
   write: (room: string, ops: readonly RoomOp[]) => void;
   append: (room: string, d: Draft) => Verdict;
@@ -96,7 +112,7 @@ export const meChannelSay = (
   e: { author: string; text: string; files?: readonly FileRef[]; src?: string; post?: string },
 ): Verdict | undefined => {
   if (!e.author || !namesMe(e.text)) return undefined;
-  const target = ensureMeWizard(d.store, e.author);
+  const target = ensureMeWizard(d.store, e.author, d.workspace);
   const uid = d.store?.get(target)?.uid;
   if (!uid) return undefined;
   const room = ensureMeRoom({ state: d.state, write: d.write, meUid: () => uid }, e.author);

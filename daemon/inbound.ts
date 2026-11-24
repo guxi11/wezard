@@ -26,7 +26,7 @@ import { awaitChannelOfPost, channelOf, channelOfPost, postsOfChannel } from "./
 import { settleChannelSteward } from "./onboarding.js";
 import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, type OnboardingBound, type OnboardingStore } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
-import { ensureMeWizard, ME_TAG } from "./me-room.js";
+import { ensureMeWizard, meWorkspaceOf, ME_TAG } from "./me-room.js";
 import { truncate } from "../shared/std.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
@@ -1114,7 +1114,7 @@ export const installInboundRouter = (
   // 的唯一入口: 其余点名 (worker、别群的管家) 都走 resolveName, 跨群共享同一会话。
   const resolve: Resolve = (base, name, speaker) => {
     // 保留别名 "me": 按发话人解析/惰性落他自己的分身 (me-room 的落账/回发在 wiring B 分流)。
-    if (name === ME_TAG && speaker) return ensureMeWizard(wizardStore(), speaker);
+    if (name === ME_TAG && speaker) return ensureMeWizard(wizardStore(), speaker, meWorkspaceOf(sourcePath));
     // §4.1: 源已绑 / 帖子源首触时, 裸消息的接待对象是承载 room 的 host, 不是源自己的类绑定化身
     // (后者会给首触开一个新实例 —— 正是 P3 要停掉的行为)。
     if (!name) return opts.sourceRoute?.(base)?.target ?? stewardReception(base);
