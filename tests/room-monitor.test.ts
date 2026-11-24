@@ -71,6 +71,25 @@ const withMonitor = () => {
   assert.deepEqual(openDuties(s).map((d) => d.slot), ["wizard:" + B.id]);
 }
 
+// ④b 人引用本 room 里某个 wizard 的一行 → 直接投给它 (与点名同义, 不经 perceptron / host)
+{
+  const s = withMonitor();
+  const post = say(s, { author: B, kind: "say", text: "图接上了, 再发一张我核对入站" });
+  const row = say(s, { author: H1, kind: "say", origin: "inbound", re: [post.id], text: "可以收到吗" });
+  assert.deepEqual(row.wake, [B.id], "回复谁就投给谁");
+  assert.deepEqual(row.to, [B], "收话人落进行里");
+  assert.equal(row.monitor, undefined, "不进感知");
+  assert.deepEqual(openDuties(s).map((d) => d.slot), ["wizard:" + B.id]);
+}
+
+// ④c 引用的是一条 monitor 判决 / daemon 行 (不是 wizard 发言) → 照旧走感知 / host
+{
+  const s = withMonitor();
+  const sysRow = say(s, { author: DAEMON, kind: "system", origin: "daemon", text: "已离开, 这条没有答案了" });
+  const row = say(s, { author: H1, kind: "say", origin: "inbound", re: [sysRow.id], text: "那这条呢" });
+  assert.deepEqual(row.wake, [M.id], "没指向 wizard: 交感知");
+}
+
 // ⑤ activate: 只给 re 那条人话在 to 名下开 duty, 并唤醒 to
 {
   const s = withMonitor();

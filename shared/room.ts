@@ -447,7 +447,16 @@ const judgeAddressees = (s: RoomState, d: Draft, re: readonly string[], status: 
   if (d.kind === "reply" && status === "need" && d.author.kind === "wizard")
     return uniqWho(openDuties(s).filter((x) => re.includes(x.msg) && holderMatches(s, x, d.author)).map((x) => x.asker).filter((a) => a.kind === "human"));
   if (d.kind === "say" && d.author.kind === "human")
-    return uniqWho(closes.flatMap((k) => { const a = s.duties.get(k)?.asker; return a?.kind === "wizard" && s.members.has(whoKey(a)) ? [a] : []; }));
+    return uniqWho([
+      ...closes.flatMap((k) => { const a = s.duties.get(k)?.asker; return a?.kind === "wizard" && s.members.has(whoKey(a)) ? [a] : []; }),
+      // 人引用 / 回复了某个 wizard 的一行 (帖子 / 交代 / 回话): 这句就是答给它的, 与点名同义 ——
+      // 直接开给它, 不再交给 host / perceptron 猜 (2026-11-24 人报: 回复谁就该投给谁)。
+      ...re.flatMap((id) => {
+        const a = s.byId.get(id)?.author;
+        const m = a ? s.members.get(whoKey(a)) : undefined;
+        return a?.kind === "wizard" && m && m.role !== "monitor" && !sameWho(a, d.author) ? [a] : [];
+      }),
+    ]);
   return [];
 };
 
@@ -818,26 +827,43 @@ export const wakeTargets = (s: RoomState, row: MsgRow, ctx: Pick<JudgeCtx, "clos
   return out;
 };
 
-// ── 离开 (§4): 手上的 duty 由 daemon 写 canceled, 唤醒提问者 ──────────
+// ── 离开 (§4): 人提的账交给下一位 host, 其余由 daemon 写 canceled ──────
 
-/** 成员离开要落的行: 每条它名下 (静态槽位) 未关的 duty 一行 canceled reply, 然后 leave。
+/** 成员离开要落的行。每条它名下 (静态槽位) 未关的 duty:
+ *  - 提问者是人 → 不取消, move 给下一位 host + 一条 trigger 唤醒它 (人问的话不许以「没有答案了」收场,
+ *    2026-11-24 人报: 人回复某 wizard 后它退出, 两条话当场被取消; 应转给 host);
+ *  - 否则 (wizard 提问) → 一行 canceled reply, 唤醒提问者。
  *  host 槽位的 duty 不取消 —— 它们随 host 求值自然落到下一位。 */
 export const leaveOps = (s: RoomState, who: Who, by: Who, now: number, why = ""): RoomOp[] => {
   const mine = openDuties(s).filter((d) => d.slot !== HOST_SLOT && d.slot === whoKey(who));
   const byMsg = new Map<string, Duty[]>();
   for (const d of mine) byMsg.set(d.msg, [...(byMsg.get(d.msg) ?? []), d]);
+  // 下一位 host = 去掉它之后加入序最小的 wizard 成员 (monitor 不当 host)。
+  const next = hostOf([...s.members.values()].filter((m) => !sameWho(m.who, who)));
   let seq = s.seq;
-  const rows: RoomOp[] = [...byMsg.entries()].map(([msg, ds]) => {
+  const rows: RoomOp[] = [];
+  const moves: RoomOp[] = [];
+  for (const [msg, ds] of byMsg.entries()) {
     seq += 1;
     const asker = ds[0]!.asker;
-    return {
+    const ask = s.byId.get(msg);
+    if (next && ask && asker.kind === "human") {
+      rows.push({
+        op: "msg", at: now, room: s.id, id: msgIdOf(s.id, seq), seq, author: DAEMON, ord: 0, speak: "daemon",
+        kind: "trigger", text: "[wezard] " + who.id + " 已离开" + (why ? " (" + why + ")" : "") + ", 人问的这条转给本 room 的 host。\n原话 (来自 " + asker.id + "): " + ask.text,
+        to: [next], re: [msg], wake: [next.id], origin: "daemon", sys: "left-handoff",
+      } satisfies MsgRow);
+      moves.push(...ds.map((d): RoomOp => ({ op: "move", at: now, room: s.id, duty: d.msg, from: who, to: next, by })));
+      continue;
+    }
+    rows.push({
       op: "msg", at: now, room: s.id, id: msgIdOf(s.id, seq), seq, author: DAEMON, ord: 0, speak: "daemon",
       kind: "reply", text: "[wezard] " + who.id + " 已离开" + (why ? " (" + why + ")" : "") + ", 这条没有答案了", re: [msg],
       status: "canceled", closes: ds.map((d) => d.key), wake: asker.kind === "wizard" && !sameWho(asker, who) ? [asker.id] : [],
       origin: "daemon", sys: "left",
-    } satisfies MsgRow;
-  });
-  return [...rows, { op: "leave", at: now, room: s.id, who, by, ...(why ? { why } : {}) }];
+    } satisfies MsgRow);
+  }
+  return [...rows, ...moves, { op: "leave", at: now, room: s.id, who, by, ...(why ? { why } : {}) }];
 };
 
 // ── 渲染 (注入头只给模型看, 任何读侧都不把它解析回来当事实) ─────────

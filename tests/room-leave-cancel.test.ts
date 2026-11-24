@@ -20,13 +20,29 @@ const X = W(uid(1)), Y = W(uid(2)), Z = W(uid(3));
   assert.equal(s.members.has("wizard:" + X.id), false);
 }
 
-// ② 提问者是人 → 不唤醒 wizard, 行按 §3a 镜像
+// ② 提问者是人 → 账转给下一位 host (move + trigger 唤醒它), 不写「没有答案了」
 {
-  const s = room("chat:wrG", [X]);
+  const s = room("chat:wrG", [X, Z]);
   const human = H("T1");
   const d = say(s, { author: human, origin: "inbound", text: "帮我看看", to: [X] });
   const ops = leaveOps(s, X, X, 9_000);
-  const r = ops[0] as MsgRow;
+  ops.forEach((o) => applyOp(s, o));
+  assert.equal(s.members.has("wizard:" + X.id), false);
+  const held = dutiesHeldBy(s, Z);
+  assert.deepEqual(held.map((x) => x.msg), [d.id], "人的账落到新 host 名下");
+  const trig = s.msgs.find((m) => m.sys === "left-handoff")!;
+  assert.deepEqual({ kind: trig.kind, to: trig.to, re: trig.re, wake: trig.wake }, { kind: "trigger", to: [Z], re: [d.id], wake: [Z.id] });
+  assert.equal(mirrors(trig), false, "转交是内部唤醒, 不进群");
+  assert.equal(s.msgs.some((m) => m.status === "canceled"), false);
+}
+
+// ②b 提问者是人但没有下一位 host → 只能按老样子取消
+{
+  const s = room("chat:wrH", [X]);
+  const human = H("T1");
+  const d = say(s, { author: human, origin: "inbound", text: "帮我看看", to: [X] });
+  const r = leaveOps(s, X, X, 9_000)[0] as MsgRow;
+  assert.equal(r.status, "canceled");
   assert.deepEqual(r.re, [d.id]);
   assert.deepEqual(r.wake, []);
   assert.equal(mirrors(r), true);

@@ -81,7 +81,7 @@ type Who = { kind: "human"; id: string /*userid*/ }
 **人也有 duty** (`Duty.kind` 多一个 `"need"`; 人名下的 duty 槽位是 `human:<userid>`, 读侧 `dutiesHeldBy` / `dutyFacts` 与 wizard 同口径):
 - 开: (a) wizard 对 asker 是人的 duty 写 `reply status:"need"` —— judge 把这些人补进该行的 `to`, fold 据此在每个人名下开一条 `need` (asker = 这个 wizard, msg = 这条 reply 的 id); (b) `chat_ask` 的 `to` 可点名本 room 的人成员 (`human:<userid>`), 人名下开 ask / task (`to` 里至少一个 wizard 或人)。
 - 关: 人在本 room 的**下一句话**关掉它名下未关的 duty, 状态记 done (写进该行 `closes`)。这句带 `re` (企微引用, daemon 把引用正文对回账本里最近一条互相包含的行: `quotedRowIds`) 且命中其中几条 → 只关那几条; 没引用 / 引用没命中它名下的账 → 全关。人写 `chat_reply` 照旧 (超集)。**提问的 wizard** 对自己开出的人名下 duty 可显式写 `canceled` / `passed` (不再需要了; done 仍只有人), 且不受「提问者补充先读」覆盖检查。
-- 唤醒: 人话关了谁的账, 谁 (提问者, 仍在 room 的 wizard) 由 judge 补进这行的 `to` —— 与点名同义: 唤醒它、给它开 `human` duty、且这句不再当「没点名的人话」落给 host (所以非 host 的提问者被叫醒, host 不被连带吵醒)。
+- 唤醒: 人话关了谁的账, 谁 (提问者, 仍在 room 的 wizard) 由 judge 补进这行的 `to` —— 与点名同义: 唤醒它、给它开 `human` duty、且这句不再当「没点名的人话」落给 host (所以非 host 的提问者被叫醒, host 不被连带吵醒)。**人话引用 (回复) 了本 room 里某个 wizard 的一行** (帖子 / 交代 / 回话, `quotedRowIds` 对回的那条) 同样把它的作者补进 `to`: 回复谁就投给谁, 不再交给 perceptron / host 猜; 引用的不是 wizard 发言 (monitor 判决、daemon 系统行) 时照旧。
 - 人叫不醒、也不被 pane 投递 (唤醒泵、Stop hook / 欠账提醒、`reportGone` 都只认 wizard holder)。
 - 逾期 (§overdue): 人名下的 duty 不发 remind; 到 `groupMin` 在该 room 写一行 `sys:"overdue-group@<userid>"` 的 system 行「⏰ <人> 有一条 .<wizard> 的提问 (<id>) N 分钟没回」(绑定 room 镜像进企微, 非绑定 room 另发提问者 home 群); 提问的 wizard 已不在 room 里就不催。反过来 wizard 名下那条若它最后一条非终态是 `need`、且那句 need 在人名下开的账还开着, 不对该 wizard 计逾期 (球在人那边)。 派出去的子件也算 holder 的活动: duty 的 msg id 被别的 task / ask 行当 `for` (血缘; 工具没显式传时 daemon 填「本轮唤醒该 wizard 且仍由它持有未关的唯一一条 duty」, 零条或多条则留空) 时, 子行自身、room 里非 daemon 行对它的回应 (含子件 `done` 关账那一刻) 以及孙辈的同类活动 (跨 room、深度 ≤ 5) 都重置父 duty 的计时; 子件也静止超时才照常 remind。`for` 写的是名字而非消息 id 则忽略。
 
@@ -159,7 +159,7 @@ export const hostOf = (members: readonly { who: Who; ord: number }[]): string | 
 - 新群: guide 以 founder 入群 (ord=1) 即 host。交接 host = guide room_invite 人指定的成员, 然后 room_leave 自己 → host 自然落到下一位。
 - 人不进 host 排序, 但拥有 host 的全部权限。
 - 未决 join-req 的 holder 读时 = hostOf(当前成员), host 换人自动归新 host, 无转交状态。
-- 离开: 离开者手上该 room 的未结 duty 由 daemon 写 status:"canceled" 的系统 reply (`closes` 记上), 唤醒提问者。
+- 离开: 离开者手上该 room 的未结 duty, **提问者是人 → 转给下一位 host** (一条 `move` op 把 duty 挪到它的槽位 + 一条 `kind:"trigger" sys:"left-handoff"` 行唤醒它, 正文复述人的原话; trigger 不进群), 不取消、不发「没有答案了」; 提问者是 wizard (或 room 里已没有别的 wizard) → 由 daemon 写 status:"canceled" 的系统 reply (`closes` 记上), 唤醒提问者。
   - 必带测试 `tests/room-leave-cancel.test.ts`, 至少覆盖:
     - X 持有 Y 提的 duty D 时离开 → 账本多一行 `{author: daemon, kind: reply, status: canceled, re: [D], closes: [D@X], wake: [Y]}`;
     - 提问者是人 → 不唤醒 wizard, 该行按 §3a 镜像进企微;
