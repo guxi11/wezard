@@ -971,7 +971,7 @@ export const peerMentionPart = (mentions: readonly PeerMention[], cwd = ""): Par
   const fresh = mentions.filter((m) => !seen(`m:.${m.tag}`));
   const known = mentions.filter((m) => seen(`m:.${m.tag}`));
   const rule = !seen("rule:mention");
-  // 提醒是给模型读的系统面 (§1.5): 名字行一律裸名 —— 人消息里的 `.x` / `🧙‍♂️ x` 写法都在这里剥成 x。
+  // 提醒是给模型读的系统面 (§1.5): 名字行一律裸名 —— 人消息里的 `.x` / `🧙 x` 写法都在这里剥成 x。
   const row = (m: PeerMention): string =>
     `- ${m.tag}${m.job ? ` job="${clipLine(m.job, 80).replace(/"/g, "'")}"` : ""}${m.foreign ? ` chat=${m.chat || "(other)"}` : ""}${m.cwd && m.cwd !== cwd ? ` cwd=${tildePath(m.cwd)}` : ""}`;
   return {

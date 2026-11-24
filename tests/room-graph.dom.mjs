@@ -232,7 +232,7 @@ try {
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
   // 默认 2d: 3 天前的老 room 不在范围里 (ROOMS 有 3 间, 画 2 间)。
   // 两人 room (DM) 不画节点: alice—bob 之间直接一条可点的线, 点它 = 打开那个 room。
-  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 📌 / 只有 wizard 的 room 🧙‍♂️ (图节点 + 图例); 类型文字只在 tooltip。
+  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 📌 / 只有 wizard 的 room 🧙 (图节点 + 图例); 类型文字只在 tooltip。
   const icons = await page.evaluate(() => ({
     nodes: [...document.querySelectorAll(".rv-room text")].map((t) => t.textContent.trim().split(" ")[0]),
     tip: ((document.querySelector(".rv-room title") || {}).textContent || ""),
@@ -240,7 +240,7 @@ try {
   }));
   assert.deepEqual(icons.nodes, ["👥"], "群 G (多人群聊) 的节点图标 = 👥: " + JSON.stringify(icons));
   assert.match(icons.tip, /群聊 · 企微群/, "类型文字留在 tooltip: " + icons.tip);
-  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "#️⃣", "📌", "🧙‍♂️"], "图例五种 room 图标 (群聊 / 单聊 / 频道 / 帖子 / wizard room): " + JSON.stringify(icons.legend));
+  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "#️⃣", "📌", "🧙"], "图例五种 room 图标 (群聊 / 单聊 / 频道 / 帖子 / wizard room): " + JSON.stringify(icons.legend));
   assert.equal(counts.rooms, 1, "room 节点数 = 2d 内有动静的 ≥3 人 room 数 (两人 room 改成连线)");
   assert.deepEqual(counts.directLinks, [DM], "两人 room 画成成员之间的线");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
@@ -776,12 +776,12 @@ try {
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
     return read;
   };
-  // 1) 单聊 (HM: 一个人 + 一个 wizard 的 wecom-dm, 上面已入 ROOMS) = 💬; 多人群 = 👥; 只有 wizard 的 ≥3 人 adhoc = 🧙‍♂️。
+  // 1) 单聊 (HM: 一个人 + 一个 wizard 的 wecom-dm, 上面已入 ROOMS) = 💬; 多人群 = 👥; 只有 wizard 的 ≥3 人 adhoc = 🧙。
   const ADHOC = "adhoc:abc123";
   const adhoc = roomFact(ADHOC, "adhoc", [A, B, C].map((id, i) => ({ who: who("wizard", id), name: "w" + i, via: "invite", since: 9 + i, ord: i + 1, host: i === 0 })), who("wizard", A));
   const icoG = await graphOf({ rooms: [adhoc], nodes: [] });
   const icoOf = (id) => icoG.rooms[icoG.roomIds.indexOf(id)].split(" ")[0];
-  assert.deepEqual([icoOf(G), icoOf(HM), icoOf(ADHOC)], ["👥", "💬", "🧙‍♂️"], "群 G 👥 / 单聊 HM 💬 / 三 wizard adhoc 🧙‍♂️: " + JSON.stringify(icoG));
+  assert.deepEqual([icoOf(G), icoOf(HM), icoOf(ADHOC)], ["👥", "💬", "🧙"], "群 G 👥 / 单聊 HM 💬 / 三 wizard adhoc 🧙: " + JSON.stringify(icoG));
 
   // 3) 可见性只有一条规则: 窗口内有消息的 room (最后一条消息在窗口内; 「全部」= 所有 room) → 它的成员及连线。
   //    不在任何这种 room 里的会话不显示: 没有「活跃 / 在跑 / 未读 / 未决 duty」的例外 (唯一保留的是正在看的 room, 见上面「选中的 room 滑出时间窗」)。

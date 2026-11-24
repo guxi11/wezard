@@ -96,7 +96,7 @@ export interface WizardRecord {
   role?: string;
   /** 身份种类; 缺省按 target 推 (`defaultKindOf`)。 */
   kind?: WizardKind;
-  /** 全局唯一的名字, 即它的地址 (人点名写 `.name`, 人面气泡头显示 `🧙‍♂️ name`; 系统面与参数层是裸名)。"" 只出现在还没被 claim 过的老记录上 ——
+  /** 全局唯一的名字, 即它的地址 (人点名写 `.name`, 人面气泡头显示 `🧙 name`; 系统面与参数层是裸名)。"" 只出现在还没被 claim 过的老记录上 ——
    *  第一次被任何地方问到名字时按「默认会话取聊天名, 分身取 slot id」补上并去重。 */
   name: string;
   /** 一句话职责 —— 别的 wizard 靠它决定该不该找你。 */
@@ -143,7 +143,7 @@ export interface WizardStore {
   get: (target: string) => WizardRecord | undefined;
   /** uid → 记录 (room 账本里的 wizard 引用 → 现在的 target / 名字)。 */
   byUid: (uid: string) => WizardRecord | undefined;
-  /** 名字 → 身份的锚点记录 (大小写不敏感; `fix` / `🧙‍♂️ fix` 都认)。名字是身份的地址:
+  /** 名字 → 身份的锚点记录 (大小写不敏感; `fix` / `🧙 fix` 都认)。名字是身份的地址:
    *  同身份的多个化身折叠到锚点 (target === identity 那条), 不与碰到的顺序相关。 */
   byName: (name: string) => WizardRecord | undefined;
   /** 确保 target 有一个身份级唯一的名字并返回它; 已有则原样返回, 不改;
@@ -673,7 +673,7 @@ export const ancestorsOf = (all: readonly WizardRecord[], target: string): strin
 const bullet = (xs: readonly string[]): string => xs.map((x) => `- ${x}`).join("\n");
 
 export interface WizardBrief {
-  /** 全局唯一的名字 —— 同时就是地址 (chat_ask 的 to / 各工具的 name 入参; wizard 之间与 rolepage 显示就是它, 人面气泡头带 🧙‍♂️)。 */
+  /** 全局唯一的名字 —— 同时就是地址 (chat_ask 的 to / 各工具的 name 入参; wizard 之间与 rolepage 显示就是它, 人面气泡头带 🧙)。 */
   name: string;
   /** 别人叫得到它的字符串 (chat_ask 的 `to` 等入参), 即名字本身。 */
   address: string;

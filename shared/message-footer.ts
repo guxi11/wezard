@@ -46,7 +46,7 @@ export const withMessageFooter = (content: string, policy?: MessageFooterPolicy)
   const seq = header?.header.match(/\b\d+\/\d+\b/)?.[0];
   // 这一层是所有出站气泡 (stream / standalone / frozen final) 的最后一道改写: 上游 chatHead 写的头在这里被剥掉重写,
   // 所以署名样式只能在这里定 —— 名字不挂链接, rolepage 入口归尾部 ✦。署名一律裸
-  // `🧙‍♂️ name：`: default / 非 default 都一样 (2026-11-16 人口径, 反引号在企微里渲染成代码样式)。
+  // `🧙 name：`: default / 非 default 都一样 (2026-11-16 人口径, 反引号在企微里渲染成代码样式)。
   const head = [said(tagHead(sender)), seq].filter(Boolean).join(" ");
   const message = headed(head, payload).trimEnd();
   return `${message}${endsWithClosedFence(payload) ? "\n\n" : " "}[✦](${url})`;

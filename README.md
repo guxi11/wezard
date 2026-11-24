@@ -131,7 +131,7 @@ wezard init
 /clear .docs      只清 docs 的上下文
 ```
 
-每条 wizard 的回复都带 `🧙‍♂️ name：` 署名头，在群里引用它的气泡就等于跟它说话。句中的 `a.ts`、`.gitignore` 这类不会被当成名字。
+每条 wizard 的回复都带 `🧙 name：` 署名头，在群里引用它的气泡就等于跟它说话。句中的 `a.ts`、`.gitignore` 这类不会被当成名字。
 
 **管家**
 

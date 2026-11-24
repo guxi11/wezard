@@ -18,7 +18,7 @@ import { allNames, baseOfKey, keyOf, normalizeTag, tagOfKey } from "../shared/se
 import { roomBubble } from "./message-format.js";
 import type { WizardStore } from "./wizard.js";
 
-/** 保留别名: `.me` / `🧙‍♂️ me` 路由到说话人自己的分身 (inbound resolve 分流)。 */
+/** 保留别名: `.me` / `🧙 me` 路由到说话人自己的分身 (inbound resolve 分流)。 */
 export const ME_TAG = "me";
 /** me 回复的末尾固定标注: 让人一眼看出这是独立在外的 .me 对话、不进本群记录。 */
 export const ME_MARK = "独立对话 · 不入本群记录";
@@ -89,7 +89,7 @@ export const ensureMeRoom = (d: MeRoomDeps, userid: string): string => {
   return room;
 };
 
-/** 这句里点名了 `.me` 吗 (`.me` / `🧙‍♂️ me` 与 `.名字` 同一套记号)。频道 / 帖子没有
+/** 这句里点名了 `.me` 吗 (`.me` / `🧙 me` 与 `.名字` 同一套记号)。频道 / 帖子没有
  *  「开头那个 tag 才是路由」的概念 —— 人话整段都在一处, 出现即点名。 */
 export const namesMe = (text: string): boolean => allNames(text).includes(ME_TAG);
 

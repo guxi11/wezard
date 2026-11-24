@@ -41,7 +41,7 @@ const QUOTE_TAIL_TURNS = 12;
 const chatPrincipal = (msg: BaseMessage): string =>
   withBot(msg.chattype === "group" && msg.chatid ? `chat:${msg.chatid}` : `user:${msg.from.userid}`, botTagOf(msg));
 
-// 寻址靠 wizard 的**全局名字** —— 人点名单写作 `.name` (`🧙‍♂️ name` 同样认, 双态), 它可能住在任何一个聊天里。
+// 寻址靠 wizard 的**全局名字** —— 人点名单写作 `.name` (`🧙 name` 同样认, 双态), 它可能住在任何一个聊天里。
 // Must be space-delimited or edge-of-string so paths / extensions like `a.ts`
 // survive. 一条消息只认**一个**路由名字, 且**只做前缀匹配**: 清洗之后 (链接标记
 // 还原成裸 `.name`、@ 已由 stripAt 剥掉、去掉开头的空白与不可见字符) 落在**消息
@@ -223,7 +223,7 @@ const renderHelp = (): string =>
     "每个 wizard 有一个**全局唯一**的名字;你点名写作 `.name`。类名是一个人的设定 (`X`), 实例地址是 `X-1`、`X-2`… (新群由引导落定)。",
     "消息里带 `.name`(如 `.docs 帮我改 README`)就是找那一个 —— 它可以住在任何一个聊天里,",
     "回复会回到你说话的这个群;不带 = 本聊天默认那个。开头写一个还不存在的 `.x` = 在这里叫出一个新的 x。",
-    "它们的回复以 `🧙‍♂️ name` 打头。`/clear .x`、`/pwd .x`、`/stop .x` 同理按名字走 (`🧙‍♂️ x` 写法同样认)。", 
+    "它们的回复以 `🧙 name` 打头。`/clear .x`、`/pwd .x`、`/stop .x` 同理按名字走 (`🧙 x` 写法同样认)。", 
     "`.me …` 是**你的个人分身**: 在任何聊天里说都只进你和它的私有对话 (带〔.me〕标注, 不进本群记录), 回复发回你说话的地方。它替你协调派活、直接找别的 wizard, 审批卡发你私聊。", 
     "wizard 知道自己是谁、在哪个目录、还有谁在,也能给自己改名、写职责、记长期记忆、上下文满了自己交接重开。",
     "wizard 之间在 room 里说话: 两人私聊 / 三人以上的临时 room 只在 rolepage 看得到,说进本群的才进企微。",
@@ -487,11 +487,11 @@ const isLastResponseQuote = (target: string, quoted: string): boolean =>
 
 // ── 引用即路由 ─────────────────────────────────────────────────────────
 // 群里要跟 `.fix` 说话,手打名字太慢 —— 直接引用它的气泡即可。每条出站气泡都
-// 带 `🧙‍♂️ name：` 头 (withTagHeader; 旧气泡是 `.name:`, 双态都认),所以引用文本自带路由信息;用户自己发的
+// 带 `🧙 name：` 头 (withTagHeader; 旧气泡是 `.name:`, 双态都认),所以引用文本自带路由信息;用户自己发的
 // 行首 `.fix 干活` 同样算数(限行首,否则正文里随手写的 .gitignore 会误判)。
 // `body` 是剥掉头/tag 后的净引用内容,用于跟目标 context 比对。
 // `tag`   = 路由目标(引用继承的投递 tag)。
-// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `🧙‍♂️ name：` / `.name:` 头)。
+// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `🧙 name：` / `.name:` 头)。
 //            去重要比对的是「内容在不在源会话」,而非路由目标: 带着引用新建 /
 //            改投到别的 tag 时,目标会话是空的,只有源会话里才有那段原文。
 //            `srcTag===undefined` 表示源未知(用户自己打的引用),回退到按目标查。

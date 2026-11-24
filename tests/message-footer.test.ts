@@ -18,8 +18,8 @@ const policy = responseFormatPolicy(cfg, { chatid: "admin" }, urlOf)!;
 const head = (t: string) => `[.${nameOf(t)}](${urlOf(t)}): `;
 const footer = ` [✦](${urlOf(home)})`;
 const bodyLink = `[.worker](${urlOf(worker)})`;
-// 署名一律裸 `🧙‍♂️ name：` (名字外不包反引号, 2026-11-16 人口径: 反引号在企微渲染成代码样式); 链接统一落尾部 ✦。
-const bare = (t: string, body: string) => `🧙‍♂️ ${nameOf(t)}： ${body} [✦](${urlOf(t)})`;
+// 署名一律裸 `🧙 name：` (名字外不包反引号, 2026-11-16 人口径: 反引号在企微渲染成代码样式); 链接统一落尾部 ✦。
+const bare = (t: string, body: string) => `🧙 ${nameOf(t)}： ${body} [✦](${urlOf(t)})`;
 const signed = bare;
 assert.equal(withMessageFooter(`${head(home)}hello \n\t`, policy), bare(home, "hello"));
 assert.equal(withMessageFooter(`${head(worker)}hello`, policy), signed(worker, "hello"));

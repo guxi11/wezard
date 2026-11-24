@@ -209,7 +209,8 @@ assert.equal(istore.all().filter((w) => w.kind === "me").length, 1, "不重复�
 // ── ⑥ 频道 / 帖子: 点名 .me 没 @ 机器人也直达 me, 发生地零行 ──────────────
 assert.equal(namesMe(".me 看一眼"), true);
 assert.equal(namesMe("这周有空看下吗 .me"), true, "句中点名也算 (频道没有开头 tag 的概念)");
-assert.equal(namesMe("\u{1F9D9}\u200D\u2642\uFE0F me 看下"), true, "🧙‍♂️ me 同一套记号");
+assert.equal(namesMe("\u{1F9D9} me 看下"), true, "单体 🧙 me 同一套记号 (渲染形态)");
+assert.equal(namesMe("\u{1F9D9}\u200D\u2642\uFE0F me 看下"), true, "旧的 man-mage 全序列 🧙‍♂️ me 仍认 (存量消息)");
 assert.equal(namesMe("me 看下"), false, "裸 me 不是点名");
 assert.equal(namesMe("看下 .mailer 那个"), false, "别的 .名字 不归 me");
 

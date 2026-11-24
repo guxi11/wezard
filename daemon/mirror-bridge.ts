@@ -949,10 +949,10 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 
 // Block-wise packing (shared/md-chunk): never cuts mid-line, and never cuts a
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
-// Room reserved in every chunk for the signed `🧙‍♂️ name` / `2/5` header line and
+// Room reserved in every chunk for the signed `🧙 name` / `2/5` header line and
 // the chat-detail links linkTags hangs on it and on up to MAX_BODY_LINKS body
 // mentions — each `(url)` runs ~200-250 bytes. 头里最多两条: 自己的, 以及公开 peer 轮
-// 的 `→ 🧙‍♂️ 对方`。v3 起头从 `.name` 换成 `🧙‍♂️ name` (每条约 +13 字节, ZWJ 序列 12
+// 的 `→ 🧙 对方`。v3 起头从 `.name` 换成 `🧙 name` (每条约 +13 字节, ZWJ 序列 12
 // 字节 + 空格), 预算加 64 字帖余量; md-chunk 按行块切, 不会把序列切成两半。
 const TAG_HEADER_BUDGET = 256 * (2 + MAX_BODY_LINKS) + 64;
 
@@ -3063,7 +3063,7 @@ interface AttachState {
   channel?: string;
   speaker?: string;
   /** 本轮是同伴公开派来的 (bound room 的 chat_ask) —— 那个同伴的 target。回复进群时头
-   *  写成 `🧙‍♂️ me： 🧙‍♂️ 它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
+   *  写成 `🧙 me： 🧙 它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
   replyTo?: string;
   /** 这场对话的出处 —— 与 channel 同生同灭。续写轮 (没有新的印章) 沿用它: 私聊里的
    *  续写没有 from, rolepage 就认不出对面是谁, 整段往来掉出那段私聊。 */

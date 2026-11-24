@@ -85,7 +85,7 @@ assert.ok(!lead.includes("RESULT:"), "lead 不再用行首 RESULT: 收口");
 const renamed = renderCharter({ ...base, self: { ...base.self, address: "renamed" } });
 assert.ok(renamed.includes("**`renamed`**"));
 assert.ok(!renamed.includes("**`.renamed`**"));
-assert.ok(!renamed.includes("🧙‍♂️ renamed"));
+assert.ok(!renamed.includes("🧙 renamed"));
 assert.ok(renamed.includes("人点你写作 `.name`"));
 
 // ── 默认注册的 MCP 工具必须都在 charter 名册里 (charter 是唯一保证进上下文的发现层) ──

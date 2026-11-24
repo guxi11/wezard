@@ -105,7 +105,7 @@ const unwrapCandidates = (r: DaemonReply) =>
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
 const ADDRESS_DOC =
-  "wizard 的名字 —— 全机唯一, 它就是地址: 写裸名 `'fix'` 即可 (人面前的气泡头显示 `🧙‍♂️ fix`; wizard 之间与 rolepage 都显示裸名; 带 `'.fix'` / `'🧙‍♂️ fix'` 前缀也认), 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。";
+  "wizard 的名字 —— 全机唯一, 它就是地址: 写裸名 `'fix'` 即可 (人面前的气泡头显示 `🧙 fix`; wizard 之间与 rolepage 都显示裸名; 带 `'.fix'` / `'🧙 fix'` 前缀也认), 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。";
 
 // 生 wizard 的三个工具共用: 模型名是口语, 落地的是 `/model` 列表里最接近的那一项。
 const MODEL_DOC =

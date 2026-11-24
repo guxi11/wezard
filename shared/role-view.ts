@@ -120,7 +120,7 @@ export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
     ...(x.from ? { from: x.from } : {}), ...(x.speaker ? { speaker: x.speaker } : {}),
   }));
 
-/** 实发的正文: 群里那条消息头上的「🧙‍♂️ name：」署名剥掉 —— rolepage 的消息行已经写着是谁说的。 */
+/** 实发的正文: 群里那条消息头上的「🧙 name：」署名剥掉 —— rolepage 的消息行已经写着是谁说的。 */
 export const postBody = (p: PostDetailRecord): string => rawTagHeader(p.body)?.body ?? p.body;
 
 /** 顶层会话里的轮次: 去空壳、去子 agent (它内联在父轮里)。 */
@@ -216,7 +216,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     return id.startsWith("human:") ? facts.humanNames?.[id] || id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
-    id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙‍♂️" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
+    id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
   // 地址 = 一个实例的 target, 按 target 或名字解析到它自己。同身份的多个实例各是各的页
   // (人 2026-11-22 拍板): 不选代表、不改写 —— 之前「同身份收敛到一个规范 target」会让
   // 点 wezard-15 落到 wezard-1 的页面上。

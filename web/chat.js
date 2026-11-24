@@ -178,7 +178,7 @@
     var uid = id.indexOf('uid:') === 0 ? id.slice(4) : '';
     var human = id.indexOf('human:') === 0;
     var name = uid ? (W.names[uid] || uid) : human ? (W.names[id.slice(6)] || id.slice(6)) : id;
-    return { target: id, kind: human ? 'human' : 'wizard', name: safeName(name), label: human ? '👤' : '🧙‍♂️', rels: [] };
+    return { target: id, kind: human ? 'human' : 'wizard', name: safeName(name), label: human ? '👤' : '🧙', rels: [] };
   };
   // room 的名字 = 它的显示名 (host 起的 title > 聊天名 > 没起名的 dm / adhoc 用成员名 > 一个短代号)。
   // 不再有「私聊」「临时 room」兜底: 认不出是哪件事。成员名拼法与 shared/room-label.ts 同口径。
@@ -213,7 +213,7 @@
   var roomLabelOf = function (r) {
     return r ? roomNameOf(r, r.label) : '';
   };
-  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 📌 / 只有 wizard 的 room 🧙‍♂️ (与 wizard 默认头像同一个 emoji)。
+  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 📌 / 只有 wizard 的 room 🧙 (与 wizard 默认头像同一个 emoji)。
   // 先分「有没有人参与」(isPeopleRoom, 与列表的「群聊 / 会话」分组、搜索的 group 同一口径: 绑定企微 / topic / 微信的 room 不管有没有人发过话都算有人);
   // 频道 (channel) 与帖子 (topic-post) 各有一个专属图标, 与群聊 / 单聊一眼分开 —— 它们是传输形态, 比成员数更能说明「这是什么 room」。
   // 其余有人的再分单聊 / 群聊: 单聊 = 恰好两位参与者、其中一位是人、且不是企微群 / topic 帖 (即绑定的 wecom-dm 那种: 一个人 + 一个 wizard) —— 这是唯一保留 💬 的特例;
@@ -224,7 +224,7 @@
       r.kind !== 'wecom-group' && r.kind !== 'topic-post';
   };
   var roomIcon = function (r) {
-    if (!isPeopleRoom(r)) return '🧙‍♂️';
+    if (!isPeopleRoom(r)) return '🧙';
     if (r.kind === 'channel') return '#️⃣';
     if (r.kind === 'topic-post') return '📌';
     return isSoloChat(r) ? '💬' : '👥';
@@ -233,7 +233,7 @@
   var roomIconOf = function (id, group, kind) {
     var r = roomById(id);
     if (r) return roomIcon(r);
-    return kind === 'channel' ? '#️⃣' : kind === 'topic-post' ? '📌' : group ? '👥' : '🧙‍♂️';
+    return kind === 'channel' ? '#️⃣' : kind === 'topic-post' ? '📌' : group ? '👥' : '🧙';
   };
   var KIND_WORD = { 'wecom-group': '企微群', 'wecom-dm': '企微单聊', channel: '频道', 'topic-post': '帖子', wx: '微信', dm: 'wizard 两人会话', adhoc: '临时多人 room' };
   var roomKindWord = function (r) { return (isPeopleRoom(r) ? '群聊' : '会话') + ' · ' + (KIND_WORD[r.kind] || r.kind || ''); };
@@ -907,7 +907,7 @@
     '<span><i class="lg wz working"></i>工作中</span><span title="停在审批框 / 弹窗上等人点"><i class="lg wz blocked"></i>等审批</span>' +
     '<span><i class="lg wz idle"></i>空闲</span><span title="pane 不在, 下一句话会重新拉起"><i class="lg wz asleep"></i>休眠</span>' +
     '<span title="叠加属性: 提示缓存已超 TTL, 下一句要重写缓存。空闲 / 休眠的节点都会变白 (休眠的服务端不报缓存, 按最近动静超过 5 分钟估); 工作中 / 等审批不受影响"><i class="lg wz cold"></i>缓存冷</span>' +
-    '<span><span class="lgemo">👤</span>用户</span><span title="room 图标: 多人群聊 (企微群 / 多人 room, 有人参与)"><span class="lgemo">👥</span>群聊</span><span title="room 图标: 人与 wizard 的单聊 (绑定的企微单聊)"><span class="lgemo">💬</span>单聊</span><span title="room 图标: 频道 (企微 topic 频道)"><span class="lgemo">#️⃣</span>频道</span><span title="room 图标: 帖子 (频道下某个 topic 帖的评论区)"><span class="lgemo">📌</span>帖子</span><span title="room 图标: 只有 wizard 的 room (dm / 临时多人)"><span class="lgemo">🧙‍♂️</span>wizard room</span><span title="room 的 host: 本 room 里加入序最小的 wizard"><svg class="lghost" viewBox="-6 -5 12 10" width="13" height="11" aria-hidden="true"><path d="M-3.3 2L-3.3 -3.9L3.3 -3.9L3.3 2Z"/><path class="hb" d="M-3.3 .4L3.3 .4L3.3 2L-3.3 2Z"/><path d="M-5.2 3.6L-5.2 2L5.2 2L5.2 3.6Z"/></svg>host</span>' +
+    '<span><span class="lgemo">👤</span>用户</span><span title="room 图标: 多人群聊 (企微群 / 多人 room, 有人参与)"><span class="lgemo">👥</span>群聊</span><span title="room 图标: 人与 wizard 的单聊 (绑定的企微单聊)"><span class="lgemo">💬</span>单聊</span><span title="room 图标: 频道 (企微 topic 频道)"><span class="lgemo">#️⃣</span>频道</span><span title="room 图标: 帖子 (频道下某个 topic 帖的评论区)"><span class="lgemo">📌</span>帖子</span><span title="room 图标: 只有 wizard 的 room (dm / 临时多人)"><span class="lgemo">🧙</span>wizard room</span><span title="room 的 host: 本 room 里加入序最小的 wizard"><svg class="lghost" viewBox="-6 -5 12 10" width="13" height="11" aria-hidden="true"><path d="M-3.3 2L-3.3 -3.9L3.3 -3.9L3.3 2Z"/><path class="hb" d="M-3.3 .4L3.3 .4L3.3 2L-3.3 2Z"/><path d="M-5.2 3.6L-5.2 2L5.2 2L5.2 3.6Z"/></svg>host</span>' +
     '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/></svg>lead</span>' +
     '<span title="聪明程度 = 实际在跑的模型 + effort: 三角形 🧒小学生 (haiku) · 四边形 🎒初中生 (sonnet) · 五边形 🎓大学生 (sonnet high 起) · 六边形 🔬研究生 (opus) · 圆 👨‍🏫专家教授 (opus xhigh/max); 认不出模型时按出生档位 mini..ultra; 都没有 = 五边形"><svg class="lgpoly" viewBox="-6 -6 12 12" width="12" height="12" aria-hidden="true">'+polyEl(3,5.2)+'</svg><svg class="lgpoly" viewBox="-6 -6 12 12" width="12" height="12" aria-hidden="true">'+polyEl(0,5.2)+'</svg>边数 = 聪明程度</span>' +
     '</div>';
@@ -1013,7 +1013,7 @@
   };
   // 头像照 main 的群头像: 前 4 位成员的头像拼成一块 (单人 room 就是那一位)。
   // 例外: 频道 / 帖子是传输形态, 列表里也要一眼认出 —— 头像换成它们自己的图标 (成员拼块认不出「这是频道还是群」)。
-  var memberLabel = function (m) { return m.who && m.who.kind === 'human' ? '👤' : (nodeOf(nodeIdOf(m.who)).label || '🧙‍♂️'); };
+  var memberLabel = function (m) { return m.who && m.who.kind === 'human' ? '👤' : (nodeOf(nodeIdOf(m.who)).label || '🧙'); };
   var roomAvatar = function (r) {
     if (r.kind === 'channel' || r.kind === 'topic-post') return '<span class="av">' + esc(roomIcon(r)) + '</span>';
     var ms = (r.members || []).slice(0, 4);
@@ -1382,7 +1382,7 @@
     return f.to ? '<span class="rv-tag" data-node="' + esc(f.to) + '">' + esc(f.toName || f.to) + '</span>' : '';
   };
   var auOf = function (f) {
-    return '<span class="rv-au wizard" data-node="' + esc(f.from || '') + '">' + esc(f.fromLabel || '🧙‍♂️') + ' ' + esc(f.fromName || D.role) + '</span>';
+    return '<span class="rv-au wizard" data-node="' + esc(f.from || '') + '">' + esc(f.fromLabel || '🧙') + ' ' + esc(f.fromName || D.role) + '</span>';
   };
   var streamHTML = function (rows) {
     if (!rows.length) return '<div class="rv-none">这里还没有消息。</div>';
@@ -1942,7 +1942,7 @@
       if (!D.role) { el.innerHTML = ''; return; }
       var ph = nodeOf(D.role);
       document.title = (ph.label ? ph.label + ' ' : '') + (ph.name || D.role) + ' 的视角';
-      el.innerHTML = '<div class="id"><span class="av">' + esc(ph.label || '🧙‍♂️') + '</span><span class="l"><span class="nl"><span class="nm">' + esc(ph.name || D.role) + '</span></span></span></div>';
+      el.innerHTML = '<div class="id"><span class="av">' + esc(ph.label || '🧙') + '</span><span class="l"><span class="nl"><span class="nm">' + esc(ph.name || D.role) + '</span></span></span></div>';
       return;
     }
     var born = w.bornAt || (D.sessions || []).reduce(function (m, s) { return s.start && (!m || s.start < m) ? s.start : m; }, 0);
@@ -1968,7 +1968,7 @@
     // 会话切换 = main 的那个下拉 (name 右边): 只有一段就没什么可选, 不挂。
     // 选中 room 时不挂: session 只作用于「全部记录」那一页。
     var sess = !D.roomId && (D.sessions || []).length > 1 ? sessPicker() : '';
-    el.innerHTML = '<div class="id"><span class="av">' + esc(w.label || '🧙‍♂️') + '</span><span class="l">' +
+    el.innerHTML = '<div class="id"><span class="av">' + esc(w.label || '🧙') + '</span><span class="l">' +
       '<span class="nl"><span class="cp" title="' + esc('点击复制 ' + (w.name || w.id)) + '"><span class="nm">' + esc(w.name || w.id) + '</span></span>' +
       '<span id="rb-st">' + st + '</span><span id="rb-sp">' + sess + '</span></span>' +
       (facts ? '<span class="facts">' + facts + '</span>' : '') +
@@ -2009,7 +2009,7 @@
   };
   var LOADING_HTML = '<div class="rv-none rv-loading">加载中…</div>';
   var renderWizard = function (skipBody) {
-    var w = D.wizard || { name: D.role, label: '🧙‍♂️' };
+    var w = D.wizard || { name: D.role, label: '🧙' };
     var plan = S.pane === 'plan';
     // 顶栏只有标题与视角切换: 模型 / 在线 / 职责都属于这个 role, 在左上名片 (模型在底部用量条上)。
     // 日程是同一个窗口的另一面 —— 标题改成「谁的日程」, 右上角回对话。
@@ -2427,7 +2427,7 @@
         }).join('') + '</span>'
       : '';
     // 条首是账的主人 (头像 + 名字), 再是模型: 这本账是谁、拿什么跑出来的。
-    return '<span class="u-who" title="' + esc(who.name) + '">' + esc(who.label || '🧙‍♂️') +
+    return '<span class="u-who" title="' + esc(who.name) + '">' + esc(who.label || '🧙') +
         '<span class="u-nm" data-tip="' + esc(who.name) + '">' + esc(who.name) + '</span></span>' +
       '<span class="u-lb" title="' + esc(t.model || '') + '">' + esc(t.modelLabel || t.model || '用量') + '</span>' +
       (t.effort ? '<span class="u-ef" title="effort 档位">' + esc(t.effort) + '</span>' : '') +
@@ -2657,7 +2657,7 @@
     var human = m.who.kind === 'human';
     return {
       kind: 'role',
-      html: '<span class="av">' + (human ? '👤' : esc(nodeOf(nodeIdOf(m.who)).label || '🧙‍♂️')) + '</span><span class="b"><span class="l1">' +
+      html: '<span class="av">' + (human ? '👤' : esc(nodeOf(nodeIdOf(m.who)).label || '🧙')) + '</span><span class="b"><span class="l1">' +
         '<span class="nm ' + (human ? 'human' : 'wizard') + '">' + hl(m.name, q) + '</span><span class="k">切到视角</span></span>' +
         '<span class="pv">在 ' + m.rooms + ' 个 room' + (m.lastAt ? ' · 最近 ' + esc(fmtAgo(m.lastAt)) : '') + '</span></span>',
       go: function () { goRole(nodeIdOf(m.who)); },
@@ -2669,7 +2669,7 @@
     var to = (h.toNames || []).length ? ' → <span class="nm">' + esc(h.toNames.join('、')) + '</span>' : '';
     return {
       kind: 'msg',
-      html: '<span class="av">' + (human ? '👤' : esc(nodeOf(nodeIdOf(h.author)).label || '🧙‍♂️')) + '</span><span class="b"><span class="l1">' +
+      html: '<span class="av">' + (human ? '👤' : esc(nodeOf(nodeIdOf(h.author)).label || '🧙')) + '</span><span class="b"><span class="l1">' +
         '<span class="said"><span class="nm ' + (human ? 'human' : 'wizard') + '">' + esc(h.authorName) + '</span>' + to + '</span>' + skTs(h.at) + '</span>' +
         '<span class="sn">' + hl(h.snippet, q) + '</span>' +
         '<span class="l3"><span class="where' + (h.group ? '' : ' priv') + '"><i>' + esc(roomIconOf(h.room, h.group, h.roomKind)) + '</i>' +

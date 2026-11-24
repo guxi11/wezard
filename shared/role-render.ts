@@ -253,7 +253,7 @@ export const wizardStream = (
       const named = dir.resolve(ln.author);
       const from = named ?? (led?.author.kind === "wizard" ? "uid:" + led.author.id : led?.author.kind === "human" ? "human:" + led.author.id : SYSTEM);
       const fromName = named ? dir.nameOf(from) : ln.author.replace(/^\./, "") || dir.nameOf(from);
-      const fromLabel = named ? dir.labelOf(from) : /^human:/.test(from) ? "👤" : SYSTEM === from ? "🧙‍♂️" : "👤";
+      const fromLabel = named ? dir.labelOf(from) : /^human:/.test(from) ? "👤" : SYSTEM === from ? "🧙" : "👤";
       // 收件人 = 这一轮真正的主人 (turn.target), 不被身份折叠后的页 id 带偏。
       const to = m.turn.target ?? m.to;
       const room = led?.room ?? b.room;

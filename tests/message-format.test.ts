@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { ConfigSchema } from "../shared/config.js";
-import { bindTagLinker, parseTagHeader } from "../shared/session-label.js";
+import { allNames, bindTagLinker, parseTagHeader, stripSigil } from "../shared/session-label.js";
 import { withMessageFooter } from "../shared/message-footer.js";
 import { addressed, footerTarget, responseFormatPolicy, responsePrincipal, roomBubble, withBubbleFooter } from "../daemon/message-format.js";
 const a = "user:admin", b = "chat:wrOther~bot", worker = `${a}#worker`, voice = `${a}#voice`;
@@ -20,17 +20,24 @@ for (const destination of [a, b]) {
   const policy = responseFormatPolicy(cfg, { chatid: destination.split(":")[1]! }, urlOf)!;
   for (const sender of known) {
     const input = `[.${names[sender]}](${urlOf(sender)}): answer`;
-    // 署名一律裸 `🧙‍♂️ name：` (名字外不包反引号), default / 非 default 同形。
-    const expected = `🧙‍♂️ ${names[sender]}： answer [✦](${urlOf(sender)})`;
+    // 署名一律裸 `🧙 name：` (名字外不包反引号), default / 非 default 同形。
+    const expected = `🧙 ${names[sender]}： answer [✦](${urlOf(sender)})`;
     assert.equal(withMessageFooter(input, policy), expected, `${destination}/${sender}`);
     assert.equal(withMessageFooter(expected, policy), expected);
     assert.equal(parseTagHeader(expected).tag, names[sender]);
   }
   const migrated = withMessageFooter(".worker: answer", policy);
-  assert.equal(migrated, `🧙‍♂️ renamed-worker： answer [✦](${urlOf(worker)})`, "answer-transfer receiver worker keeps its own signed head");
-  assert.equal(withMessageFooter(`🧙‍♂️ renamed-worker： answer [✦](${urlOf(worker)})`, policy), migrated);
-  assert.equal(withMessageFooter(`\`🧙‍♂️ renamed-worker\`： answer [✦](${urlOf(worker)})`, policy), migrated, "old backtick head still parses");
+  assert.equal(migrated, `🧙 renamed-worker： answer [✦](${urlOf(worker)})`, "answer-transfer receiver worker keeps its own signed head");
+  assert.ok(!migrated.includes("\u{1F9D9}\u200D\u2642\uFE0F"), "渲染写中性单体 🧙, 不再带 ZWJ/♂/VS16");
+  assert.equal(withMessageFooter(`🧙 renamed-worker： answer [✦](${urlOf(worker)})`, policy), migrated);
+  assert.equal(withMessageFooter(`\`🧙 renamed-worker\`： answer [✦](${urlOf(worker)})`, policy), migrated, "old backtick head still parses");
 }
+// 存量消息 / 引用气泡带旧的 man-mage 全序列 (🧙 U+1F9D9 + ZWJ + ♂ + VS16) —— 读取侧长期双态, 不许回退。
+const legacyMark = "\u{1F9D9}\u200D\u2642\uFE0F";
+assert.equal(parseTagHeader(`${legacyMark} ${names[worker]}： answer`).tag, names[worker], "旧全序列署名头仍解析出名字");
+assert.deepEqual(allNames(`${legacyMark} ${names[worker]} 看下`), [names[worker]], "旧全序列点名仍认得");
+assert.equal(stripSigil(`${legacyMark} ${names[worker]}`), names[worker], "旧全序列前缀剥成裸名");
+assert.equal(stripSigil(`\u{1F9D9} ${names[worker]}`), names[worker], "单体记号前缀剥成裸名");
 assert.deepEqual(parseTagHeader(`[.old](${urlOf(worker)}): answer`), { fromBot: true, tag: "renamed-worker", body: "answer" });
 // ✨ (老版 footer 记号) 与无 role 参数的链接都不再承载身份。
 assert.deepEqual(parseTagHeader(`answer [✨](https://own.test/base/role?id=stream)`), { fromBot: false, tag: "", body: `answer [✨](https://own.test/base/role?id=stream)` });
@@ -43,7 +50,7 @@ for (const u of ["https://foreign.test/base/role?id=stream", "https://own.test/r
 const group = "chat:wrkGroup";
 const groupPolicy = responseFormatPolicy(cfg, { chatid: "wrkGroup" }, urlOf)!;
 assert.equal(groupPolicy.principal, group, "未知群按前缀落 chat: principal");
-assert.equal(withMessageFooter(roomBubble(worker, "done"), groupPolicy), "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： done [✦](" + urlOf(worker) + ")");
+assert.equal(withMessageFooter(roomBubble(worker, "done"), groupPolicy), "\u{1F9D9} " + names[worker] + "： done [✦](" + urlOf(worker) + ")");
 assert.equal(withMessageFooter("done", groupPolicy), "done", "无头正文不属于任何人 —— 覆盖气泡不带作者头就会裸奔");
 assert.equal(roomBubble(undefined, "x 已离开"), "[wezard] x 已离开", "daemon 行补 [wezard] 头");
 assert.equal(roomBubble(undefined, "[wezard] .a 被提醒后仍没有交代 m.1"), "[wezard] .a 被提醒后仍没有交代 m.1", "正文自带 [wezard] 不再叠一层");
@@ -54,10 +61,10 @@ assert.equal(addressed([], "x"), "x", "无收话人原样");
 // 头与尾必须是同一套 link 渲染 (头裸 + 尾部 ✦ 指向同一个 rolepage), 与群气泡逐字相同。
 const topic = "chat:topicX";
 const topicBubble = withBubbleFooter(roomBubble(worker, "done"), topic);
-assert.equal(topicBubble, "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： done [✦](" + urlOf(worker) + ")", "频道正文与群气泡同一条署名渲染");
+assert.equal(topicBubble, "\u{1F9D9} " + names[worker] + "： done [✦](" + urlOf(worker) + ")", "频道正文与群气泡同一条署名渲染");
 assert.equal(topicBubble, withMessageFooter(roomBubble(worker, "done"), groupPolicy), "频道与群的收尾逐字一致");
 assert.equal(withBubbleFooter(topicBubble, topic), topicBubble, "已收尾的不再叠一层");
 assert.equal(withBubbleFooter(roomBubble(undefined, "x 已离开"), topic), "[wezard] x 已离开", "daemon 行没有作者, 不加尾署");
 assert.equal(withBubbleFooter("裸正文", topic), "裸正文", "无头正文不属于任何人");
-assert.equal(withMessageFooter(roomBubble(worker, addressed([".Grace"], "done")), groupPolicy), "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： → .Grace done [✦](" + urlOf(worker) + ")", "收话人在尾部改写后仍在");
+assert.equal(withMessageFooter(roomBubble(worker, addressed([".Grace"], "done")), groupPolicy), "\u{1F9D9} " + names[worker] + "： → .Grace done [✦](" + urlOf(worker) + ")", "收话人在尾部改写后仍在");
 console.log("message-format integration tests passed");

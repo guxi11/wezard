@@ -3172,7 +3172,8 @@ const main = async (): Promise<void> => {
           // 宪章是出生快照: 出生时聊天还没名字的会话, 一辈子自报「(未命名)」。
           // 补过名 / 改过名的, 这里把新宪章挂到它下一次注入上。
           const want = w.name || "(未命名)";
-          const had = /名字: \*\*`(?:🧙‍♂️ )?([^`]*)`\*\*/.exec(text)?.[1] ?? "";
+          // 记号单体 🧙 与旧的 man-mage 全序列都能剥 —— 存量 charters/*.md 是旧写法。
+          const had = /名字: \*\*`(?:🧙(?:‍♂️)? )?([^`]*)`\*\*/.exec(text)?.[1] ?? "";
           if (had && had !== want) {
             log.child({ mod: "wizard" }).info({ target: w.target, was: had, now: want }, "charter re-armed after identity change");
             m.armCharter(w.target);
