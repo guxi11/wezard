@@ -102,7 +102,8 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 1. **自己处理** → `room_bind({source: "chat:<opk…>", room: 本room})`: 之后该帖子的评论全落本 room, 本 room 的 re 回复以评论回原帖。帖子 room 不诞生, 不开新实例。
 2. **高度相关的旧 room** → host 依证据 (§5.2) 判给某个旧 room (典型: 之前那个帖子 room / 之前那个群 room): 绑进它 (权限见 §6), 或 `chat_ask` 那个 room 的 host 让它接手判定。
-3. **另起 room** → 维持现状: 帖子 room 诞生 + 领号新实例 (今天的行为, 一行代码不删)。
+3. **另起 room** → 帖子 room 诞生 + 领号新实例 (今天的行为), 并且**把新 host 实例同步拉进频道 room** (人 2026-11-24 追加): 走 hub 正常 join (via `spawn`, by = 判定者 —— host 本人或超时兜底时 DAEMON), 不走 join-req 等批。频道 host 从此在成员表里看得到每个帖子 host —— 判定新消息落哪个已有帖子 room / 复用哪个实例的「已知成员」视图。
+   - 拉进来的是**普通成员**: ord = nextOrd, 频道 host (最早加入序) 的 host 身份不动; 不订阅 (`watch` 默认关), 频道里未点名的人话按 §B-3 只醒 monitor/host, **不会唤醒它**; 被点名则照常醒 (频道 host 与它横向沟通的通道)。
 
 **兜底**: host 被唤醒后 `rooms.binding.decideTimeoutMin` (缺省 10) 内没有 bind 也没有显式「另起」→ daemon 自动走出口 3 (不丢话、不卡接待: 现行行为就是兜底)。监督线: overdue 两级提醒照常生效。
 
@@ -145,6 +146,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 - **存量零数据迁移**: 无绑定 → 恒等回落, 现行为逐字节不变。唯一「迁移」是 boot 索引重建 + 对账闸 (§3.2), 属代码路径非数据改写; 红线照走: 线上先备份 `~/.wezard/state/rooms` (字节原样), 演练至少一遍真 daemon (临时 HOME + 临时端口) 验「内存索引 = 账本重放」。
 - reload: bind 索引随 boot 重建; 在途轮次不受影响 (行上 src 已落死)。
 - 解绑: 源回落恒等 —— 帖子源下一条消息时帖子 room 才按需诞生 (现行 lazy 语义); 群源回到自己的 1:1 room (原 room 与管家实例原样保留, 解绑即恢复)。
+- **频道成员补拉自愈**: boot (与 `settleBoundChannel` / `channel-rebind` 同钩子) 幂等补拉**存量**帖子 room 的 host 实例进频道 room —— 条件: 频道已绑定、频道 room 有 host、实例仍在册 (stop/忘掉的跳过)。与 channel-rebind 的补座位同风格; 一频道一帖一实例本是现状实例数, 成员表变长只是把它们显出来。若频道 room 尚无 wizard host (引导期), 不拉 —— 首个被拉者会按最早序变成 host。
 - `channel-rebind` (频道换绑工作区) 正交: 换的是类与实例; 本设计换的是话的去处。帖子源被绑进别的 room 时, 频道换绑不动绑定。
 - 出站占位气泡 / 审批卡 / AskUserQuestion: 按「发生源」路由 (§4.2 表), 审批卡投 asker 私聊的现行逻辑不变。
 
@@ -154,7 +156,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 |---|---|---|
 | P1 模型 | `bind/unbind` op + fold `bindings` + `src` 字段 + boot 索引与对账闸 | 单测: fold/重放/对账闸 fail-closed; 存量账本 fold 不变 (哈希对比) |
 | P2 出站 | `roomMirror` 按行 src 分流 (reply 跟线程, say 主源) | 回归: 现有群/频道/帖子出站全绿 (src 缺省路径 = 现行为) |
-| P3 频道首触 | @ 首触落频道 room + 超时兜底另起 + `room_bind/unbind` 工具 + 硬门 | 真机: 频道 @ 一句 → host 收到; bind → 后续评论落本 room、回复评论回原帖; unbind → 回落 |
+| P3 频道首触 | @ 首触落频道 room + 超时兜底另起 + `room_bind/unbind` 工具 + 硬门 + 另起时新 host 拉进频道 room (join) | 真机: 频道 @ 一句 → host 收到; bind → 后续评论落本 room、回复评论回原帖; unbind → 回落; 另起 → 新 host 出现在频道成员表, 未点名人话不醒它, 频道 host 身份不变 |
 | P4 群源 + 证据 | 群源绑定入站路径 + dry-run 证据/阈值/veto | 真机: 群绑进旧 room、对话两向通; 跨 bot/已绑定被拒 |
 | 收口 | charter 行 + dev-guide 清单 + CHANGELOG Unreleased + build/测试全绿 | 交付另报, 不 push 不 reload |
 
@@ -166,7 +168,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 ## 10. 改动面清单 (实现时核对)
 
-`shared/room.ts` (op/fold/judge 硬门/读侧) · `daemon/rooms.ts` (索引装载) · `daemon/index.ts` (roomMirror 分流 / channelIngest / channelPostBorn 延迟 / ensureBoundRoom 查索引) · `daemon/steward.ts` (stewardRoute 查索引) · `daemon/inbound.ts` (dispatch 前源解析) · `mcp/tools.ts` + `daemon/room-bind.ts` (新) · `shared/config.ts` (rooms.binding.*) · `daemon/wizard.ts` charter 行 · web/rolepage 绑定展示 · docs/dev-guide.md · CHANGELOG。
+`shared/room.ts` (op/fold/judge 硬门/读侧) · `daemon/rooms.ts` (索引装载) · `daemon/index.ts` (roomMirror 分流 / channelIngest / channelPostBorn 延迟+新 host 拉进频道 room / settleBoundChannel boot 补拉 / ensureBoundRoom 查索引) · `daemon/steward.ts` (stewardRoute 查索引) · `daemon/inbound.ts` (dispatch 前源解析) · `mcp/tools.ts` + `daemon/room-bind.ts` (新) · `shared/config.ts` (rooms.binding.*) · `daemon/wizard.ts` charter 行 · web/rolepage 绑定展示 · docs/dev-guide.md · CHANGELOG。
 
 ## 11. 待人拍板
 
