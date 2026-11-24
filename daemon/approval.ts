@@ -54,7 +54,7 @@ import { reachable } from "./reach.js";
 let cardChannel: ((principal: string) => string) | undefined;
 export const bindCardChannel = (fn: (principal: string) => string): void => { cardChannel = fn; };
 
-const targetChatId = (key: string): string => {
+export const targetChatId = (key: string): string => {
   // "user:abc" → "abc" (DM chatid == userid for aibot)
   // "chat:wc..." → "wc..."
   // "user:abc#tag" → "abc" (drop the routing tag; WeCom SDK only knows chatids)

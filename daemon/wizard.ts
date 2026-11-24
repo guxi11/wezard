@@ -33,7 +33,7 @@ const renderApprenticeRules = (): string[] => [
 ];
 
 /** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
-export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker" | "monitor";
+export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker" | "monitor" | "me";
 /** monitor 的工具面 (硬限): 读账本 / 读频道 / 看名册 / 写一条 activate 判决 / 交接自己。
  *  它不发言、不派活、不关账 —— 那条 append 闸在 room-hub (monitor 只能写 activate 行)。 */
 export const MONITOR_TOOLS: ReadonlySet<string> = new Set(["room_read", "read_channel", "wizard_roster", "room_activate", "handoff"]);

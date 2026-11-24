@@ -26,6 +26,7 @@ import { awaitChannelOfPost, channelOf, channelOfPost, postsOfChannel } from "./
 import { settleChannelSteward } from "./onboarding.js";
 import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, type OnboardingBound, type OnboardingStore } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
+import { ensureMeWizard, ME_TAG } from "./me-room.js";
 import { truncate } from "../shared/std.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
@@ -223,6 +224,7 @@ const renderHelp = (): string =>
     "消息里带 `.name`(如 `.docs 帮我改 README`)就是找那一个 —— 它可以住在任何一个聊天里,",
     "回复会回到你说话的这个群;不带 = 本聊天默认那个。开头写一个还不存在的 `.x` = 在这里叫出一个新的 x。",
     "它们的回复以 `🧙‍♂️ name` 打头。`/clear .x`、`/pwd .x`、`/stop .x` 同理按名字走 (`🧙‍♂️ x` 写法同样认)。", 
+    "`.me …` 是**你的个人分身**: 在任何聊天里说都只进你和它的私有对话 (带〔.me〕标注, 不进本群记录), 回复发回你说话的地方。它替你协调派活、直接找别的 wizard, 审批卡发你私聊。", 
     "wizard 知道自己是谁、在哪个目录、还有谁在,也能给自己改名、写职责、记长期记忆、上下文满了自己交接重开。",
     "wizard 之间在 room 里说话: 两人私聊 / 三人以上的临时 room 只在 rolepage 看得到,说进本群的才进企微。",
     "",
@@ -510,8 +512,9 @@ const parseQuote = (q: QuoteContent | undefined): { tag: string; srcTag?: string
 //      消息 / 目标已 `/clear`),照旧渲染成 markdown 引用块。
 // 纯引用不打字时,沿用旧的"把引用内容提成正文"重触发路径 —— 但同样只在内容不
 // 在目标上下文里时才有意义,否则那只是一次对该会话的空 nudge。
-/** 名字 → target ("" = 本聊天默认 wizard)。 */
-type Resolve = (base: string, name: string) => string;
+/** 名字 → target ("" = 本聊天默认 wizard)。speaker = 发话人 userid:
+ *  保留别名 "me" 按发话人解析 (`.me` 路由到说话人自己的分身), 其余按名字/聊天。 */
+type Resolve = (base: string, name: string, speaker?: string) => string;
 
 export const composeInbound = (
   msg: BaseMessage,
@@ -529,8 +532,9 @@ export const composeInbound = (
   const dedupTag = q?.srcTag ?? tag;
   // 剥完头什么都不剩(折叠气泡这类纯 chrome 的引用)⇒ 没有可搬运的内容,只留路由。
   // 频道帖子摘要是账本的重排, 不是人引用的话 —— 和"已在 context 里"同一个处置: 不贴回。
+  const speaker = String(msg.from?.userid ?? "");
   const consumed = !q || !q.body.trim() || isChannelPostDigest(msg, q.body)
-    || inContext(resolve(chatPrincipal(msg), dedupTag), q.body);
+    || inContext(resolve(chatPrincipal(msg), dedupTag, speaker), q.body);
   // spoken = 人自己打的那部分 (不含引用/摘要): 账本人话行只存它, 进 prompt 的 text 才带引用。
   if (cleaned.trim()) {
     return { text: consumed ? cleaned : `${renderQuotePrefix(q.body)}${cleaned}`, tag, promoted: false, spoken: cleaned };
@@ -1110,7 +1114,9 @@ export const installInboundRouter = (
   // 点名: 已绑定的群里点本群管家 → 仍走接待 (落本群化身, 没有就新开), 不回落锚点 ——
   // 否则点名会与别的群共享那条会话, 而它明确是指「本群的管家」。这是「按群隔离会话」
   // 的唯一入口: 其余点名 (worker、别群的管家) 都走 resolveName, 跨群共享同一会话。
-  const resolve: Resolve = (base, name) => {
+  const resolve: Resolve = (base, name, speaker) => {
+    // 保留别名 "me": 按发话人解析/惰性落他自己的分身 (me-room 的落账/回发在 wiring B 分流)。
+    if (name === ME_TAG && speaker) return ensureMeWizard(wizardStore(), speaker);
     if (!name) return stewardReception(base);
     const store = wizardStore();
     const rec = store?.byName(name);
@@ -1134,7 +1140,7 @@ export const installInboundRouter = (
   };
   const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string; spoken: string } => {
     const c = composeInbound(msg, raw, quoteInContext, stripAt, resolve);
-    return { ...c, who: resolve(chatPrincipal(msg), c.tag) };
+    return { ...c, who: resolve(chatPrincipal(msg), c.tag, String(msg.from?.userid ?? "")) };
   };
 
   // ── 新群引导 (onboarding.ts) ──────────────────────────────────────

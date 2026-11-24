@@ -57,6 +57,7 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
+import { ensureMeRoom, isMeRoom, meRowMirror, meUserOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
@@ -324,9 +325,16 @@ const main = async (): Promise<void> => {
     if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
     // 人话进 room 账本 (wiring B): 绑定 room = 本聊天的 base principal, 原样作 room id (契约 §1)。
     // room 块还没装上 (启动竞态) 或落行被拒 → 退回老路径, 人话不能丢。
-    const room = ensureRoom ? ensureRoom(baseOfKey(a.channel!), a.principal) : baseOfKey(a.channel!);
     const author: Who = { kind: "human", id: String(a.speaker ?? "").replace(/^user:/, "") };
     const routed = wizardStore()?.get(a.principal);
+    // .me 分流 (人 2026-11-24 拍板): 路由到说话人自己的分身 (kind "me") → 这句人话不落
+    // 发生地 room, 落他的私有 me-room (幂等开房, me/人入座)。发生地零行: 不 ensureRoom、
+    // monitor/host 看不见、不耗发生地预算; duty 开在 me 名下 (host 槽位 —— me 是唯一 wizard
+    // 成员), 占位气泡照开在发生地 (回发由 roomMirror 的 me 分支覆盖它)。
+    const meRoom = routed?.kind === "me" && author.id
+      ? ensureMeRoom({ state: (r) => roomStateOf?.(r), write: (r, ops) => { roomHub?.write(r, ops); }, meUid: () => routed.uid }, author.id)
+      : undefined;
+    const room = meRoom ?? (ensureRoom ? ensureRoom(baseOfKey(a.channel!), a.principal) : baseOfKey(a.channel!));
     // 点名 (.name 路由到别的 wizard): 先拉进 room (via mention), duty 开给它;
     // 管家接待轮 (routed 就是 host) 不点名 → duty 按 §2 落 host。
     let to: Who[] | undefined;
@@ -1250,6 +1258,7 @@ const main = async (): Promise<void> => {
       // host 起的名字是显式别名, 优先于聊天名与成员拼名 (对 dm 也生效; 只影响显示, 寻址仍只认 id)。
       const s = roomState(room);
       if (s?.title) return s.title;
+      if (isMeRoom(room)) return (chatNameOf(cfg, "user:" + meUserOf(room)) || meUserOf(room)) + " 的 me";
       if (room.startsWith("dm:")) {
         const pair = dmPeers(room);
         if (!pair) return room;
@@ -1264,6 +1273,15 @@ const main = async (): Promise<void> => {
     /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。
      * 返回 true = 已成功交给传输 (hub 拿它打 O3 的 room: mirrored; 内部失败各路径自己 warn)。 */
     const roomMirror = async (row: MsgRow, cover?: MsgRow): Promise<boolean> => {
+      // me-room 出站: 占位气泡覆盖 (回发生地) > 文件/正文兜底发用户私聊; 带 .me 独立对话标注。
+      if (isMeRoom(row.room)) {
+        return meRowMirror(row, cover, {
+          authorTargetOf: (u) => roomWizardOf(u)?.target,
+          coverBubble,
+          sendMedia: (principal, f) => sendMedia(principal, f),
+          notify: (principal, md) => notifyChat(principal, md),
+        });
+      }
       const chat = row.room;
       const chatId = chat.replace(/^(user|chat|group):/, "");
       const authorTarget = row.author.kind === "wizard" ? roomWizardOf(row.author.id)?.target : undefined;

@@ -1,0 +1,105 @@
+// .me 用户全局分身 (2026-11-24 人拍板):
+// 每个用户一个 me wizard (注册表普通记录, kind "me", 以自己名义) + 一个私有 me-room
+// (id `me:<userid>`)。用户在任何地方说 `.me …` 都路由到他自己的 me —— 行只落
+// me-room, 发生地 room 零行 (不开、不唤醒 monitor/host、不耗发生地预算);
+// me 的回复按发生地 frame 覆盖占位气泡回发 (带独立对话标注), 占位过期/主动开口
+// 落用户私聊。me 不进已有 room (wiring B 的 auto-join 对 me 分流到 me-room),
+// 找 host / 其他 wizard 走 chat_ask 自动落的 dm/adhoc —— 与普通 wizard 一致。
+//
+// id 形状: `me:` 不以 dm:/adhoc: 开头 → isBoundRoom = true —— 这是有意的:
+// dutiesOpenedBy 只给绑定 room 的人话开 duty, humanCloses / host 兜底 / 唤醒
+// 全套照常; 出站不因此走群镜像, roomMirror 的 me 分支接管 (本文件 meRowMirror)。
+// 审批卡无需改动: me 会话 target `user:<uid>#me` 在 approval targetChatId
+// 剥 #tag 后就是用户 DM chatid。
+import { DAEMON, whoKey, type MsgRow, type RoomOp, type RoomState, type Who } from "../shared/room.js";
+import { baseOfKey, keyOf, normalizeTag, tagOfKey } from "../shared/session-label.js";
+import { roomBubble } from "./message-format.js";
+import type { WizardStore } from "./wizard.js";
+
+/** 保留别名: `.me` / `🧙‍♂️ me` 路由到说话人自己的分身 (inbound resolve 分流)。 */
+export const ME_TAG = "me";
+/** me 回复的固定标注: 让人一眼看出这是独立在外的 .me 对话、不进本群记录。 */
+export const ME_MARK = "〔.me 独立对话 · 不入本群记录〕";
+
+/** userid 归一到 id 字符集 (WeCom userid 本就 [A-Za-z0-9_-], 实际恒等)。 */
+const meUser = (userid: string): string => normalizeTag(userid);
+export const meRoomId = (userid: string): string => "me:" + meUser(userid);
+export const isMeRoom = (room: string): boolean => room.startsWith("me:");
+export const meUserOf = (room: string): string => meUser(room.slice(3));
+/** me 的会话 target: 用户私聊 base 上的 "me" 槽 —— 审批卡/出站剥 #tag 后即用户 DM。 */
+export const meTargetOf = (userid: string): string => keyOf("user:" + meUser(userid), ME_TAG);
+export const isMeTarget = (target: string): boolean => baseOfKey(target).startsWith("user:") && tagOfKey(target) === ME_TAG;
+
+/** 惰性落 me wizard 记录 (首次 .me 时): 普通记录 + kind "me"、无 parent, 名字
+ *  `me-<userid>` 起手 (撞名退 -N), 绝不占保留字 "me"。幂等。返回 target。 */
+export const ensureMeWizard = (store: WizardStore | undefined, userid: string): string => {
+  const target = meTargetOf(userid);
+  if (!store || store.get(target)) return target;
+  store.upsert(target, {
+    kind: "me",
+    identity: target,
+    bornAt: Date.now(),
+    parent: undefined,
+    lead: undefined,
+    leadOf: undefined,
+    description: "用户的个人分身 (.me): 用户在任何地方说 .me 都路由到这里, 对话只进私有 me-room, 不进任何群账本; 回复发回用户说话的地方。它是普通 wizard —— 不进已有 room, 找 host / 其他 wizard 用 chat_ask 开 dm。向用户交代用 chat_reply (re 用户在 me-room 的行)。",
+  });
+  store.claim(target, normalizeTag("me-" + meUser(userid)) || "me-proxy");
+  return target;
+};
+
+export interface MeRoomDeps {
+  state: (room: string) => RoomState | undefined;
+  write: (room: string, ops: readonly RoomOp[]) => void;
+  /** me wizard 的 uid (记录已由 ensureMeWizard 落)。 */
+  meUid: () => string | undefined;
+  now?: () => number;
+}
+
+/** me-room 不存在时开出来: open (kind dm, 成员对恰两人) + me (founder, host) +
+ *  人 (invite —— me 反问/派活时 chat_ask 点 human:<userid> 要成员资格)。幂等。 */
+export const ensureMeRoom = (d: MeRoomDeps, userid: string): string => {
+  const room = meRoomId(userid);
+  const s = d.state(room);
+  const me: Who | undefined = (uid => uid ? { kind: "wizard", id: uid } : undefined)(d.meUid());
+  const human: Who = { kind: "human", id: meUser(userid) };
+  if (s && (!me || s.members.has(whoKey(me))) && s.members.has(whoKey(human))) return room;
+  const at = d.now?.() ?? Date.now();
+  let ord = s?.nextOrd ?? 1;
+  const ops: RoomOp[] = [];
+  if (!s) ops.push({ op: "open", at, room, kind: "dm", by: DAEMON });
+  if (me && !(s?.members.has(whoKey(me)))) ops.push({ op: "join", at, room, who: me, ord: ord++, via: "founder", by: DAEMON });
+  if (!s?.members.has(whoKey(human))) ops.push({ op: "join", at, room, who: human, ord: ord++, via: "invite", by: DAEMON });
+  if (ops.length) d.write(room, ops);
+  return room;
+};
+
+export interface MeMirrorDeps {
+  /** wizard uid → 会话 target (气泡作者头)。 */
+  authorTargetOf: (uid: string) => string | undefined;
+  /** 覆盖发生地的占位气泡 (用户 .me 行的 frame)。 */
+  coverBubble: (msgid: string, md: string) => Promise<boolean>;
+  sendMedia: (principal: string, f: { path: string; kind: "image" | "file" | "voice" | "video"; name: string; description?: string }) => Promise<{ ok: boolean; reason?: string }>;
+  /** 兜底私发 (markdown)。 */
+  notify: (principal: string, md: string) => void;
+}
+
+/** me-room 出站 (roomMirror 的 me 分支): 占位气泡覆盖 > 文件走用户私聊 > 正文
+ *  兜底私发。带 ME_MARK 标注。空正文无文件不出站 (与 mirrors() 同口径)。 */
+export const meRowMirror = async (row: MsgRow, cover: MsgRow | undefined, d: MeMirrorDeps): Promise<boolean> => {
+  const user = "user:" + meUserOf(row.room);
+  const authorTarget = row.author.kind === "wizard" ? d.authorTargetOf(row.author.id) : undefined;
+  const text = row.text.trim();
+  const files = row.files ?? [];
+  if (!text && !files.length) return false;
+  const plain = text || (files.length ? "📎 " + files.map((f) => f.name).join(", ") : "");
+  const md = roomBubble(authorTarget, ME_MARK + "\n" + plain);
+  if (cover?.ext && text && await d.coverBubble(cover.ext, md)) return true;
+  for (const f of files) {
+    const r = await d.sendMedia(user, { path: f.path, kind: f.kind, name: f.name, ...(text ? { description: row.text } : {}) });
+    if (!r.ok) return false;
+  }
+  if (!text) return true;
+  d.notify(user, md);
+  return true;
+};
