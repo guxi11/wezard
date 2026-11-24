@@ -16,9 +16,9 @@
 chat_reply (status done): commit、全量测试结果 (含基线红名单)、取舍/遗留。卡住 need。
 
 ## 进度 (执行者自维护)
-- [ ] dev-guide 三处联动条目
-- [ ] charter 措辞核对
-- [ ] CHANGELOG Unreleased
-- [ ] 全量测试 + tsc
+- [x] dev-guide 三处联动条目
+- [x] charter 措辞核对
+- [x] CHANGELOG Unreleased
+- [x] 全量测试 + tsc
 - [ ] pathspec 提交 + 交代
 

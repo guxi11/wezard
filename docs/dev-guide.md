@@ -23,6 +23,7 @@
 4. [daemon/wizard.ts](../daemon/wizard.ts) `renderCharter` — 在 `## 我能做什么` 那段 `bullet([...])` 里加一行 **「何时用」**。
    - 分工: charter 行回答「什么时候该选它」(Claude Code 把 MCP schema 放在 ToolSearch 后面, 只有 charter 常驻); 工具 `description` 写机制、参数、边界。两处别互相复述。
    - 稀有 / 人侧工具不进 charter (没人该主动想起它)。
+   - **工具面三处联动 (现成样例: 多源绑定 room_bind / room_unbind / room_fork)**: ① 注册 [mcp/tools.ts](../mcp/tools.ts) `server.registerTool("room_bind", …)`; ② daemon 路由 [daemon/index.ts](../daemon/index.ts) 的 `POST /room/bind|/room/unbind|/room/fork` (判定在 [daemon/room-bind.ts](../daemon/room-bind.ts), 路由只管认调用者 / 回包); ③ charter [daemon/wizard.ts](../daemon/wizard.ts) `renderCharter` 加一行「何时用」。三处缺一处都算没做完: 只有注册 = 模型不知道何时想起; 只有 charter = 调用 404。
 
 **不用动的 (默认已覆盖)**
 
@@ -35,7 +36,7 @@
 
 **怎么测**
 
-- `npx tsx tests/charter.test.ts` — 只断言 9 个核心工具名出现在 charter 里 (`wizard_roster` / `delegate` / `chat_*` / `room_open|read|watch` / `handoff`); **没有任何测试要求「注册的工具 = charter 里列的工具」**, 漏写 charter 行是静默的, 靠自己核对。
+- `npx tsx tests/charter.test.ts` — 断言核心工具名出现在 charter 里 (`wizard_roster` / `delegate` / `chat_*` / `room_open|read|watch` / `handoff`), 并**反向核对「`createWezardServer()` 默认注册的每个工具都出现在 charter 名册里」** (只给引导 / monitor 用的 `onboard_bind` / `room_activate` 在 `charterExempt` 豁免; 豁免项若已不再注册同样失败) —— 漏写 charter 行这条测试会红。
 - `npx tsx tests/chat-record.test.ts` 第 4 节的 `toolNames()` 是现成的探针 (`createWezardServer()` + `InMemoryTransport` + `client.listTools()`), 想断言「新工具在清单里 / `registerRare` 的不在」就照抄它。
 - `npx tsx tests/tool-hints.test.ts` (改了 `HINT_TOOL` / `hintOf` 时); `npx tsx tests/session-mcp.test.ts` (只测注入配置, 不测工具清单)。
 - 路由本身: 起 daemon 后 `curl` 或在真实 pane 里调一次; 带口令的路由先 `cat ~/.wezard/daemon-token` 当 `x-wezard-token`。

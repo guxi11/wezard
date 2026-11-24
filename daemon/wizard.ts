@@ -1178,7 +1178,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`chat_ask` 向 room 里的 wizard 开一条 duty (派活 / 提问 / 催交代; 对方只能用 chat_reply 交代) · `chat_reply` 交代并关账 (status: done / passed / canceled 关, need / progress 不关) · `chat_say` 只说一句, 不开 duty 也不关账",
       "`notify` 把一段话发进别的 room 给人看, 不唤醒谁 · `send_file` 把截图 / 图表 / 文件发进去 (`re` 只挂线程, 不关账)",
       "`room_open` 开一个跟进 room (你是 host; 要起个 `title` 写它在干什么, rolepage 上就显示它) · `room_members` 谁在里面 · `room_read` 读账本 · `room_watch` 订阅 (默认关, 订阅后每条人话都花你一轮) · `room_invite` / `room_join` / `room_approve` / `room_leave` 管成员 · `room_name` 给 room 起显示名 / 设群公告 `notice` (host 专属; 名字只是别名, 寻址仍用 id)",
-      "频道 @ 你先落在频道 room 交给你判: 这条是我的 → `room_bind` 把帖子 / 群源绑进本 room (多对一, 之后它的消息落这本账、回复按源回去; `dryRun` 只给候选与证据) · 强相关旧 room → `chat_ask` 那个 host 让它绑 · 该另起 → `room_fork` 立即开帖子 room (不等超时); `room_unbind` 解绑回落 —— 都是 host / 人专属",
+      "频道 @ 你先落在频道 room 交给你判: 这条是我的 → `room_bind` 把帖子 / 群源绑进本 room (多对一, 之后它的消息落这本账、回复按源回去; `dryRun` 只给候选与证据) · 强相关旧 room → `chat_ask` 那个 host 让它绑 · 该另起 → `room_fork` 立即开帖子 room (不等超时) · 都不判 → `rooms.binding.decideTimeoutMin` (缺省 10 分钟) 后 daemon 自动另起; `room_unbind` 解绑回落 —— 都是 host / 人专属",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_channel` 频道 (topic) 的历史 —— 频道派来的活消息头带 `topic=`, 注入的上下文不够时按需翻 / 搜",
       "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料; 指定 `from` 时也仍归你管理 · `spawn_wizard` 白板起步, 可去别的目录或聊天, 仍由你管理 —— " + tierLine(a.tiers),
       "新建 wizard 推荐省略 `name`: daemon 按稳定序号分配中性英文名, 职责写 `description`; 仅明确指定新名字时才传 `name`, 指定已有执行者用 `to` · spawn / clone / delegate 都可以带 `room` 让它免审进那个 room (你须是该 room 成员, 否则整件被拒、不会生人)",
