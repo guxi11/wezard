@@ -1297,6 +1297,40 @@ const main = async (): Promise<void> => {
           coverBubble,
           sendMedia: (principal, f) => sendMedia(principal, f),
           notify: (principal, md) => notifyChat(principal, md),
+          rowById: (room, id) => roomState(room)?.byId.get(id),
+          // 人被 .me 点名的位置是频道 / 帖子 (那行带 src): 评论回那条原帖, 被企微拒就回退
+          // 发新帖并带引用标注 (人 2026-11-24 拍板) —— 不再把答案发去私聊。
+          replyToSource: async (r, said, md) => {
+            const base = said.src ?? "";
+            const ref = channelRefOf(cfg, base);
+            const topicId = ref ? ref.channel : isChannelRoom(base) ? base.slice("chat:".length) : "";
+            if (!topicId) return false;
+            const postId = said.post || ref?.post || "";
+            let topicMedia: TopicMedia | undefined;
+            if (r.files?.length) {
+              const imageIds: string[] = [];
+              const inline: Array<{ mediaId: string; name: string }> = [];
+              for (const f of r.files) {
+                const up = await uploadMediaId(ws.client, base, { path: f.path, kind: f.kind, name: f.name }, log);
+                if (!up.ok) { log.warn({ mod: "room", room: r.room, file: f.path, reason: up.reason }, "me: 频道素材上传失败 (只影响传输, 不回滚)"); continue; }
+                if (up.kind === "image") imageIds.push(up.mediaId);
+                else inline.push({ mediaId: up.mediaId, name: up.name });
+              }
+              if (imageIds.length || inline.length) topicMedia = { ...(imageIds.length ? { imageIds } : {}), ...(inline.length ? { files: inline } : {}) };
+            }
+            const full = linkTags(r.room, md);
+            const quote = replyQuote(r);
+            const child = log.child({ mod: "channel" });
+            // 频道帖子的正文 (没有 post 可评论) / 帖子 room 认不出根帖: 直接发新帖。
+            if (!postId) {
+              void sendTopicPost(ws.client, child, topicId, quote ? quote + full : full, topicMedia)
+                .catch((e: unknown) => log.warn({ mod: "room", room: r.room, topicId, err: errText(e) }, "me: 频道发帖失败"));
+            } else {
+              void sendTopicReplyOrPost(ws.client, child, topicId, postId, full, quote ? quote + full : full, topicMedia)
+                .catch((e: unknown) => log.warn({ mod: "room", room: r.room, topicId, postId, err: errText(e) }, "me: 评论回原帖失败"));
+            }
+            return true;
+          },
         });
       }
       const chat = row.room;

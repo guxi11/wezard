@@ -137,6 +137,28 @@ assert.equal(media[0]!.principal, "user:tester");
 assert.equal(await meRowMirror(row({ text: "看图", files: [{ path: "/tmp/a.png", kind: "image", name: "a.png" }] }), undefined, mdeps), true);
 assert.equal(media.length, 2);
 assert.ok(sent.at(-1)!.md.includes("看图"), "文件随正文兜底私发");
+// 人话发生在频道 / 帖子 (账本里那句带 src): 答复评论回原帖, 不发私聊 (人 2026-11-24 拍板)。
+const chanCalls: Array<{ room: string; to: string; md: string }> = [];
+const chanDeps = {
+  ...mdeps,
+  rowById: (r: string, id: string) => (id === "me:tester#h1"
+    ? { op: "msg", at: 1, room: r, id, seq: 1, author: H1, ord: 2, speak: "human", kind: "say", text: ".me 看下 pane", wake: [], origin: "inbound", src: "chat:topic1", post: "p1" } as MsgRow
+    : undefined),
+  replyToSource: async (r: MsgRow, src: MsgRow, md: string) => {
+    chanCalls.push({ room: r.room, to: String(src.src) + "|" + String(src.post), md });
+    return true;
+  },
+};
+const beforeSent = sent.length;
+assert.equal(await meRowMirror(row({ re: ["me:tester#h1"] }), undefined, chanDeps), true);
+assert.equal(chanCalls.length, 1, "行上 src 是频道 → 交回原帖评论");
+assert.equal(chanCalls[0]!.to, "chat:topic1|p1");
+assert.ok(chanCalls[0]!.md.includes(ME_MARK), "评论仍带 .me 标注");
+assert.equal(sent.length, beforeSent, "评论路径不再兜底私聊");
+assert.equal(await meRowMirror(row({ re: ["me:tester#h1"] }), undefined, { ...chanDeps, replyToSource: async () => false }), true);
+assert.equal(sent.length, beforeSent + 1, "认不出发生地 → 回私聊兜底");
+assert.equal(await meRowMirror(row({ re: ["nope"] }), undefined, chanDeps), true);
+assert.equal(chanCalls.length, 1, "re 不到人话行 → 私聊 (群里 .me / 主动开口)");
 
 // ── ④ 审批卡路由: me 会话 target 剥 #tag → 用户 DM chatid ────────────────
 assert.equal(targetChatId("user:tester#me"), "tester", "me 的审批卡一律到用户私聊");

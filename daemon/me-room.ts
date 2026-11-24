@@ -2,7 +2,8 @@
 // 每个用户一个 me wizard (注册表普通记录, kind "me", 以自己名义) + 一个私有 me-room
 // (id `me:<userid>`)。用户在任何地方说 `.me …` 都路由到他自己的 me —— 行只落
 // me-room, 发生地 room 零行 (不开、不唤醒 monitor/host、不耗发生地预算);
-// me 的回复按发生地 frame 覆盖占位气泡回发 (带独立对话标注), 占位过期/主动开口
+// me 的回复按发生地 frame 覆盖占位气泡回发 (带独立对话标注); 发生地是频道 / 帖子
+// (那行带 src) 就评论回原帖, 被拒回退新帖 (人 2026-11-24 拍板); 其余 (群聊 / 主动开口)
 // 落用户私聊。me 不进已有 room (wiring B 的 auto-join 对 me 分流到 me-room),
 // 找 host / 其他 wizard 走 chat_ask 自动落的 dm/adhoc —— 与普通 wizard 一致。
 //
@@ -133,10 +134,16 @@ export interface MeMirrorDeps {
   sendMedia: (principal: string, f: { path: string; kind: "image" | "file" | "voice" | "video"; name: string; description?: string }) => Promise<{ ok: boolean; reason?: string }>;
   /** 兜底私发 (markdown)。 */
   notify: (principal: string, md: string) => void;
+  /** me-room 账本里按 id 取行 —— 用来找被答复的那句人话, 看它有没有 src (发生地)。 */
+  rowById?: (room: string, id: string) => MsgRow | undefined;
+  /** 那句人话发生在频道 / 帖子 (行上有 src): 答复评论回原帖 (被拒由实现回退发新帖,
+   *  带引用标注), 不发私聊。false = 认不出发生地, 照旧走私聊兜底。 */
+  replyToSource?: (row: MsgRow, src: MsgRow, md: string) => Promise<boolean>;
 }
 
-/** me-room 出站 (roomMirror 的 me 分支): 占位气泡覆盖 > 文件走用户私聊 > 正文
- *  兜底私发。带 ME_MARK 标注。空正文无文件不出站 (与 mirrors() 同口径)。 */
+/** me-room 出站 (roomMirror 的 me 分支): 占位气泡覆盖 > 人话发生在频道/帖子就评论回原帖
+ *  (被拒回退新帖) > 文件走用户私聊 > 正文兜底私发。带 ME_MARK 标注。
+ *  空正文无文件不出站 (与 mirrors() 同口径)。 */
 export const meRowMirror = async (row: MsgRow, cover: MsgRow | undefined, d: MeMirrorDeps): Promise<boolean> => {
   const user = "user:" + meUserOf(row.room);
   const authorTarget = row.author.kind === "wizard" ? d.authorTargetOf(row.author.id) : undefined;
@@ -146,6 +153,10 @@ export const meRowMirror = async (row: MsgRow, cover: MsgRow | undefined, d: MeM
   const plain = text || (files.length ? "📎 " + files.map((f) => f.name).join(", ") : "");
   const md = roomBubble(authorTarget, ME_MARK + "\n" + plain);
   if (cover?.ext && text && await d.coverBubble(cover.ext, md)) return true;
+  // 人话是在频道 / 帖子里点的名 (那行带 src): 答复评论回原帖, 被拒回退新帖 (带引用),
+  // 不再发私聊 (人 2026-11-24 拍板「评论回原帖」)。私聊只留给认不出发生地的情形。
+  const said = (row.re ?? []).map((id) => d.rowById?.(row.room, id)).find((r) => r?.author.kind === "human" && r.src);
+  if (said && d.replyToSource && await d.replyToSource(row, said, md)) return true;
   for (const f of files) {
     const r = await d.sendMedia(user, { path: f.path, kind: f.kind, name: f.name, ...(text ? { description: row.text } : {}) });
     if (!r.ok) return false;
