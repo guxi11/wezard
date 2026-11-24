@@ -1111,7 +1111,13 @@ export const installInboundRouter = (
     return wantTarget;
   };
   const stewardReception = (base: string): string => {
-    const r = resolveSteward(cfg, wizardStore(), base, (t) => ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
+    // §4.1: 源已绑进 room R → 接待 = R 的 host (stewardRoute 的第一道; resolve 里的
+    // sourceRoute 已经先答过, 这里是无 sourceRoute 注入时的兜底, 比如测试 / 老接线)。
+    const bound = (b: string) => {
+      const t = opts.sourceRoute?.(b)?.target;
+      return t ? { target: t } : undefined;
+    };
+    const r = resolveSteward(cfg, wizardStore(), base, (t) => ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)), bound);
     if (r.fresh && !freshSteward.has(r.target)) return openManifestation(base, r.fresh, r.target);
     return r.target;
   };

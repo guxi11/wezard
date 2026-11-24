@@ -32,10 +32,10 @@
 完成后 chat_reply (status done): commit、测试结果、取舍/遗留单列。卡住 status need。
 
 ## 进度 (执行者自维护)
-- [ ] 读设计稿 §4.1/§5.2 + P1-P3 代码
-- [ ] 群源入站查索引分流 + stewardRoute 改道
-- [ ] dry-run 证据/阈值/veto
-- [ ] room_fork 显式另起
-- [ ] 单测 + 回归全绿 + tsc 干净
+- [x] 读设计稿 §4.1/§5.2 + P1-P3 代码
+- [x] 群源入站查索引分流 + stewardRoute 改道
+- [x] dry-run 证据/阈值/veto
+- [x] room_fork 显式另起
+- [x] 单测 + 回归全绿 + tsc 干净
 - [ ] pathspec 提交 + 交代
 

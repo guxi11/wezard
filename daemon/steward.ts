@@ -132,7 +132,12 @@ export const stewardRoute = (
   store: WizardStore | undefined,
   base: string,
   cwdOf?: (target: string) => string,
+  /** 多源绑定 (§4.1): 源已绑进 room R 时, 接待对象 = R 的 host —— 不是该源自己的类绑定化身。
+   *  由调用方注入 (本模块不持有 room 账本); 返回 undefined = 恒等路径 (走下面的原逻辑)。 */
+  boundRoute?: (base: string) => { target: string } | undefined,
 ): StewardRoute => {
+  const boundHit = boundRoute?.(base);
+  if (boundHit) return { target: boundHit.target };
   if (!store) return { target: base };
   const open = (identity: string): StewardRoute => {
     const hit = manifestationIn(store, identity, base);

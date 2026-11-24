@@ -593,10 +593,24 @@ export const createWezardServer = (): McpServer => {
         source: z.string().optional().describe("要绑的源 base principal: chat:<opk…> (频道帖子) 或 chat:<群id> (群)。省略 = 本 room 最近一条带 src 的人话的源。"),
         room: z.string().optional().describe("绑进哪个 room: 缺省 = 唤醒你这一轮的 room; 显式给别的 room 时只有它的 host / 人能成功。"),
         why: z.string().optional().describe("一句判定理由 (落进 bind 行的 why, 审计用)。"),
+        dryRun: z.boolean().optional().describe("true = 只评估不写账本: 返回候选 room + 证据行 (同 asker / 近期接待 / 正文相关 (trigram >= rooms.binding.simMin) / 职责匹配)与 veto (跨机器人 / 没有 host / 死 room / 源已绑别处), 证据强的在前;相关度是语义判断, 由你决定绑哪个 —— daemon 不替你选。"),
       }),
     },
-    async ({ source, room, why }) =>
-      unwrap("room_bind", await daemonPost("/room/bind", { ...(source ? { source } : {}), ...(room ? { room } : {}), ...(why ? { why } : {}) })),
+    async ({ source, room, why, dryRun }) =>
+      unwrap("room_bind", await daemonPost("/room/bind", { ...(source ? { source } : {}), ...(room ? { room } : {}), ...(why ? { why } : {}), ...(dryRun ? { dryRun: true } : {}) })),
+  );
+  server.registerTool(
+    "room_fork",
+    {
+      title: "Fork a channel post source into its own room now (channel host only)",
+      description: "对首触落在频道 room 的帖子源**立即**走出口 3 (另起): 建帖子 room + 领号新实例, 并把新 host 作为普通成员拉进频道 room (频道 host 身份不变)。host 判定「这该是一个新 room」时用它, 不必等 rooms.binding.decideTimeoutMin 的超时兜底。只有该频道 room 的 host 能调。幂等: 源已绑 / 帖子 room 已诞生 / 频道还在引导期都不会动 (回 409), 也不会重复开房。",
+      inputSchema: currentAddressSchema({
+        source: z.string().optional().describe("帖子源 base principal (chat:<opk…>)。省略 = 本 room 最近一条带 src 的人话的源。"),
+        room: z.string().optional().describe("从哪个 room 看 (缺省 = 唤醒你这一轮的 room; 必须是该帖所属频道 room 才能过权限)。"),
+      }),
+    },
+    async ({ source, room }) =>
+      unwrap("room_fork", await daemonPost("/room/fork", { ...(source ? { source } : {}), ...(room ? { room } : {}) })),
   );
   server.registerTool(
     "room_unbind",

@@ -9,7 +9,8 @@ import { ConfigSchema } from "../shared/config.js";
 import { applyOp, DAEMON, emptyRoom, judge, type MsgRow, type RoomState, type Who } from "../shared/room.js";
 import { openRoomStore } from "../daemon/rooms.js";
 import { learnChannelPost } from "../daemon/channel-posts.js";
-import { planBind, planUnbind, planChannelBackfill, pendingFirstTouches } from "../daemon/room-bind.js";
+import { bindCandidates, planBind, planChannelBackfill, planFork, planUnbind, pendingFirstTouches, sourceRoomOf } from "../daemon/room-bind.js";
+import { stewardRoute } from "../daemon/steward.js";
 import { H, W, uid } from "./room-fixture.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "room-bind-"));
@@ -165,5 +166,79 @@ const chGuide = chanRoom(CHAN, [H("u1")]);
 assert.equal(backfill({ stateOf: (r) => (r === CHAN ? chGuide : r === SRC_POST ? post : undefined) }).length, 0);
 // 帖子 room 没有 host 不拉
 assert.equal(backfill({ stateOf: (r) => (r === CHAN ? ch : r === SRC_POST ? chanRoom(SRC_POST, [], "wecom-group") : undefined) }).length, 0);
+
+
+// ── ⑥ 群源: 源 → room 落点 + steward 接待 (P4 §4.1) ───────────────────
+const gRoom = chanRoom(GROUP, [W(uid(3))], "wecom-group");
+const sctx = { roomOfSource: (s: string) => (s === GROUP ? ROOM_R : undefined), stateOf: (r: string) => (r === GROUP ? gRoom : r === ROOM_R ? roomS : undefined) };
+assert.equal(sourceRoomOf({ source: GROUP, ...sctx }), ROOM_R, "群源已绑 → 落目标 room");
+assert.equal(sourceRoomOf({ source: GROUP, roomOfSource: () => undefined, stateOf: (r) => (r === GROUP ? gRoom : undefined) }), GROUP, "未绑 → 恒等回落");
+// stewardRoute 先查索引: 绑了就不再走源自己的类绑定化身
+assert.deepEqual(stewardRoute(cfg, undefined, GROUP, undefined, () => ({ target: ROOM_R })), { target: ROOM_R });
+assert.deepEqual(stewardRoute(cfg, undefined, GROUP), { target: GROUP }, "没有绑定回执 → 恒等路径不变");
+
+// ── ⑦ dry-run 证据 (§5.2) ───────────────────────────────────────────
+const T0 = 10_000_000;
+const mk = (id: string, members: Who[], rows: Array<{ text: string; at: number; src?: string }> = []): RoomState => {
+  const s = chanRoom(id, members, "wecom-group");
+  for (const r of rows) {
+    const v = judge(s, { author: H("u1"), kind: "say", text: r.text, origin: "inbound", ...(r.src ? { src: r.src } : {}) }, { now: r.at });
+    assert.equal(v.ok, true, v.ok ? "" : v.reason);
+    if (v.ok) applyOp(s, v.row);
+  }
+  return s;
+};
+const near = T0 - 60_000;
+const sStrong = mk("chat:wrS", [W(uid(5))], [{ text: "账单迁移的 review 结论", at: near }]);
+const sText = mk("chat:wrT", [W(uid(6))], [{ text: "完全一样的正文 账单迁移的 review 结论", at: near }]);
+const sDead = mk("chat:wrD", [W(uid(7))]);
+const sNoHost = mk("chat:wrN", []);
+const sCross = mk("chat:wrB~b2", [W(uid(8))], [{ text: "别的机器人", at: near }]);
+const cand = (over: Partial<Parameters<typeof bindCandidates>[0]> = {}) => bindCandidates({
+  cfg, source: GROUP, text: "账单迁移的 review 结论", asker: "u1",
+  states: [sStrong, sText, sDead, sNoHost, sCross], roomOfSource: () => undefined,
+  now: T0, simMin: 0.3, busyWindowMin: 60,
+  hostInfoOf: (u) => (u === uid(7) ? { name: "x", responsibility: "账单迁移 / review" } : undefined),
+  ...over,
+});
+const rep = cand();
+assert.equal(rep.blocked, "", "没绑别处不 blocked");
+assert.equal(rep.candidates[0]!.room, "chat:wrS", "同 asker 证据最强, 排第一");
+assert.ok(rep.candidates[0]!.evidence.some((e) => e.includes("同 asker")));
+const byRoom = new Map(rep.candidates.map((c) => [c.room, c]));
+assert.ok(byRoom.get("chat:wrT")!.evidence.some((e) => e.includes("正文相关")), "正文 trigram >= simMin 出证据");
+assert.ok(byRoom.get("chat:wrD")!.veto.some((e) => e.includes("死 room")), "死 room veto");
+assert.ok(byRoom.get("chat:wrN")!.veto.some((e) => e.includes("没有 host")), "没 host veto");
+assert.ok(byRoom.get("chat:wrB~b2")!.veto.some((e) => e.includes("跨机器人")), "跨 bot veto");
+// veto 的排在最后
+assert.equal(rep.candidates[rep.candidates.length - 1]!.veto.length > 0, true);
+// 源已绑别处 → blocked, 但仍给候选供人判断
+assert.match(cand({ roomOfSource: () => "chat:wrX" }).blocked, /已经绑在 chat:wrX/);
+// 阈值: simMin 拉到 1 时同文也只算 0.9x → 不出正文证据 (整句相同其实 1.0, 用截断文本测)
+assert.equal(cand({ text: "账单", simMin: 1 }).candidates.every((c) => !c.evidence.some((e) => e.includes("正文相关"))), true);
+// 近期接待: 这个源的话曾落在这本账
+const sPrev = mk("chat:wrP", [W(uid(9))], [{ text: "旧帖子的话", at: near, src: GROUP }]);
+const rep2 = cand({ states: [sPrev], text: "", asker: "" });
+assert.ok(rep2.candidates[0]!.evidence.some((e) => e.includes("近期接待")));
+// busyWindowMin=0 = 不看活跃度 → 死 room 不 veto
+assert.equal(cand({ states: [sDead], busyWindowMin: 0 }).candidates[0]!.veto.length, 0);
+
+// ── ⑧ room_fork 判定 (显式另起) ─────────────────────────────────────
+const chF = chanRoom("chat:T1", [W(uid(1))]);
+const ft = judge(chF, { author: H("u1"), kind: "say", text: "首触", origin: "inbound", post: "p1", src: SRC_POST }, { now: T0 });
+assert.equal(ft.ok, true);
+if (ft.ok) applyOp(chF, ft.row);
+const fork = (over: Partial<Parameters<typeof planFork>[0]> = {}) => planFork({
+  cfg, source: SRC_POST, actor: W(uid(1)), stateOf: (r) => (r === "chat:T1" ? chF : undefined), roomOfSource: () => undefined, ...over,
+});
+assert.equal(fork().ok, true, "频道 host + 首触 → 可另起");
+assert.equal((fork({ actor: W(uid(9)) }) as { status: number }).status, 403, "非频道 host 403");
+assert.equal((fork({ source: GROUP }) as { status: number }).status, 400, "群源不能另起");
+assert.equal((fork({ stateOf: () => undefined }) as { status: number }).status, 404, "频道 room 不在 404");
+assert.equal((fork({ roomOfSource: () => ROOM_R }) as { status: number }).status, 409, "已绑 → 409");
+assert.equal((fork({ stateOf: (r) => (r === "chat:T1" ? chF : r === SRC_POST ? chanRoom(SRC_POST, []) : undefined) }) as { status: number }).status, 409, "帖子 room 已诞生 → 409");
+const chNoTouch = chanRoom("chat:T1", [W(uid(1))]);
+assert.equal((fork({ stateOf: (r) => (r === "chat:T1" ? chNoTouch : undefined) }) as { status: number }).status, 409, "没首触 → 409");
+assert.equal((fork({ actor: H("u1") }).ok), true, "人可另起");
 
 console.log("room-bind-tool ok");

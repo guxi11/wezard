@@ -51,7 +51,7 @@ import {
 } from "./claim.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { BindGateClosed, openRoomStore } from "./rooms.js";
-import { planBind, planChannelBackfill, planUnbind, pendingFirstTouches } from "./room-bind.js";
+import { bindCandidates, planBind, planChannelBackfill, planFork, planUnbind, pendingFirstTouches, sourceRoomOf } from "./room-bind.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { repairStewardInstances, unspawnedStewards } from "./steward-repair.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
@@ -1946,16 +1946,18 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, room: r.room, on: b.on !== false });
     });
     // ── 源 ↔ room 绑定 (multi-source-binding §6): bind / unbind 只是账本 op ──────────
-    /** 本 room 最近一条带 src 的人话 —— room_bind 不给 source 时把「刚接到这条首触」绑进来。 */
-    const latestSrcOf = (room: string): string => {
+    /** 本 room 最近一条带 src 的人话 —— room_bind 不给 source 时把「刚接到这条首触」绑进来。
+     *  给了 source 就找那个源最近的一条 (dry-run 的正文 / 发话人证据)。 */
+    const latestSrcRowOf = (room: string, source = ""): MsgRow | undefined => {
       const s = roomState(room);
-      if (!s) return "";
+      if (!s) return undefined;
       for (let i = s.msgs.length - 1; i >= 0; i--) {
         const m = s.msgs[i]!;
-        if (m.kind === "say" && m.author.kind === "human" && m.src) return m.src;
+        if (m.kind === "say" && m.author.kind === "human" && m.src && (!source || m.src === source)) return m;
       }
-      return "";
+      return undefined;
     };
+    const latestSrcOf = (room: string, source = ""): string => latestSrcRowOf(room, source)?.src ?? "";
     const bindingCtx = () => ({ cfg, roomOfSource: (s: string) => roomStore.roomOfSource(s), stateOf: roomState, gate: roomStore.bindingGate() });
     http.register("POST /room/bind", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -1963,12 +1965,31 @@ const main = async (): Promise<void> => {
       if (refuseMonitor(res, self, "room_bind")) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
-      const b = body as { source?: string; room?: string; why?: string };
+      const b = body as { source?: string; room?: string; why?: string; dryRun?: boolean };
       // 缺省 room = 本轮被唤醒的 room (出口 1: host 把刚接到的首触绑进自己这里)。
       const target = roomTargetOf(me, undefined, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason ?? "room required" }); return; }
       const room = target.room;
       const source = (b.source ?? "").toString().trim() || latestSrcOf(room);
+      // §5.2 dry-run: 只给候选 room + 证据 (daemon 只给证据, 决定权在模型), 不写账本。
+      if (b.dryRun === true) {
+        if (!source) { json(res, 400, { ok: false, reason: "没有可评估的源: 给 source, 或在本 room 里先有一条带源的人话" }); return; }
+        const row = latestSrcRowOf(room, source);
+        const rep = bindCandidates({
+          cfg, source, text: row?.text ?? "", asker: row?.author.kind === "human" ? row.author.id : "",
+          states: roomStore.ids().map(roomState).filter((x): x is RoomState => !!x),
+          roomOfSource: (x) => roomStore.roomOfSource(x), now: Date.now(),
+          simMin: cfg.rooms?.binding?.simMin ?? 0.3, busyWindowMin: cfg.rooms?.binding?.busyWindowMin ?? 1440,
+          hostInfoOf: (u) => {
+            const w = wizards.byUid(u);
+            return w ? { name: w.name ?? "", responsibility: w.description ?? "" } : undefined;
+          },
+        });
+        json(res, 200, { ok: true, dryRun: true, source, text: rep.text,
+          candidates: rep.candidates.map((c) => ({ room: c.room, evidence: c.evidence, veto: c.veto, score: Math.round(c.score * 100) / 100 })),
+          ...(rep.blocked ? { blocked: rep.blocked } : {}) });
+        return;
+      }
       const v = planBind({ ...bindingCtx(), room, source, actor: me, ...(b.why ? { why: b.why.toString() } : {}) }, Date.now());
       if (!v.ok) { json(res, v.status, { ok: false, reason: v.reason }); return; }
       if (!v.already) {
@@ -2003,6 +2024,28 @@ const main = async (): Promise<void> => {
       roomLog.info({ room, source, by: me.id }, "room: 源已解绑 (回落恒等, lazy)");
       json(res, 200, { ok: true, room, source,
         text: "已解绑 " + source + ": 它的消息回落恒等 (自己的 room / 频道接待处); 帖子源下一条消息时才会按需诞生帖子 room (lazy)。" });
+    });
+    // §5.1 出口 3 的显式入口 (room_fork): host 判定「这该是新 room」时立即另起, 不必等超时兜底。
+    // 权限 = 该频道 room 的 host; 幂等判据与兜底同一套 (已绑 / 帖子 room 已在 / 引导期都不动)。
+    http.register("POST /room/fork", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      if (refuseMonitor(res, self, "room_fork")) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { source?: string; room?: string };
+      const target = roomTargetOf(me, undefined, b.room);
+      if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason ?? "room required" }); return; }
+      const source = (b.source ?? "").toString().trim() || latestSrcOf(target.room);
+      const v = planFork({ cfg, source, actor: me, stateOf: roomState, roomOfSource: (s) => roomStore.roomOfSource(s) });
+      if (!v.ok) { json(res, v.status, { ok: false, reason: v.reason }); return; }
+      let born = false;
+      try { born = birthPostRoom(v.topicId, source, me); }
+      catch (e) { json(res, 500, { ok: false, reason: errText(e) }); return; }
+      if (!born) { json(res, 409, { ok: false, reason: "没能另起 (频道还在引导期 / 帖子 room 已在) —— 先完成频道绑定" }); return; }
+      roomLog.info({ channel: v.channelRoom, post: source, by: me.id }, "room: 显式另起 (room_fork)");
+      json(res, 200, { ok: true, room: source, channel: v.channelRoom,
+        text: "已另起帖子 room " + source + ": 这个帖子之后的话落它自己的 room, 新 host 已作为普通成员拉进频道 room (频道 host 身份不变)。" });
     });
     // ── 新群引导的受控绑定 (onboard_bind): 只有引导化身能调 ────────────────
     // 引导的唯一动作面: 校验 (create 只建最后一级 / 父目录必须已在 / 必须在 $HOME 下) 与落盘都在
@@ -2238,7 +2281,7 @@ const main = async (): Promise<void> => {
       if (chRoom) { onboarding.finish(chRoom); reapStaleChannelGuide(chRoom); }
       // §4.1 源 → room: 绑定优先; 帖子源还没诞生 (没绑、帖子 room 也不在) → 频道 room 的接待处,
       // 由 host 判定 (§5.1)。行上的 src 写死入口源 —— 重放不再推断, 出站 (P2) 按它回原帖/原群。
-      const room = bound ?? (!roomState(e.room) && chRoom ? chRoom : e.room);
+      const room = sourceRoomOf({ source: e.room, roomOfSource: (s) => roomStore.roomOfSource(s), stateOf: roomState, fallback: () => chRoom || undefined });
       const src = e.room !== room ? e.room : undefined;
       if (!roomState(room)) {
         roomLog.warn({ room, src: e.room, msgid: e.msgid }, "channel: room 不存在, 人话没落账本 (自愈: 下一条事件重建)");
@@ -2263,7 +2306,8 @@ const main = async (): Promise<void> => {
       const ref = postRefOf(cfg, base);
       const topic = channelOf(cfg, base);
       if (!bound && !ref && !topic) return undefined;
-      const room = bound ?? (ref ? (roomState(base) ? base : ensureChannelRoom(ref.channel)) : base);
+      const room = sourceRoomOf({ source: base, roomOfSource: (s) => roomStore.roomOfSource(s), stateOf: roomState,
+        fallback: () => (ref ? ensureChannelRoom(ref.channel) : undefined) });
       const st = roomState(room);
       const host = st ? roomHost(st) : undefined;
       const target = host?.kind === "wizard" ? roomWizardOf(host.id)?.target : undefined;

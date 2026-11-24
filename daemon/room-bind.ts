@@ -7,7 +7,7 @@
 // 待判定 (首触兜底) 与存量补拉都**从账本现算**, 不维护第二份队列: 频道 room 里带 src 的人话行
 // 就是「这个帖子源来过、还没被处置」的全部事实; boot 重建后同一个扫描自然接上。
 import type { Config } from "../shared/config.js";
-import { roomHost, whoKey, type BindOp, type RoomState, type UnbindOp, type Who } from "../shared/room.js";
+import { isBoundRoom, openDuties, roomHost, whoKey, type BindOp, type RoomState, type UnbindOp, type Who } from "../shared/room.js";
 import { botOfKey } from "../shared/session-label.js";
 import { channelOf, postRefOf } from "./channel-posts.js";
 
@@ -179,3 +179,185 @@ export const planChannelBackfill = (a: {
   }
   return out;
 };
+
+// ── §5.2 判定证据 (dry-run): daemon 只给证据, 决定权在模型 ─────────────────
+// 与 daemon/route.ts 的 route_candidates 同一套词汇与心法: 证据分层 (强→弱) + 硬 veto +
+// 显式成本; 不在这里做确定性 decide —— 相关度是语义判断, 留给 host。只读: 不写账本。
+
+const normText = (t: string): string => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/** 规范化后的 trigram 集合 (CJK 按字, 拉丁按字符窗口; <3 字整句算一个)。 */
+export const trigramsOf = (t: string): Set<string> => {
+  const n = normText(t);
+  const out = new Set<string>();
+  if (!n) return out;
+  if (n.length <= 3) { out.add(n); return out; }
+  for (let i = 0; i + 3 <= n.length; i++) out.add(n.slice(i, i + 3));
+  return out;
+};
+
+/** trigram 规范化重叠率 (Jaccard, 0-1)。 */
+export const similarity = (a: string, b: string): number => {
+  const A = trigramsOf(a), B = trigramsOf(b);
+  if (!A.size || !B.size) return 0;
+  let hit = 0;
+  for (const g of A) if (B.has(g)) hit++;
+  return hit / (A.size + B.size - hit);
+};
+
+/** 正文关键词 (CJK 2 字窗 + 拉丁 >=3 字词), 职责匹配用; 去重、最多 40 个。 */
+export const keywordsOf = (t: string): string[] => {
+  const n = normText(t);
+  const out = new Set<string>();
+  for (const w of t.toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 3) out.add(w);
+  for (let i = 0; i + 2 <= n.length; i++) out.add(n.slice(i, i + 2));
+  return [...out].slice(0, 40);
+};
+
+export interface BindCandidate {
+  room: string;
+  host?: Who;
+  /** 命中的证据 (强的在前), 空 = 没有交集。 */
+  evidence: string[];
+  /** daemon 硬判的否决原因; 非空 = 别绑它。 */
+  veto: string[];
+  score: number;
+  /** 这个 room 最近一条消息的时刻 (排序 / 活跃度)。 */
+  lastAt: number;
+}
+
+export interface CandidateReport {
+  /** 全局否决 (源已绑别处): 非空时任何候选都不能直接绑。 */
+  blocked: string;
+  candidates: BindCandidate[];
+  text: string;
+}
+
+const clipText = (t: string, n: number): string => { const s = t.replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n) + "…" : s; };
+
+/** §5.2 候选与证据 (纯): 源的首触正文 / 发话人 vs 各 room 近期账本。
+ *  证据 同 asker > 近期接待 > 正文相关 (>= simMin) > 职责匹配; veto: 跨 bot / 没有 host /
+ *  死 room (busyWindowMin 内无行且无未结 duty) / 源已绑别处 (全局)。 */
+export const bindCandidates = (a: {
+  cfg: Config;
+  source: string;
+  text: string;
+  asker: string;
+  states: readonly RoomState[];
+  roomOfSource: (source: string) => string | undefined;
+  now: number;
+  simMin: number;
+  busyWindowMin: number;
+  hostInfoOf?: (uid: string) => { name: string; responsibility: string } | undefined;
+}): CandidateReport => {
+  const bound = a.roomOfSource(a.source);
+  const blocked = bound && bound !== a.source ? "这个源已经绑在 " + bound + " —— 想换地方先在那里 room_unbind" : "";
+  const busyMs = Math.max(0, a.busyWindowMin) * 60_000;
+  const keys = keywordsOf(a.text);
+  const out: BindCandidate[] = [];
+  for (const s of a.states) {
+    if (s.id === a.source) continue;
+    if (!isBoundRoom(s.id)) continue;
+    const host = roomHost(s);
+    const evidence: string[] = [];
+    const veto: string[] = [];
+    let score = 0;
+    const lastAt = s.msgs.reduce((m, x) => Math.max(m, x.at), s.openedAt ?? 0);
+    if (botOfKey(s.id) !== botOfKey(a.source)) veto.push("跨机器人");
+    if (!host) veto.push("没有 host (没人接)");
+    if (busyMs > 0 && a.now - lastAt > busyMs && openDuties(s).length === 0)
+      veto.push("死 room (近 " + Math.round((a.now - lastAt) / 60_000) + " 分钟无活动, 没有未结 duty)");
+    // ① 同 asker: 发话人在这个 room 近期说过话 (最强: 人就在那儿)。
+    if (a.asker && s.msgs.some((m) => m.author.kind === "human" && m.author.id === a.asker && (busyMs <= 0 || a.now - m.at <= busyMs))) {
+      evidence.push("同 asker (发话人在这说过话)");
+      score += 4;
+    }
+    // ② 近期接待: 这个源的话曾经落在这本账 (解绑再来的回访)。
+    if (s.msgs.some((m) => m.author.kind === "human" && m.src === a.source)) {
+      evidence.push("近期接待 (这个源的话曾落这本账)");
+      score += 3;
+    }
+    // ③ 正文相关: 与本 room 近期行 (最多 50 条) 的最大 trigram 重叠率。
+    if (a.text.trim()) {
+      let best = 0, bestText = "";
+      for (const m of s.msgs.slice(-50)) {
+        if (m.kind === "trigger" || m.author.kind === "daemon" || !m.text.trim()) continue;
+        const v = similarity(a.text, m.text);
+        if (v > best) { best = v; bestText = m.text; }
+      }
+      if (best >= a.simMin) {
+        evidence.push("正文相关 " + Math.round(best * 100) + "% («" + clipText(bestText, 28) + "»)");
+        score += 2 * best;
+      }
+    }
+    // ④ 职责匹配: 候选 host 的职责里出现正文关键词。
+    const info = host?.kind === "wizard" ? a.hostInfoOf?.(host.id) : undefined;
+    if (info?.responsibility && keys.length) {
+      const hits = keys.filter((k) => info.responsibility.includes(k));
+      if (hits.length) { evidence.push("职责匹配 " + hits.slice(0, 3).join("/")); score += Math.min(1.5, hits.length * 0.5); }
+    }
+    out.push({ room: s.id, ...(host ? { host } : {}), evidence, veto, score, lastAt });
+  }
+  out.sort((x, y) => (x.veto.length ? 1 : 0) - (y.veto.length ? 1 : 0) || y.score - x.score || y.lastAt - x.lastAt);
+  return { blocked, candidates: out, text: renderCandidates(out, blocked) };
+};
+
+const renderCandidates = (list: readonly BindCandidate[], blocked: string): string => {
+  const nameOf = (w: Who): string => w.kind === "wizard" ? "." + w.id : w.kind + ":" + w.id;
+  const lines: string[] = [blocked, blocked ? "" : "", "候选 room (证据强的在前: 同 asker > 近期接待 > 正文相关 > 职责匹配; 只是线索, 由你判断):"].filter((x) => x !== "");
+  if (!list.length) lines.push("· 没有可绑的 room (除源自己以外的 bound room 一个也没有)。");
+  for (const c of list) {
+    const head = "· " + c.room + (c.host ? " (host " + nameOf(c.host) + ")" : " (没有 host)");
+    if (c.veto.length) lines.push(head + " — ✗ " + c.veto.join("; "));
+    else if (c.evidence.length) lines.push(head + " — " + c.evidence.join("; "));
+    else lines.push(head + " — 没有交集");
+  }
+  lines.push("", "由你判断: 是不是同一件事。绑定用 room_bind({source, room}); 不是就留在这 (或 room_fork 另起)。");
+  return lines.join("\n");
+};
+
+
+/** §4.1 源→room 的落点 (纯): 绑定优先; 帖子 room 已诞生 → 它; 否则 fallback (频道接待处) 或源自己。
+ *  入站 (dispatch 前) 与 channelIngest 共用这一条, 保证两路落点一致。 */
+export const sourceRoomOf = (a: {
+  source: string;
+  roomOfSource: (source: string) => string | undefined;
+  stateOf: (room: string) => RoomState | undefined;
+  fallback?: (source: string) => string | undefined;
+}): string => {
+  const bound = a.roomOfSource(a.source);
+  if (bound) return bound;
+  if (a.stateOf(a.source)) return a.source;
+  return a.fallback?.(a.source) ?? a.source;
+};
+
+export type ForkVerdict =
+  | { ok: true; topicId: string; channelRoom: string }
+  | { ok: false; status: 400 | 403 | 404 | 409; reason: string };
+
+/** §5.1 出口 3 的显式入口 (room_fork) 的判定 (纯): 只有频道帖子源、只有该频道 room 的 host (或人)、
+ *  必须是「首触」(频道里这个源有人话) 且还没绑 / 帖子 room 还没诞生。幂等判据与超时兜底同一套。 */
+export const planFork = (a: {
+  cfg: Config;
+  source: string;
+  actor: Who;
+  stateOf: (room: string) => RoomState | undefined;
+  roomOfSource: (source: string) => string | undefined;
+}): ForkVerdict => {
+  const source = a.source.trim();
+  const ref = source ? postRefOf(a.cfg, source) : undefined;
+  if (!ref?.post) return { ok: false, status: 400, reason: "只有频道帖子源可以另起 (chat:<opk…>); 群源请用 room_bind 绑进一个已有 room" };
+  const channelRoom = "chat:" + ref.channel;
+  const cs = a.stateOf(channelRoom);
+  if (!cs) return { ok: false, status: 404, reason: "这个频道还没有 room 账本: " + channelRoom };
+  const host = roomHost(cs);
+  if (!(a.actor.kind === "human" || (host?.kind === "wizard" && host.id === a.actor.id)))
+    return { ok: false, status: 403, reason: "只有这个频道 room 的 host 能另起 (它不是你的接待面)" };
+  const bound = a.roomOfSource(source);
+  if (bound) return { ok: false, status: 409, reason: "这个源已绑在 " + bound + " —— 先解绑再另起" };
+  if (a.stateOf(source)) return { ok: false, status: 409, reason: "帖子 room 已经诞生: " + source };
+  if (!cs.msgs.some((m) => m.author.kind === "human" && m.src === source))
+    return { ok: false, status: 409, reason: "这个源还没有首触 (频道里没有它的话), 不另起" };
+  return { ok: true, topicId: ref.channel, channelRoom };
+};
+

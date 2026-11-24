@@ -430,6 +430,8 @@ export const ConfigSchema = z.object({
     }).default({}).describe("「你要交代」用法提示节流 (每次唤醒现读)"),
     binding: z.object({
       decideTimeoutMin: z.number().min(0).default(10).describe("频道里 @ 机器人首触落在频道 room、唤醒 host 之后, host 判定 (room_bind 绑进本 room / 另起帖子 room) 的时限 (分钟); 超时 daemon 自动另起帖子 room (不丢话). 每次扫描现读; 0 = 关 (永不兜底)"),
+      simMin: z.number().min(0).max(1).default(0.3).describe("room_bind dry-run 的证据阈值: 入站正文与候选 room 近期行正文的 trigram 重叠率 (0-1) 达到它才算「正文相关」"),
+      busyWindowMin: z.number().min(0).default(1440).describe("room_bind dry-run 的活跃窗 (分钟): 候选 room 在这段时间内没有任何行、且没有未结 duty = 死 room (veto); 同 asker 的「近期」也按它; 0 = 不看活跃度"),
     }).default({}).describe("源 ↔ room 多对一绑定 (docs/room/multi-source-binding.md §5.1)"),
   }).default({}).describe("room 账本相关 (磁盘护栏 / 看门狗)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
