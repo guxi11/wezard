@@ -66,7 +66,7 @@ import {
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
-import { addressed, footerTarget, responseFormatPolicy, roomBubble } from "./message-format.js";
+import { addressed, footerTarget, responseFormatPolicy, roomBubble, withBubbleFooter } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
@@ -751,11 +751,12 @@ const main = async (): Promise<void> => {
 
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
     const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self), text, "\n\n"));
-    /** 同 postAs, 但去到的是频道 room (chat:<topic_id>) —— 一律发新帖 (send_post)。 */
+    /** 同 postAs, 但去到的是频道 room (chat:<topic_id>) —— 一律发新帖 (send_post)。
+     *  频道 / 帖子直连 send_post / send_reply, 绕过 tracker, 署名收尾 (withBubbleFooter) 得自己补。 */
     const postAsTopic = (self: string, dest: string, text: string, media?: TopicMedia): void => {
       const topicId = dest.replace(/^chat:/, "");
       void sendTopicPost(ws.client, log.child({ mod: "channel" }), topicId,
-        linkTags(dest, headed(ownHead(self), text, "\n\n")), media)
+        linkTags(dest, withBubbleFooter(headed(ownHead(self), text, "\n\n"), self)), media)
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
     };
     /** 回话的引用标注: 评论被拒回退成新帖时, 让人知道这条在回谁的原话 (企微只允许评论 @ 过 bot 的帖子)。 */
@@ -769,14 +770,14 @@ const main = async (): Promise<void> => {
     /** 频道 room 的回话: 评论回原帖; 被企微拒 (没 @ 过 bot 的帖子) 回退发新帖, 正文带引用标注。 */
     const postAsChannelReply = (self: string, dest: string, post: string, text: string, quote: string, media?: TopicMedia): void => {
       const topicId = dest.replace(/^chat:/, "");
-      const full = linkTags(dest, headed(ownHead(self), text, "\n\n"));
+      const full = linkTags(dest, withBubbleFooter(headed(ownHead(self), text, "\n\n"), self));
       void sendTopicReplyOrPost(ws.client, log.child({ mod: "channel" }), topicId, post, full, quote ? quote + full : full, media)
         .catch((e: unknown) => log.warn({ topicId, post, err: errText(e) }, "channel post reply failed"));
     };
     /** 帖子 room (chat:<opk…>) —— 一律评论到根帖 (send_reply)。 */
     const postAsReply = (self: string, dest: string, channel: string, post: string, text: string, media?: TopicMedia): void => {
       void sendTopicReply(ws.client, log.child({ mod: "channel" }), channel, post,
-        linkTags(dest, headed(ownHead(self), text, "\n\n")), media)
+        linkTags(dest, withBubbleFooter(headed(ownHead(self), text, "\n\n"), self)), media)
         .catch((e: unknown) => log.warn({ channel, post, err: errText(e) }, "channel post reply failed"));
     };
     const retiringWizardTargets = new Set<string>();
@@ -1318,7 +1319,7 @@ const main = async (): Promise<void> => {
               }
               if (imageIds.length || inline.length) topicMedia = { ...(imageIds.length ? { imageIds } : {}), ...(inline.length ? { files: inline } : {}) };
             }
-            const full = linkTags(r.room, md);
+            const full = withBubbleFooter(linkTags(r.room, md), r.room);
             const quote = replyQuote(r);
             const child = log.child({ mod: "channel" });
             // 频道帖子的正文 (没有 post 可评论) / 帖子 room 认不出根帖: 直接发新帖。
@@ -1398,21 +1399,21 @@ const main = async (): Promise<void> => {
           const post = plan.post ?? "";
           if (authorTarget) postAsChannelReply(authorTarget, out, post, body, quote, topicMedia);
           else {
-            const full = linkTags(out, md);
+            const full = withBubbleFooter(linkTags(out, md), out);
             void sendTopicReplyOrPost(ws.client, log.child({ mod: "room" }), plan.topicId, post, full, quote ? quote + full : full, topicMedia)
               .catch((e) => log.warn({ mod: "room", room: chat, src: out, post, err: errText(e) }, "room: topic 评论回帖失败"));
           }
           return true;
         }
         if (authorTarget) postAsTopic(authorTarget, out, body, topicMedia);
-        else void sendTopicPost(ws.client, log.child({ mod: "room" }), plan.topicId, linkTags(out, md), topicMedia)
+        else void sendTopicPost(ws.client, log.child({ mod: "room" }), plan.topicId, withBubbleFooter(linkTags(out, md), out), topicMedia)
           .catch((e) => log.warn({ mod: "room", room: chat, src: out, err: errText(e) }, "room: topic 镜像失败"));
         return true; // 已交给传输; 异步失败由上面的 catch 记 warn
       }
       if (plan.via === "post") {
         // 帖子: 一律评论到根帖 (副源帖子 = 绑进本 room 的那条帖; 企微侧地址仍查 channel-posts)。
         if (authorTarget) postAsReply(authorTarget, out, plan.channel, plan.post, body, topicMedia);
-        else void sendTopicReply(ws.client, log.child({ mod: "room" }), plan.channel, plan.post, linkTags(out, md), topicMedia)
+        else void sendTopicReply(ws.client, log.child({ mod: "room" }), plan.channel, plan.post, withBubbleFooter(linkTags(out, md), out), topicMedia)
           .catch((e) => log.warn({ mod: "room", room: chat, src: out, err: errText(e) }, "room: post 镜像失败"));
         return true;
       }

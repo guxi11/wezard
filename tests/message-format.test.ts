@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { ConfigSchema } from "../shared/config.js";
 import { bindTagLinker, parseTagHeader } from "../shared/session-label.js";
 import { withMessageFooter } from "../shared/message-footer.js";
-import { addressed, footerTarget, responseFormatPolicy, responsePrincipal, roomBubble } from "../daemon/message-format.js";
+import { addressed, footerTarget, responseFormatPolicy, responsePrincipal, roomBubble, withBubbleFooter } from "../daemon/message-format.js";
 const a = "user:admin", b = "chat:wrOther~bot", worker = `${a}#worker`, voice = `${a}#voice`;
 const known = [a, b, worker, voice];
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: a, other: b } });
@@ -50,5 +50,14 @@ assert.equal(roomBubble(undefined, "[wezard] .a 被提醒后仍没有交代 m.1"
 assert.equal(addressed([".Grace"], "看下"), "→ .Grace 看下");
 assert.equal(addressed([".a", ".b"], "x"), "→ .a, .b x");
 assert.equal(addressed([], "x"), "x", "无收话人原样");
+// 频道 / 帖子出站: 直连 send_post / send_reply, 署名收尾由 withBubbleFooter 补 ——
+// 头与尾必须是同一套 link 渲染 (头裸 + 尾部 ✦ 指向同一个 rolepage), 与群气泡逐字相同。
+const topic = "chat:topicX";
+const topicBubble = withBubbleFooter(roomBubble(worker, "done"), topic);
+assert.equal(topicBubble, "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： done [✦](" + urlOf(worker) + ")", "频道正文与群气泡同一条署名渲染");
+assert.equal(topicBubble, withMessageFooter(roomBubble(worker, "done"), groupPolicy), "频道与群的收尾逐字一致");
+assert.equal(withBubbleFooter(topicBubble, topic), topicBubble, "已收尾的不再叠一层");
+assert.equal(withBubbleFooter(roomBubble(undefined, "x 已离开"), topic), "[wezard] x 已离开", "daemon 行没有作者, 不加尾署");
+assert.equal(withBubbleFooter("裸正文", topic), "裸正文", "无头正文不属于任何人");
 assert.equal(withMessageFooter(roomBubble(worker, addressed([".Grace"], "done")), groupPolicy), "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： → .Grace done [✦](" + urlOf(worker) + ")", "收话人在尾部改写后仍在");
 console.log("message-format integration tests passed");
