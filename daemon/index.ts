@@ -1662,8 +1662,8 @@ const main = async (): Promise<void> => {
       const target = roomTargetOf(me, to.who, b.room, { autoAdhoc: { interrupt: !!b.interrupt } });
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       const after = idList(b.after);
-      // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。
-      const forOf = (b.for ?? "").toString().trim() || hub.defaultFor(me.id);
+      // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。显式给的已关账 → 同样回落。
+      const forOf = hub.resolveFor(me.id, b.for);
       roomReply(res, hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
         ...(after.length ? { after } : {}), ...(forOf ? { for: forOf } : {}),
         ...((b.planId ?? "").toString().trim() ? { planId: (b.planId ?? "").toString().trim() } : {}),
@@ -3588,7 +3588,7 @@ const main = async (): Promise<void> => {
         if (target.error || !target.room) return { status: target.status ?? 400, body: { ok: false, reason: target.error ?? target.reason ?? "" } };
         // lead 的层级规矩随正文带 (宪章是出生快照, 打法只这一件活用得上)。
         const body2 = lead ? text + "\n\n" + renderReminder({ wezard: "lead" }, wizards.byUid(who.id)?.lead ? renderLeadPlaybook() : renderLead()) : text;
-        const forOf = ((b.for ?? "").toString().trim()) || hub.defaultFor(me.id);
+        const forOf = hub.resolveFor(me.id, (b.for ?? "").toString());
         const draft = { author: me, kind: "task" as const, text: body2, to: [who], origin: "tool" as const,
           ...(forOf ? { for: forOf } : {}),
           ...(planId ? { planId } : {}) };
@@ -3848,7 +3848,7 @@ const main = async (): Promise<void> => {
           const dest = roomTargetOf(me, [{ kind: "wizard", id: who }], roomArg || undefined);
           if (!dest.room) dispatchError = dest.error ?? dest.reason ?? "没有落点 room";
           else {
-            const forOf = (((b as { for?: unknown }).for ?? "").toString().trim()) || hub.defaultFor(me.id);
+            const forOf = hub.resolveFor(me.id, ((b as { for?: unknown }).for ?? "").toString());
             const draft = { author: me, kind: "task" as const,
               text: task + (b.lead === true ? "\n\n" + renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
               to: [{ kind: "wizard" as const, id: who }], origin: "tool" as const, ...(requestedPlanId ? { planId: requestedPlanId } : {}),

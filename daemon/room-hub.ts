@@ -460,7 +460,20 @@ export const createRoomHub = (p: HubPorts) => {
     return ids.size === 1 ? [...ids][0] : undefined;
   };
 
-  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, pending, isBoundRoom, reconcileAfter };
+  /** 派活工具的 for: 显式给的那条必须仍是**开着的** duty 才算血缘 —— 关掉的 / 写错的 id 挂不上
+   *  任何下游 (buildOpenChildDuties / buildDescendantActivity 都按 msg id 索引), 结果就是子件在干活、
+   *  上游却在自己名下被反复催; 这种 for 当没给, 回落到 defaultFor。 */
+  const resolveFor = (uid: string, explicit?: string): string | undefined => {
+    const want = (explicit ?? "").toString().trim();
+    if (!want) return defaultFor(uid);
+    const room = p.store.roomOfMsg(want);
+    const s = room ? state(room) : undefined;
+    if (s && openDuties(s).some((d) => d.msg === want)) return want;
+    p.log?.info({ uid, for: want }, "room: 显式 for 指向的 duty 已不在开着, 按本轮唤醒重算血缘");
+    return defaultFor(uid);
+  };
+
+  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, pending, isBoundRoom, reconcileAfter };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

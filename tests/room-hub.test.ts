@@ -211,6 +211,29 @@ const settle = () => hub.pump();
   assert.equal(hub.defaultFor(A), ask1.ok ? ask1.row.id : "", "trigger 行的 re 指向 duty 也算唤醒它的那一条");
   await hub.onIdle(A);
 }
+// resolveFor: 显式 for 指向已关账 / 根本不存在的 duty → 当没给 (回落到本轮唤醒的那一条); 指向别处还开着的 → 照用
+{
+  const roomX = "chat:wrX";
+  store.ensure(roomX, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(roomX, [
+    { op: "join", at: 1, room: roomX, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: roomX, who: { kind: "wizard", id: B }, ord: 2, via: "spawn", by: { kind: "wizard", id: A } },
+  ]);
+  const old = hub.append(roomX, { author: { kind: "wizard", id: B }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: A }], text: "旧的" });
+  assert.ok(old.ok);
+  await settle();
+  hub.append(roomX, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [old.ok ? old.row.id : ""], text: "旧的完了" });
+  await hub.onIdle(A);
+  const fresh = hub.append(roomX, { author: { kind: "wizard", id: B }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: A }], text: "新的" });
+  assert.ok(fresh.ok);
+  await settle();
+  const freshId = fresh.ok ? fresh.row.id : "";
+  assert.equal(hub.defaultFor(A), freshId);
+  assert.equal(hub.resolveFor(A, old.ok ? old.row.id : ""), freshId, "显式 for 已关账 → 回落到本轮唤醒的那一条 (血缘不挂在死 id 上)");
+  assert.equal(hub.resolveFor(A, "9f9f9f9f.1"), freshId, "不存在的 for 同样回落");
+  assert.equal(hub.resolveFor(A, freshId), freshId, "指向还开着的那条 duty → 照用");
+  await hub.onIdle(A);
+}
 // 绑定 room 里同伴的 done 回复人已经看见: 向人关账的「你要交代」点明这一点, 不让 host 复述
 {
   const roomR = "chat:wrR";
