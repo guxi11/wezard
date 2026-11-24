@@ -1,6 +1,8 @@
 // 频道 @ 两路入站 (原生帧 compat_info.source=channel + topic_at_bot 事件) 的去重, 以及
 // 2026-11-23 起的人话落 room 口径: 桥不再伪造 chatid=topicId 的群帧, 只调 ingest 交人话。
-// - 原生帧到了 → 桥不落 room (那条人话已经由 inbound 写进帖子 room), 只学配对 + 通知帖子诞生。
+// - 原生帧到了 → 桥不落 room (那条人话由 inbound 落账), 只学配对 + 通知「帖子源首触」。
+//   2026-11-24 (multi-source-binding §4.1): 首触**不再建帖子 room / 开新实例** —— 通知只是
+//   让 daemon 知道「这个源来过」, 人话落频道 room 由 host 判定 (room_bind / 超时另起)。
 // - 原生帧没到 → 兜底落一行: 帖子已配对 → 帖子 room; 没配对 → 频道 room 并标 mention:"bot"。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -21,7 +23,7 @@ const cfg = ConfigSchema.parse({
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ingested: ChannelHuman[] = [];
-const born: Array<[string, string]> = [];
+const touched: Array<[string, string]> = [];
 const client = {
   wsManager: { handleFrame: (_f: unknown) => {} },
   reply: async (_h: unknown, body: { post_id_list?: string[] }) => ({ body: { post_list: [{ post_id: body.post_id_list?.[0], content: "@wezard hi" }] } }),
@@ -29,19 +31,19 @@ const client = {
 installChannelEvents(client as never, cfg, log, {
   nativeWaitMs: 400,
   ingest: (e) => ingested.push(e),
-  postBorn: (t, b) => born.push([t, b]),
+  postTouched: (t, b) => touched.push([t, b]),
 });
 const atBot = (postId: string, asker = "tester", msgid = "m-" + postId) => client.wsManager.handleFrame({
   cmd: "aibot_topic_event_callback",
   body: { topic_id: "topicT", msgid, from: { userid: asker }, aibotid: "bot", create_time: 1700000000, event: { eventtype: "topic_at_bot", topic_at_bot: { post_id: postId } } },
 });
 
-// ① 原生帧先到 → 桥不落行; 学到配对并通知帖子 room 诞生。
+// ① 原生帧先到 → 桥不落行; 学到配对并通知「帖子源首触」(不建 room —— 是否诞生由 host 判定)。
 noteNativeChannelFrame("tester", "chat:opkA");
 atBot("p1");
 await sleep(700);
 assert.deepEqual(ingested, [], "原生帧先到: 桥不落第二行人话");
-assert.deepEqual(born, [["topicT", "chat:opkA"]], "配对即帖子 room 诞生");
+assert.deepEqual(touched, [["topicT", "chat:opkA"]], "配对即首触通知 (帖子 room 不在这一步诞生)");
 assert.equal(channelOfPost(cfg, "chat:opkA"), "topicT");
 
 // ② 事件先到, 原生帧 200ms 后到 (实测 0.3–0.8s) → 桥不落行。
@@ -73,12 +75,12 @@ atBot("p6");
 await sleep(800);
 assert.equal(ingested.length, 3, "别人的原生帧不抵本人的事件");
 
-// ⑥ 已被原生帧配过的帖子再 @ → 兜底直接落帖子 room, 照样标 mention:"bot" (人 2026-11-24:
-//    帖子 room 里 @ 的话也要直达 host, 不交给 monitor 判决 —— 与频道 room 同口径)。
+// ⑥ 已被原生帧配过的帖子再 @ → 兜底仍把「落点」报成帖子 base, 照样标 mention:"bot"; 帖子 room
+//    还没诞生时由 daemon 的 channelIngest 回落到频道接待处 (§4.1), 诞生后才是帖子 room 自己。
 atBot("p1", "tester", "m2-p1");
 await sleep(700);
 assert.equal(ingested.length, 4);
-assert.equal(ingested[3]!.room, "chat:opkA", "已配对: 落帖子 room (base 就是原生帧的 opk 群)");
+assert.equal(ingested[3]!.room, "chat:opkA", "已配对: 落点报帖子 base (room 尚未诞生时 daemon 回落频道接待处)");
 assert.equal(ingested[3]!.mention, "bot");
 
 // ⑦ 端到端: inbound 的最外层 "message" 回调认出 compat_info.source=channel 并记账。

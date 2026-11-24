@@ -584,6 +584,34 @@ export const createWezardServer = (): McpServer => {
     },
     async ({ room, on }) => unwrap("room_watch", await daemonPost("/room/watch", { room, on })),
   );
+  server.registerTool(
+    "room_bind",
+    {
+      title: "Bind an info source into this room (host / human only)",
+      description: "把一个企业微信信息源绑进本 room (多对一): 之后那个源的消息落这本账, 这里的回复按源回去 (帖子源 = 评论回原帖, 群源 = 群消息)。源 = base principal: 频道帖子 chat:<opk…> 或群 chat:<群id>; 频道本身就是一个 room, 不绑。**谁可以绑**: 目标 room 的 host 或人; 判定者不是目标 host 时先 chat_ask 那个 host, 让它自己调本工具。硬门: 同机器人 / 一源只能绑一个 room (想换先 room_unbind) / 目标 room 必须有 host / 源必须是群或帖子 / 源不能就是目标 room 的主源。source 省略 = 本 room 最近一条带源的人话 (频道里 @ 你的那条首触) —— 频道 host 判定「这条是我的」时直接 room_bind() 即可, 帖子 room 不诞生、不开新实例。三种出口: ① 自己处理 = 绑进本 room; ② 强相关旧 room = chat_ask 那个 room 的 host, 由它绑; ③ 另起 = 不绑 (daemon 在 rooms.binding.decideTimeoutMin 后自动为这个首触开帖子 room + 领号新实例, 并把新 host 拉进频道 room)。why 写一句判定理由 (审计落在 bind 行上)。",
+      inputSchema: currentAddressSchema({
+        source: z.string().optional().describe("要绑的源 base principal: chat:<opk…> (频道帖子) 或 chat:<群id> (群)。省略 = 本 room 最近一条带 src 的人话的源。"),
+        room: z.string().optional().describe("绑进哪个 room: 缺省 = 唤醒你这一轮的 room; 显式给别的 room 时只有它的 host / 人能成功。"),
+        why: z.string().optional().describe("一句判定理由 (落进 bind 行的 why, 审计用)。"),
+      }),
+    },
+    async ({ source, room, why }) =>
+      unwrap("room_bind", await daemonPost("/room/bind", { ...(source ? { source } : {}), ...(room ? { room } : {}), ...(why ? { why } : {}) })),
+  );
+  server.registerTool(
+    "room_unbind",
+    {
+      title: "Unbind an info source from this room (host / human only)",
+      description: "解除本 room 对一个信息源的绑定 (只有目标 room 的 host 或人能解)。解绑后源**回落恒等**: 帖子源的消息回到频道接待处, 下一条消息时才按需诞生它自己的帖子 room (lazy, 不立即补开);群源回到自己的 1:1 room (原 room 与管家实例原样保留)。之后再想合并对话就重新 room_bind。",
+      inputSchema: currentAddressSchema({
+        source: z.string().describe("要解绑的源 base principal (与 room_bind 时给的一样)。"),
+        room: z.string().optional().describe("从哪个 room 解: 缺省 = 唤醒你这一轮的 room。"),
+        why: z.string().optional().describe("一句理由 (落进 unbind 行)。"),
+      }),
+    },
+    async ({ source, room, why }) =>
+      unwrap("room_unbind", await daemonPost("/room/unbind", { source, ...(room ? { room } : {}), ...(why ? { why } : {}) })),
+  );
 
   registerRare(
     "list_chats",

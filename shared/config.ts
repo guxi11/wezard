@@ -428,6 +428,9 @@ export const ConfigSchema = z.object({
     replyHint: z.object({
       window: z.number().int().min(0).default(10).describe("唤醒文本里「你要交代: <id> (…)」后面那半句用法提示 (「—— 用 chat_reply({re, text, status}) 交代。」) 的节流窗口, 单位 = 该 wizard 最近成功投递的唤醒批次数 (跨 room 同批算一次): 窗口内它写过任何 chat_reply 就不再附; 批次不足该数 (新 wizard) 或窗口内没写过就附; 0 = 每次都附。id 短形始终保留; 不影响轮终 / Stop hook 的欠账提醒"),
     }).default({}).describe("「你要交代」用法提示节流 (每次唤醒现读)"),
+    binding: z.object({
+      decideTimeoutMin: z.number().min(0).default(10).describe("频道里 @ 机器人首触落在频道 room、唤醒 host 之后, host 判定 (room_bind 绑进本 room / 另起帖子 room) 的时限 (分钟); 超时 daemon 自动另起帖子 room (不丢话). 每次扫描现读; 0 = 关 (永不兜底)"),
+    }).default({}).describe("源 ↔ room 多对一绑定 (docs/room/multi-source-binding.md §5.1)"),
   }).default({}).describe("room 账本相关 (磁盘护栏 / 看门狗)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),

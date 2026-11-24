@@ -557,6 +557,8 @@ export interface Draft {
   mention?: "bot";
   /** 频道 room 里这一行属于哪个帖子 (帖子 room 诞生前, 评论都记在频道 room 并带 post)。 */
   post?: string;
+  /** 这一行从哪个副源进来 (multi-source-binding §3.3): 入站时写死, 缺省 = 本 room 主源。 */
+  src?: string;
   interrupt?: boolean;
   for?: string;
   after?: string[];
@@ -735,7 +737,7 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   const draftRow: MsgRow = {
     op: "msg", at: ctx.now, room: s.id, id: msgIdOf(s.id, seq), seq, author: d.author, ord: member?.ord ?? 0, speak,
     kind: d.kind, text: d.text, ...(to.length ? { to } : {}), ...(re.length ? { re } : {}), ...(status ? { status } : {}),
-    ...(d.mention ? { mention: d.mention } : {}), ...(d.post ? { post: d.post } : {}), ...(toMonitor ? { monitor: true as const } : {}),
+    ...(d.mention ? { mention: d.mention } : {}), ...(d.post ? { post: d.post } : {}), ...(d.src ? { src: d.src } : {}), ...(toMonitor ? { monitor: true as const } : {}),
     ...(closes.length ? { closes } : {}), wake: [], ...(d.interrupt ? { interrupt: true } : {}),
     ...(d.for ? { for: d.for } : {}), ...(d.after?.length ? { after: d.after } : {}), ...(d.planId ? { planId: d.planId } : {}),
     ...(d.files?.length ? { files: d.files } : {}), origin: d.origin, ...(d.ext ? { ext: d.ext } : {}),

@@ -618,6 +618,10 @@ export interface InboundOpts {
   getNotice?: (base: string) => string | undefined;
   /** 人改本群公告 (`/notice` 写; 空串 = 清除); 行落账本、群里发系统行、在跑的 wizard 收提示都在 daemon 那头。 */
   setNotice?: (base: string, text: string, by: { kind: "human"; id: string }) => { ok: true; notice: string; changed: boolean } | { ok: false; reason: string };
+  /** multi-source-binding §4.1: 这个入口源 (群 / 帖子群 / 频道) 该落哪本账、谁是接待人。
+   *  源已绑 / 帖子源还没诞生 (落频道接待) 时给结论; 恒等路径 = undefined (走 stewardReception)。
+   *  src / post = 账本行要写死的入口源与频道帖子 id (重放不推断)。 */
+  sourceRoute?: (base: string) => { room: string; target: string; src?: string; post?: string } | undefined;
 }
 
 export type GuideInbound = NonNullable<InboundOpts["guideInbound"]>;
@@ -1117,7 +1121,9 @@ export const installInboundRouter = (
   const resolve: Resolve = (base, name, speaker) => {
     // 保留别名 "me": 按发话人解析/惰性落他自己的分身 (me-room 的落账/回发在 wiring B 分流)。
     if (name === ME_TAG && speaker) return ensureMeWizard(wizardStore(), speaker);
-    if (!name) return stewardReception(base);
+    // §4.1: 源已绑 / 帖子源首触时, 裸消息的接待对象是承载 room 的 host, 不是源自己的类绑定化身
+    // (后者会给首触开一个新实例 —— 正是 P3 要停掉的行为)。
+    if (!name) return opts.sourceRoute?.(base)?.target ?? stewardReception(base);
     const store = wizardStore();
     const rec = store?.byName(name);
     if (store && rec && sameBot(base, rec.target)) {
@@ -1184,6 +1190,9 @@ export const installInboundRouter = (
     let base = chatPrincipal(msg);
     if (sourceOf(msg) === "channel") {
       await settleChannelPost(base);
+      // §4.1: 这个源已绑进某个 room / 帖子 room 已有 host → 接待在 room 里, 不走频道引导
+      // (绑定优先于「频道还没绑定管家」—— 一个帖子可以绑进别处, 不该被频道引导截走)。
+      if (opts.sourceRoute?.(base)) return false;
       // 频道: 绑定与引导的粒度都是频道 (人 2026-11-23: 一个频道一个管家、一条引导)。原生帧的
       // base 是**帖子**群 (chat:opk…), 配上频道就换回频道 room —— 引导化身住频道 room, 帖子
       // room 在绑定前没有 host, 人话落那儿没人接。
@@ -1261,12 +1270,14 @@ export const installInboundRouter = (
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = [], spoken = "", mentionBot = false): Promise<void> => {
     // 账本行只存人的原话: 信封已删 (谁说的 = 行作者, 哪个群 = 行所在 room), 管家自查 / 点名提示 /
     // 名册增量这些提醒尾巴也不在这里拼 —— 它们在唤醒渲染那一刻才挂 (wake-tail.ts / room-hub)。
-    const channel = chatPrincipal(msg);
+    // §4.1: 入口源已绑 / 帖子源首触 → 落承载 room (不是入口 base), 行上写死 src / post。
+    const sr = opts.sourceRoute?.(chatPrincipal(msg));
+    const channel = sr?.room ?? chatPrincipal(msg);
     // P7-S1 只记录不动行为: 人话 dispatch 前落一行 human (同步内存记账, 落盘在后台)。
     // room 模型: 人话行的去重键 = 企微 msgid (账本行 ext), 事件表已退役。
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: spoken || text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body, ...(mentionBot ? { mentionBot: true } : {}) });
+      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text, rawText: spoken || text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}`, quoted: parseQuote(msg.quote)?.body, ...(mentionBot ? { mentionBot: true } : {}), ...(sr?.src && sr.room !== sr.src ? { src: sr.src } : {}), ...(sr?.post ? { post: sr.post } : {}) });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

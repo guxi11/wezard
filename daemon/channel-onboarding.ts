@@ -89,9 +89,12 @@ export const planChannelGuideTurn = (
   const guide = guideTargetOf(a.store, channelRoom);
   // 帖子 room 来的话没有 post 字段 (room 自己就是那个帖子) —— 转进频道 room 时把归属补回来。
   const post = e.post || postRefOf(a.cfg, a.room)?.post || "";
+  // 帖子源的话转进频道 room 时把入口源也带上 (multi-source-binding §3.3): 首触行的 src 是
+  // 帖子 base, 之后 host 判定 / 出站回原帖都靠它。
+  const src = a.room !== channelRoom ? a.room : "";
   const human: Draft = {
     author: { kind: "human", id: e.author }, kind: "say", text: e.text, origin: "inbound", ext: e.msgid,
-    ...(post ? { post } : {}), ...(e.mention ? { mention: e.mention } : {}),
+    ...(post ? { post } : {}), ...(e.mention ? { mention: e.mention } : {}), ...(src ? { src } : {}),
   };
   // 引导在频道 room 的入座 (channelGuideJoinOps) 由调用方在 upsert 之后现算 —— 新记录此刻还没有 uid。
   return { channelRoom, guide, first, human };

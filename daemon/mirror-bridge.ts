@@ -2611,6 +2611,10 @@ export interface MirrorDispatchArgs {
   /** 人这句 @ 了机器人 (inbound 的 atBot 判据): 账本行记 mention:"bot" —— @ 了机器人的人话已有
    *  确定的接待者 (host / 被点名者), 不再交给 room 的 monitor 判决。 */
   mentionBot?: boolean;
+  /** 这句从哪个信息源进来 (multi-source-binding §3.3): 落进承载 room 的行上写死; 缺省 = 本 room 主源。 */
+  src?: string;
+  /** 频道 room 的行所属帖子 id (与 src 正交)。 */
+  post?: string;
 }
 
 export interface AttachArgs {

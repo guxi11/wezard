@@ -43,13 +43,13 @@
 完成后 chat_reply (status done): commit hash 列表、测试结果、取舍/遗留单列一段 (尤其: 现行为改了哪些断言、多 re/边角怎么处理的)。卡住 status need 写清卡点; 工程量大想分两次交代也行 (先 progress)。
 
 ## 进度 (执行者自维护)
-- [ ] 读设计稿 §4.1/§5.1/§6/§7 + P1/P2 代码
-- [ ] @ 首触落频道 room (不开帖子 room)
-- [ ] room_bind/unbind 工具 + 硬门 + 权限
-- [ ] 入站查索引分流 (bind 后落目标 room, src 写死)
-- [ ] 10min 兜底另起 (幂等) + 另起拉进频道 room
-- [ ] boot 补拉存量
-- [ ] unbind lazy 锁定
-- [ ] 单测 + 回归全绿 + tsc 干净
+- [x] 读设计稿 §4.1/§5.1/§6/§7 + P1/P2 代码
+- [x] @ 首触落频道 room (不开帖子 room)
+- [x] room_bind/unbind 工具 + 硬门 + 权限
+- [x] 入站查索引分流 (bind 后落目标 room, src 写死)
+- [x] 10min 兜底另起 (幂等) + 另起拉进频道 room
+- [x] boot 补拉存量
+- [x] unbind lazy 锁定
+- [x] 单测 + 回归全绿 + tsc 干净
 - [ ] pathspec 提交 + chat_reply 交代
 

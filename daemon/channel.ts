@@ -349,8 +349,10 @@ export interface ChannelFacts {
   nativeWaitMs?: number;
   /** 人话落 room (入站写账本的唯一出口)。 */
   ingest?: (e: ChannelHuman) => void;
-  /** 帖子 room 诞生 (第一次配上 opk): 建 room / host 进频道 room / 起 monitor。 */
-  postBorn?: (topicId: string, postBase: string) => void;
+  /** 帖子源首触 (第一次配上 opk): **只通知, 不建 room** —— 人话落频道 room 交 host 判定
+   *  (docs/room/multi-source-binding.md §4.1); 帖子 room 由 host 的 room_bind 或超时兜底
+   *  (daemon 的另起) 才诞生。 */
+  postTouched?: (topicId: string, postBase: string) => void;
   /** 频道第一次见到: 建频道 room + 起 monitor。 */
   channelSeen?: (topicId: string) => void;
 }
@@ -404,7 +406,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
         // 配上的这一对就是「帖子 → 频道」的唯一判据 (原生帧里没有频道标识)。
         if (learnChannelPost(cfg, native, topicId, postId)) {
           log.info({ topicId, post: native }, "channel post learned");
-          facts?.postBorn?.(topicId, native);
+          facts?.postTouched?.(topicId, native);
         }
         log.info({ topicId, postId, msgid, nativeChat: native }, "channel at_bot: carried by native frame, bridge skip");
         await record(cfg, topicId, postMsg(await fetchPost(client, topicId, postId, log)));
