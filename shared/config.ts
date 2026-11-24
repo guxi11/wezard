@@ -141,11 +141,12 @@ const Mirror = z.object({
 });
 
 const Channel = z.object({
-  // 每个频道 room / 帖子 room 一个常驻 monitor (daemon 自动建、自动以 role:"monitor" 入座):
-  // 人话落进 room 只唤醒它, 由它写一条 activate 行决定激活谁 (不回应就 to 为空)。
+  // room 感知器 perceptron (2026-11-24 起, 键名沿用 channel.monitor; 概念上取代原 monitor):
+  // 门控 = room 里存在需要感知的未点名 wizard 成员 (候选 ≥2) 才建 —— 频道 / 帖子 / 群一视同仁。
+  // 人话落进 room 只唤醒它, 由它给一份应回应名单 (perceive op, 空判决不落记录)。
   monitor: z.object({
-    enabled: z.boolean().default(true).describe("为每个频道 / 帖子 room 自动建一个 monitor (不回应的人话就不投递)"),
-    tier: z.string().default("light").describe("monitor 使用的模型档位 (读账本 + 一次判断, 轻档够)"),
+    enabled: z.boolean().default(true).describe("为需要感知的 room 自动建一个 perceptron (没点名的人话由它判该谁回应)"),
+    tier: z.string().default("light").describe("perceptron 使用的模型档位 (读账本 + 一次判断, 轻档够)"),
   }).default({}),
   // 频道历史的本地缓存 (daemon/channel-store.ts) 与「给 wizard 看多少」的口径
   // (daemon/channel-context.ts)。官方接口仍是事实来源: 本地只做最近上下文与回填,

@@ -1,4 +1,4 @@
-// monitor (§2.2): 宪章 / 工具面硬限 / 发言权硬限 (hub append) —— 纯逻辑 + hub 闸。
+// perceptron (§2.2, kind "monitor"): 宪章 / 工具面硬限 / 发言权硬限 (hub append) —— 纯逻辑 + hub 闸。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,8 +19,9 @@ const charter = renderCharter({
   chat: "", principal: "chat:topicT", inherited: false, siblings: [], memory: [],
   chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 0, lead: false, tiers: [],
 });
-assert.ok(charter.includes("# 你是这个 room 的 monitor"));
+assert.ok(charter.includes("# 你是这个 room 的 perceptron"));
 assert.ok(charter.includes("room_activate"));
+assert.ok(charter.includes("reason"), "宪章讲名单 + 理由");
 assert.ok(!charter.includes("## 怎么干活: 编排"), "monitor 宪章不带编排节");
 assert.ok(!charter.includes("## 怎么说话"), "monitor 宪章不带发言节");
 // 普通 wizard 的宪章不受影响。
@@ -68,10 +69,11 @@ const hub = createRoomHub({
 });
 store.ensure("chat:t", { at: 1, kind: "wecom-group", by: DAEMON });
 const H: Who = { kind: "human", id: "u1" };
-const A = W(uid(1));
+const A = W(uid(1)), B = W(uid(2));
 hub.write("chat:t", [
   { op: "join", at: 1, room: "chat:t", who: A, ord: 1, via: "founder", by: DAEMON },
   { op: "join", at: 2, room: "chat:t", who: M, ord: 2, via: "invite", by: DAEMON, role: "monitor" },
+  { op: "join", at: 3, room: "chat:t", who: B, ord: 3, via: "invite", by: DAEMON },
 ]);
 const human = hub.append("chat:t", { author: H, kind: "say", text: "谁能看下", origin: "inbound" });
 assert.ok(human.ok);
@@ -80,7 +82,7 @@ for (const kind of ["say", "reply", "ask"] as const) {
   assert.equal(v.ok, false, "monitor 不能写 " + kind);
   if (!v.ok) assert.equal(v.status, 403);
 }
-assert.deepEqual(openDuties(store.get("chat:t")!).length, 0, "monitor 的人话不开 duty");
+assert.deepEqual(openDuties(store.get("chat:t")!).length, 0, "perceptron 接管的人话不开 duty");
 // 2026-11-23 人定: 判决完全不写消息行 —— monitor 连 trigger activate 行也不能 append。
 const actV = hub.append("chat:t", { author: M, kind: "trigger", sys: "activate", text: "", re: [human.ok ? human.row.id : ""], to: [A], origin: "tool" });
 assert.equal(actV.ok, false, "monitor 不写任何 msg 行 (含 activate)");

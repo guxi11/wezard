@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRoomHub } from "../daemon/room-hub.js";
 import { openRoomStore } from "../daemon/rooms.js";
-import { applyOp, DAEMON, foldRoom, judgeActivate, openDuties, wasActivated, type AssignOp, type RoomOp, type Who } from "../shared/room.js";
+import { applyOp, DAEMON, foldRoom, judgeActivate, openDuties, wasActivated, type AssignOp, type PerceiveOp, type RoomOp, type Who } from "../shared/room.js";
 import { room as mkRoom, uid, W } from "./room-fixture.js";
 
 const A = W(uid(1)), B = W(uid(2)), M = W(uid(9)), H1: Who = { kind: "human", id: "u1" };
@@ -50,14 +50,17 @@ const humanRow = (s: ReturnType<typeof withMonitor>, text = "谁来接") => {
   assert.equal(re.msgs.filter((m) => m.kind === "trigger").length, 0, "没有任何判决消息行");
 }
 
-// ② judgeActivate: 最后一条人话 / 成员 / 一次; 存量 trigger 行与 assign 都算「已激活」。
+// ② judgeActivate: 最后一条人话 / 成员 / 一次; 名单可多目标; 存量 trigger 行与 assign 都算「已激活」。
 {
   const s = withMonitor();
   const h = humanRow(s);
-  assert.deepEqual(judgeActivate(s, M, [h.id], B), { ok: true });
-  assert.equal(judgeActivate(s, A, [h.id], B).ok, false, "非 monitor 403");
+  assert.deepEqual(judgeActivate(s, M, [h.id], [B]), { ok: true });
+  assert.deepEqual(judgeActivate(s, M, [h.id], [A, B]), { ok: true }, "多目标名单 ok");
+  assert.equal(judgeActivate(s, M, [h.id], [H1]).ok, false, "非 wizard 400");
+  assert.equal(judgeActivate(s, M, [h.id], [W("wzzz")]).ok, false, "非成员 400");
+  assert.equal(judgeActivate(s, A, [h.id], [B]).ok, false, "非 perceptron 403");
   applyOp(s, { op: "assign", at: 4_000, room: s.id, duty: h.id, to: B, asker: H1, by: M });
-  const again = judgeActivate(s, M, [h.id], A);
+  const again = judgeActivate(s, M, [h.id], [A]);
   assert.equal(again.ok, false);
   if (!again.ok) assert.equal(again.status, 409);
   assert.ok(wasActivated(s, h.id));
@@ -86,6 +89,7 @@ const humanRow = (s: ReturnType<typeof withMonitor>, text = "谁来接") => {
   hub.write("chat:t", [
     { op: "join", at: 1, room: "chat:t", who: A, ord: 1, via: "founder", by: DAEMON },
     { op: "join", at: 2, room: "chat:t", who: M, ord: 2, via: "invite", by: DAEMON, role: "monitor" },
+    { op: "join", at: 3, room: "chat:t", who: B, ord: 3, via: "invite", by: DAEMON },
   ]);
   const h = hub.append("chat:t", { author: H1, kind: "say", text: "这个怎么弄", origin: "inbound" });
   assert.ok(h.ok);
@@ -115,6 +119,7 @@ const humanRow = (s: ReturnType<typeof withMonitor>, text = "谁来接") => {
   hub.write("chat:s", [
     { op: "join", at: 1, room: "chat:s", who: A, ord: 1, via: "founder", by: DAEMON },
     { op: "join", at: 2, room: "chat:s", who: M, ord: 2, via: "invite", by: DAEMON, role: "monitor" },
+    { op: "join", at: 3, room: "chat:s", who: B, ord: 3, via: "invite", by: DAEMON },
   ]);
   const h = hub.append("chat:s", { author: H1, kind: "say", text: "谁来接", origin: "inbound" });
   const msgId = h.ok ? h.row.id : "";
@@ -134,4 +139,25 @@ const humanRow = (s: ReturnType<typeof withMonitor>, text = "谁来接") => {
   assert.ok(!p.get(A.id)?.get("chat:s")?.length, "投递过就不再重复唤醒");
 }
 
-console.log("room-assign ok (assign 开 duty / 注入无 monitor 痕迹 / 存量兼容 / 已读行补唤醒)");
+// ⑤ perceive op (2026-11-24 感知判决): 一条 op 开一串 duty + 记 verdict; 不写消息行; 重放幂等。
+{
+  const s = withMonitor();
+  const h = humanRow(s);
+  const seqBefore = s.seq, msgsBefore = s.msgs.length;
+  const op: PerceiveOp = { op: "perceive", at: 4_000, room: s.id, duty: h.id, to: [A, B], asker: H1, by: M, why: "A 懂这块, B 在跟" };
+  applyOp(s, op);
+  assert.equal(s.seq, seqBefore, "perceive 不占 seq");
+  assert.equal(s.msgs.length, msgsBefore, "perceive 不写消息行");
+  const ds = openDuties(s);
+  assert.deepEqual(ds.map((d) => d.slot).sort(), ["wizard:" + A.id, "wizard:" + B.id], "名单逐个开 duty");
+  assert.ok(ds.every((d) => d.via === "assign" && d.kind === "human" && d.msg === h.id));
+  const v = s.verdicts.get(h.id)!;
+  assert.deepEqual(v.to, [A, B], "verdict 记全名单");
+  assert.equal(v.why, "A 懂这块, B 在跟");
+  assert.ok(wasActivated(s, h.id), "perceive 开的账算已判");
+  // 重放幂等: 同一 op 再来一遍不重复开。
+  applyOp(s, { ...op, at: 9_000 });
+  assert.equal(openDuties(s).length, 2, "重复 perceive 不加开");
+}
+
+console.log("room-assign ok (assign/perceive 开 duty / 注入无 perceptron 痕迹 / 存量兼容 / 已读行补唤醒)");

@@ -28,10 +28,10 @@ const guideRefuse = (what: string): string =>
   "引导会话只有 chat_reply / chat_say (本群 room) / onboard_bind 三件工具 (" + what + " 被拒): "
   + "话用 chat_reply / chat_say 说进 room, 目录与绑定用 onboard_bind 交给 daemon, 不要调别的工具或命令。";
 
-/** room 的 monitor: 读账本 + 一条 activate 判决。 */
+/** room 的 perceptron: 读账本 + 一份名单判决。 */
 const monitorRefuse = (what: string): string =>
-  "monitor 只有 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (" + what + " 被拒): "
-  + "你的活是读账本然后 room_activate 一条判决, 不发言、不派活、不改文件。";
+  "perceptron 只有 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (" + what + " 被拒): "
+  + "你的活是读账本然后 room_activate 一份名单判决, 不发言、不派活、不改文件。";
 
 export const TOOL_FACES: readonly ToolFace[] = [
   { name: "guide", match: (rec) => isGuideManifestation(rec), tools: GUIDE_TOOLS, refuse: guideRefuse },

@@ -23,7 +23,7 @@
   var gside = $('#gside'), chWho = $('#ch-who'), chActs = $('#ch-acts');
 
   var W = { at: 0, rooms: [], nodes: [], uidTargets: {}, chatNames: {}, names: {}, degraded: false };
-  var D = { mode: '', roomId: '', role: '', uid: '', at: 0, msgs: [], notes: [], total: 0, earlier: '', room: null, label: '', members: [], duties: [], wizard: null, sessions: [], session: 'all', ledger: true, plans: [], schedules: [], charterBrief: null, stream: null, streamOld: [], streamMore: false, streamSess: '', streamSig: '', stats: null };
+  var D = { mode: '', roomId: '', role: '', uid: '', at: 0, msgs: [], notes: [], total: 0, earlier: '', room: null, label: '', members: [], duties: [], verdicts: {}, wizard: null, sessions: [], session: 'all', ledger: true, plans: [], schedules: [], charterBrief: null, stream: null, streamOld: [], streamMore: false, streamSess: '', streamSig: '', stats: null };
   var S = { openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
   var SIDE_KEY = 'wezard.role.side';
   try { if (localStorage.getItem(SIDE_KEY) === 'graph') S.view = 'graph'; } catch (e) { /* 隐私模式 */ }
@@ -724,7 +724,7 @@
     if (human) return '<title>' + esc(p.name + ' · 用户') + '</title>' +
       '<g class="rv-body"><text class="rv-emo" y="5.5" text-anchor="middle">👤</text></g>' +
       '<text class="rv-nm" y="' + (rr + 13) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>';
-    var tip = [p.name, ST_WORD[st], coldOfNode(p) ? COLD_WORD : '', n.host ? '🎩 host' : '', n.mon ? 'monitor (只判激活)' : '', p.lead ? '👑 lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
+    var tip = [p.name, ST_WORD[st], coldOfNode(p) ? COLD_WORD : '', n.host ? '🎩 host' : '', n.mon ? 'perceptron (感知判决)' : '', p.lead ? '👑 lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
     return '<title>' + esc(tip) + '</title>' +
       '<g class="rv-body">' + shape('sh', 0) + '</g>' + headGear(topR(sides, rr), n.host, p.lead) +
       '<text class="rv-nm" y="' + (rr + 13) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>';
@@ -1290,6 +1290,12 @@
     var st = m.status && m.status !== 'done' ? chip(m.status, 'st ' + (ST_CLS[m.status] || '')) : '';
     return chip(k, 'kind') + st;
   };
+  // 感知判决 (perceive op): 这条人话被 perceptron 判给了谁、为什么 —— 只在人话行头部露一枚 chip。
+  var verdictTail = function (m) {
+    var v = D.verdicts[m.id];
+    if (!v) return '';
+    return chip('感知 → ' + (v.toNames || []).join(', ') + (v.why ? ' · ' + v.why : ''), 'kind');
+  };
   var bubbleHTML = function (m) {
     var quote = quoteHTML(m);
     var files = (m.files || []).map(function (f) { return chip('📎 ' + f.name, 'file'); }).join('');
@@ -1324,7 +1330,7 @@
       routeHead({
         au: '<span class="rv-au ' + esc(m.author.kind) + '" data-node="' + esc(author) + '">' + esc(m.authorName) + '</span>',
         room: room, to: to,
-        tail: '<time>' + esc(fmtDay(m.at)) + '</time>' + turn + kindStatusTail(m) + re
+        tail: '<time>' + esc(fmtDay(m.at)) + '</time>' + turn + kindStatusTail(m) + re + verdictTail(m)
       }) + bub +
       '</article>';
   };
@@ -2032,6 +2038,7 @@
     var fixM = function (ms) { return (ms || []).map(function (m) { return m && m.name && ID_LIKE.test(m.name) ? Object.assign({}, m, { name: safeName(m.name) }) : m; }); };
     if (r.room && r.room.members) r.room = Object.assign({}, r.room, { members: fixM(r.room.members) });
     D.room = r.room; D.label = r.label || ''; D.members = fixM(r.members); D.duties = r.duties || []; D.createdAt = r.createdAt || 0;
+    D.verdicts = {}; (r.verdicts || []).forEach(function (v) { D.verdicts[v.msg] = v; });
     D.msgs = (r.msgs || []).map(function (m) { return m && m.authorName && ID_LIKE.test(m.authorName) ? Object.assign({}, m, { authorName: safeName(m.authorName) }) : m; });
     D.notes = r.notes || [];
     D.total = r.total || 0; D.earlier = r.earlier || ''; D.at = r.at;
@@ -2120,7 +2127,7 @@
       D.wizLoading = false;
       D.stream = tail; D.streamSig = streamSig(tail); D.streamSess = r.session || 'all';
       D.session = r.session || 'all'; applyCard(r);
-      D.members = []; D.duties = []; D.createdAt = 0;
+      D.members = []; D.duties = []; D.verdicts = {}; D.createdAt = 0;
       var st = scrollState();   // 替换 DOM 的那一刻现取, 不是发请求前
       renderWizard(same);
       if (!same) { if (keepScroll) restore(st); else scrollBottom(); }
@@ -2136,7 +2143,7 @@
   // 重数据 (时间轴 /api/wizard、名片 card=1、名册 /api/world) 由调用方同时发出, 谁先回谁先画。
   var showSwitching = function () {
     D.mode0 = ''; D.role0 = ''; D.stream = null; D.streamOld = []; D.streamMore = false; D.streamSig = '';
-    D.msgs = []; D.earlier = ''; D.members = []; D.duties = []; D.wizLoading = true;
+    D.msgs = []; D.earlier = ''; D.members = []; D.duties = []; D.verdicts = {}; D.wizLoading = true;
     renderWizard();
     thread.scrollTop = 0;
   };

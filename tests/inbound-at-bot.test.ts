@@ -59,10 +59,10 @@ assert.equal(dispatched[0]!.mentionBot, true, "频道原生帧 (帖子里 @ 机�
 assert.equal(dispatched[1]!.mentionBot, true, "正文 @ 机器人带 mentionBot");
 assert.equal(dispatched[2]!.mentionBot, undefined, "没 @ 的话不带 (照旧交给 monitor / host)");
 
-// ③ 账本侧: 带 mention:"bot" 的行跳过 monitor, 直接落 host; 没有它则只唤醒 monitor。
-const A = W(uid(1)), M = W(uid(9)), H1 = H("u1");
+// ③ 账本侧: 带 mention:"bot" 的行跳过 perceptron, 直接落 host; 没有它则只唤醒 perceptron (候选 ≥2)。
+const A = W(uid(1)), B = W(uid(2)), M = W(uid(9)), H1 = H("u1");
 const withMonitor = () => {
-  const s = mkRoom("chat:wrG", [A]);
+  const s = mkRoom("chat:wrG", [A, B]);
   applyOp(s, { op: "join", at: 2_000, room: s.id, who: M, ord: s.nextOrd, via: "invite", by: A, role: "monitor" });
   return s;
 };
@@ -72,8 +72,8 @@ const withMonitor = () => {
   assert.deepEqual(at.wake, [A.id], "@ 了机器人: 直达 host");
   assert.equal(at.monitor, undefined);
   const plain = say(s, { author: H1, kind: "say", text: "这个怎么弄" });
-  assert.deepEqual(plain.wake, [M.id], "没 @ 的话照旧交给 monitor");
+  assert.deepEqual(plain.wake, [M.id], "没 @ 的话照旧交给 perceptron");
   assert.equal(plain.monitor, true);
 }
 
-console.log("inbound at-bot: 频道原生帧 / 正文 @机器人 记 mention:bot, 不唤醒 monitor");
+console.log("inbound at-bot: 频道原生帧 / 正文 @机器人 记 mention:bot, 不唤醒 perceptron");

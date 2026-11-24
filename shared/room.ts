@@ -86,7 +86,8 @@ export const parseMsgId = (id: string): { hash: string; seq: number } | undefine
 // ── 账本行 ─────────────────────────────────────────────────────────────
 
 export type JoinVia = "founder" | "invite" | "approve" | "mention" | "spawn" | "transfer" | "inbound" | "migrate";
-/** 成员角色: "monitor" = 本 room 的监视者 —— 不发言、不当 host、不持有 duty, 只写 activate 行。 */
+/** 成员角色: "monitor" = 本 room 的感知器 (perceptron, 2026-11-24 起; 值沿用 monitor 保旧账本重放) ——
+ *  不发言、不当 host、不持有 duty, 只写感知判决 (perceive op)。 */
 export type MemberRole = "monitor";
 export type MsgKind = "say" | "ask" | "task" | "reply" | "file" | "join-req" | "system" | "trigger";
 export type ReplyStatus = "done" | "need" | "progress" | "passed" | "canceled" | "error";
@@ -113,9 +114,12 @@ export interface LeaveOp extends OpBase { op: "leave"; who: Who; by: Who; why?: 
 export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number; batch?: true }
 export interface MoveOp extends OpBase { op: "move"; duty: string; from: Who; to: Who; by: Who }
 export interface WatchOp extends OpBase { op: "watch"; who: Who; on: boolean }
-/** monitor 的判决 (2026-11-23 人定: 判决不进消息记录): 不写 msg 行, 直接给 re 那条人话在 `to` 名下开 duty。
- *  被激活者只看到人的原话 + 「你要交代」; 留痕只在 daemon.log。`to` 缺省 (判不回应) 不落 op。 */
+/** 旧 monitor 判决 (单目标; 读侧重放兼容, 新代码不再写): 不写 msg 行, 直接给 re 那条人话在 `to` 名下开 duty。 */
 export interface AssignOp extends OpBase { op: "assign"; duty: string; to: Who; asker: Who; by: Who }
+/** 感知判决 (2026-11-24 人定): 一条判决一个 op, `to` = 应回应的成员名单 (可多个), `why` = 一句话理由。
+ *  *  不写 msg 行、不占 seq、不镜像: 名单里每个成员名下开 duty (via:"assign"), fold 另记一条 verdict 供 rolepage。
+ *  *  空判决 (判不回应) 不落 op —— 无任何记录 (2026-11-24 人拍板)。 */
+export interface PerceiveOp extends OpBase { op: "perceive"; duty: string; to: Who[]; asker: Who; by: Who; why?: string }
 export interface MsgRow extends OpBase {
   op: "msg";
   id: string;
@@ -140,7 +144,7 @@ export interface MsgRow extends OpBase {
   /** 这一行从哪个副源进来 (副源 base principal); 缺省 = 主源 = room id (不落字段)。
    *  入站落行时写死, 重放不再推断; 出站 re 到它时按它回出去 (P1 只加字段, 读写路径在 P2/P3)。 */
   src?: string;
-  /** 人话交给了本 room 的 monitor (只唤醒 monitor, 不在 host 槽位开 duty)。judge 落定, 重放照旧。 */
+  /** 人话交给了本 room 的 perceptron (只唤醒它, 不在 host 槽位开 duty)。judge 落定, 重放照旧。 */
   monitor?: true;
   /** 带 interrupt 投递 (先 Esc 打断再投)。 */
   interrupt?: boolean;
@@ -160,7 +164,7 @@ export interface MsgRow extends OpBase {
 export interface BindOp extends OpBase { op: "bind"; source: string; by: Who; why?: string }
 /** 解绑: 该源回落恒等 (自己那条 1:1 room), 不立即补开任何东西 (lazy)。 */
 export interface UnbindOp extends OpBase { op: "unbind"; source: string; by: Who; why?: string }
-export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | AssignOp | BindOp | UnbindOp | MsgRow;
+export type RoomOp = OpenOp | NameOp | NoticeOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | AssignOp | PerceiveOp | BindOp | UnbindOp | MsgRow;
 
 // ── fold ───────────────────────────────────────────────────────────────
 
@@ -189,7 +193,7 @@ export interface Duty {
   for?: string;
   /** 老账本里最近一条 move 行的时刻 (room_transfer 已删, 只读侧折叠) —— 逾期计时把它当一次活动。 */
   movedAt?: number;
-  /** "assign" = monitor 判决直接开的账 (没有 trigger 消息行); 泵靠它 + 人话行本身在未读里唤醒。 */
+  /** "assign" = 感知判决直接开的账 (旧 assign op / 新 perceive op 都用它; 没有 trigger 消息行); 泵靠它 + 人话行本身在未读里唤醒。 */
   via?: "assign";
   /** 最近一条 holder 写的非终态 status (need / progress / error)。 */
   last?: { status: ReplyStatus; seq: number };
@@ -218,7 +222,12 @@ export interface RoomState {
   memberLog: MemberEvent[];
   /** 绑进本 room 的副源, key = 源 base principal。room 的归属由承载它的账本决定, 条目里不存 room。 */
   bindings: Map<string, Binding>;
+  /** 感知判决 (perceive op fold 出来), key = 被判的人话 msgId; 空判决不落 op, 所以这里只有非空名单。 */
+  verdicts: Map<string, RoomVerdict>;
 }
+
+/** 一条感知判决: 谁判的 (by)、判了谁 (to)、为什么 (why)。只给 rolepage 读, 不进任何唤醒注入。 */
+export interface RoomVerdict { msg: string; at: number; to: Who[]; by: Who; why?: string }
 
 /** 一条绑定的审计信息 (谁在何时为什么; unbind 即删条目)。 */
 export interface Binding { at: number; by: Who; why?: string }
@@ -235,7 +244,7 @@ export interface MemberEvent {
 }
 
 export const emptyRoom = (id: string): RoomState => ({
-  id, seq: 0, nextOrd: 1, members: new Map(), msgs: [], byId: new Map(), duties: new Map(), everMembers: new Map(), memberLog: [], bindings: new Map(),
+  id, seq: 0, nextOrd: 1, members: new Map(), msgs: [], byId: new Map(), duties: new Map(), everMembers: new Map(), memberLog: [], bindings: new Map(), verdicts: new Map(),
 });
 
 const slotOfWho = (w: Who): Slot => whoKey(w);
@@ -314,12 +323,25 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
       break;
     }
     case "assign": {
-      // monitor 判决: 不占 seq、不写消息行, 只开 duty (重放一致)。
+      // 旧 monitor 判决: 不占 seq、不写消息行, 只开 duty (重放一致)。
       const key = dutyKey(op.duty, slotOfWho(op.to));
       if (!s.duties.has(key)) {
         const row = s.byId.get(op.duty);
         s.duties.set(key, { key, msg: op.duty, seq: row?.seq ?? 0, slot: slotOfWho(op.to), asker: op.asker, kind: "human", at: op.at, via: "assign" });
       }
+      break;
+    }
+    case "perceive": {
+      // 感知判决 (2026-11-24): 一条 op 开一串 duty (名单逐个, via:"assign" 语义不变) + 记一条 verdict。
+      // 不占 seq、不写消息行; 目标重复 / 非成员只跳过 (写入前 judgeActivate 已校验, 这里防旧账本脏数据)。
+      const row = s.byId.get(op.duty);
+      for (const t of op.to) {
+        if (t.kind !== "wizard") continue;
+        const key = dutyKey(op.duty, slotOfWho(t));
+        if (!s.duties.has(key))
+          s.duties.set(key, { key, msg: op.duty, seq: row?.seq ?? 0, slot: slotOfWho(t), asker: op.asker, kind: "human", at: op.at, via: "assign" });
+      }
+      s.verdicts.set(op.duty, { msg: op.duty, at: op.at, to: op.to, by: op.by, ...(op.why ? { why: op.why } : {}) });
       break;
     }
     case "msg": {
@@ -363,6 +385,12 @@ export const monitorsOf = (s: RoomState): Who[] =>
   [...s.members.values()].filter((m) => m.role === "monitor" && m.who.kind === "wizard").map((m) => m.who);
 export const hasMonitor = (s: RoomState): boolean =>
   [...s.members.values()].some((m) => m.role === "monitor" && m.who.kind === "wizard");
+
+/** 感知候选: 本 room 的 wizard 成员里, 除 perceptron 自己之外的每一个 —— 判决只对这些人的职责做分析。 */
+export const perceptronCandidates = (s: RoomState): Who[] =>
+  [...s.members.values()].filter((m) => m.who.kind === "wizard" && m.role !== "monitor").map((m) => m.who);
+/** 感知门控 (2026-11-24 人定): 候选 ≥2 才需要感知 —— 只剩 host 一个时未点名人话没有歧义, 照旧落 host。 */
+export const perceptronWanted = (s: RoomState): boolean => perceptronCandidates(s).length >= 2;
 
 /** 起名 / 改名只有当前 host 能做 (人也不行 —— 人的意见走人话)。 */
 export const canRename = (s: RoomState, who: Who): boolean => sameWho(roomHost(s), who);
@@ -604,13 +632,14 @@ export const wasActivated = (s: RoomState, msgId: string): boolean =>
   s.msgs.some((m) => m.kind === "trigger" && m.sys === "activate" && (m.re ?? []).includes(msgId))
   || [...s.duties.values()].some((d) => d.msg === msgId && d.via === "assign");
 
-/** room_activate 新路径的判定 (判决不写消息行): re 必须本 room 最后一条人话, to 至多一个本 room 的 wizard 成员,
- *  同一条人话只激活一次 (与旧 judge 的 activate 校验同口径)。ok 之后由调用方落一条 assign op。 */
+/** room_activate (感知判决) 的判定 (判决不写消息行): re 必须本 room 最后一条人话, to = 应回应名单
+ *  (0..N, 逐个必须是本 room 的 wizard 成员; 去重后的空名单 = 判不回应, 调用方不落任何记录),
+ *  同一条人话只判一次 (与旧 judge 的 activate 校验同口径)。ok 之后由调用方落一条 perceive op。 */
 export const judgeActivate = (
-  s: RoomState, actor: Who, re: readonly string[], to: Who | undefined,
+  s: RoomState, actor: Who, re: readonly string[], to: readonly Who[],
 ): { ok: true } | { ok: false; status: 400 | 403 | 409; reason: string } => {
   if (s.members.get(whoKey(actor))?.role !== "monitor")
-    return { ok: false, status: 403, reason: "只有本 room 的 monitor 能写 activate 判决" };
+    return { ok: false, status: 403, reason: "只有本 room 的 perceptron 能写感知判决" };
   if (re.length !== 1) return { ok: false, status: 400, reason: "re 只收一条 (最后一条人话的消息 id)" };
   const target = s.byId.get(re[0]!);
   if (!target) return { ok: false, status: 400, reason: "re 不在这个 room: " + re[0] };
@@ -619,8 +648,8 @@ export const judgeActivate = (
   if (s.msgs.some((m) => m.seq > target.seq && m.author.kind === "human" && m.kind === "say"))
     return { ok: false, status: 409, reason: "activate 只能激活本 room 最后一条人话 (它之后还有人说话)" };
   if (wasActivated(s, target.id)) return { ok: false, status: 409, reason: "这条人话已经被激活过: " + target.id };
-  if (to && to.kind !== "wizard") return { ok: false, status: 400, reason: "activate 只能激活 wizard" };
-  if (to && !s.members.has(whoKey(to))) return { ok: false, status: 400, reason: "只能激活本 room 的成员" };
+  const bad = to.find((t) => t.kind !== "wizard" || !s.members.has(whoKey(t)));
+  if (bad) return { ok: false, status: 400, reason: "只能激活本 room 的 wizard 成员: " + bad.id };
   return { ok: true };
 };
 
@@ -731,8 +760,10 @@ export const judge = (s: RoomState, d: Draft, ctx: JudgeCtx): Verdict => {
   if (dup && d.origin !== "inbound") return { ok: true, row: dup, duplicate: true, degraded: [] };
 
   // ⑧ 唤醒 + 回合预算
-  // 绑定 room 里没点名、也没 @ 机器人的人话: 交给 monitor 处置 (只唤醒它, 不在 host 槽位开 duty)。
-  const toMonitor = isHuman && d.kind === "say" && isBoundRoom(s.id) && d.mention !== "bot" && !to.some((t) => t.kind === "wizard") && hasMonitor(s);
+  // 绑定 room 里没点名、也没 @ 机器人的人话: 有 perceptron 且存在需要感知的候选 (≥2, 2026-11-24 人定) 时
+  // 交给它处置 (只唤醒它, 不在 host 槽位开 duty); 否则照旧落 host。迁移重放的行不进感知。
+  const toMonitor = isHuman && d.kind === "say" && isBoundRoom(s.id) && d.mention !== "bot"
+    && d.origin !== "migrate" && !to.some((t) => t.kind === "wizard") && hasMonitor(s) && perceptronWanted(s);
   const seq = s.seq + 1;
   const draftRow: MsgRow = {
     op: "msg", at: ctx.now, room: s.id, id: msgIdOf(s.id, seq), seq, author: d.author, ord: member?.ord ?? 0, speak,

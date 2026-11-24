@@ -28,7 +28,7 @@ export interface RoomMemberFact {
   ord: number;
   /** 此刻是 host (wizard 成员里加入序最小的那位); 人永不 true。 */
   host: boolean;
-  /** monitor 成员 (不发言 / 不当 host / 不持有 duty; 图上画成单独样式)。 */
+  /** perceptron 成员 (role 值沿用 "monitor"; 不发言 / 不当 host / 不持有 duty; 图上画成单独样式)。 */
   role?: "monitor";
 }
 
@@ -416,6 +416,11 @@ export const dutyFacts = (s: RoomState, n: RenderNames) => openDuties(s).map((d)
     ...(d.last ? { last: d.last } : {}),
   };
 });
+
+/** 感知判决 (perceive op fold 出来): 只给 rolepage —— 前端挂在被判人话行上, 成员读侧 (room_read) 不出。 */
+export interface VerdictFact { msg: string; at: number; to: Who[]; toNames: string[]; why?: string }
+export const verdictFacts = (s: RoomState, n: RenderNames): VerdictFact[] =>
+  [...s.verdicts.values()].map((v) => ({ msg: v.msg, at: v.at, to: v.to, toNames: v.to.map((t) => n.nameOf(t)), ...(v.why ? { why: v.why } : {}) }));
 
 /** 每个人 / wizard 在这个 room 里最近一条 msg 的时刻 (key = whoKey); daemon 系统行 (author=system) 也算它自己的。 */
 export const lastSaidAt = (s: RoomState): Map<string, number> =>

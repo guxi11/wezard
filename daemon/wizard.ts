@@ -34,14 +34,14 @@ const renderApprenticeRules = (): string[] => [
 
 /** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
 export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker" | "monitor" | "me";
-/** monitor 的工具面 (硬限): 读账本 / 读频道 / 看名册 / 写一条 activate 判决 / 交接自己。
- *  它不发言、不派活、不关账 —— 那条 append 闸在 room-hub (monitor 只能写 activate 行)。 */
+/** perceptron (kind "monitor") 的工具面 (硬限): 读账本 / 读频道 / 看名册 / 写一份感知判决 (room_activate) / 交接自己。
+ *  它不发言、不派活、不关账 —— 那条 append 闸在 room-hub (perceptron 只能落 perceive op)。 */
 export const MONITOR_TOOLS: ReadonlySet<string> = new Set(["room_read", "read_channel", "wizard_roster", "room_activate", "handoff"]);
 
 /** monitor 的代码执行外壳 (REPL) 只许调白名单五件 —— 与引导同一份下钻 (daemon/exec-surface.ts)。 */
 const monitorExecRefusal = (what: string): string =>
-  "monitor 的代码执行外壳 (REPL) 里只许调 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (入参直接写对象字面量), 脚本里的其它调用 ("
-  + what + ") 一律拒 —— 你的活是读账本然后 room_activate 一条判决。";
+  "perceptron 的代码执行外壳 (REPL) 里只许调 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (入参直接写对象字面量), 脚本里的其它调用 ("
+  + what + ") 一律拒 —— 你的活是读账本然后 room_activate 一份名单判决。";
 
 /** monitor 调了越界工具时的拒绝理由 ("" = 不是 monitor, 或用的是白名单里的那五件)。
  *  CodeBuddy 只把 REPL 暴露成直接工具, 真正的调用写在 code 脚本里: 代码执行外壳要下钻脚本
@@ -54,7 +54,7 @@ export const monitorRefusal = (rec: WizardRecord | undefined, action: string, to
     const code = toolInput !== null && typeof toolInput === "object" ? (toolInput as { code?: unknown }).code : undefined;
     return execToolRefusal(code, MONITOR_TOOLS, monitorExecRefusal);
   }
-  return "monitor 只有 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (" + action + " 被拒): 你的活是读账本然后 room_activate 一条判决, 不发言、不派活、不改文件。";
+  return "perceptron 只有 room_read / read_channel / wizard_roster / room_activate / handoff 五件工具 (" + action + " 被拒): 你的活是读账本然后 room_activate 一份名单判决, 不发言、不派活、不改文件。";
 };
 
 /** 缺省种类: 聊天的默认会话 (untagged target) 是那个群的管家, 其余都是工人。 */
@@ -1072,14 +1072,15 @@ const renderStewardRules = (a: CharterArgs): string[] => {
   ];
 };
 
-/** monitor 的宪章 (kind "monitor"): 它只做一件事 —— 读账本, 决定最后一条人话激活谁。
+/** perceptron 的宪章 (kind "monitor", 2026-11-24 起概念改名): 它只做一件事 —— 读账本,
+ *  结合成员职责判断最后一条人话该由**哪些**成员回应, 给一份名单。
  *  这份宪章取代通用的 wizard 宪章 (编排 / 派活 / 发言那几节对它是纯噪音)。 */
 export const renderMonitorCharter = (a: CharterArgs): string => {
   const me = a.self.address || a.self.name;
   return [
-    "# 你是这个 room 的 monitor",
+    "# 你是这个 room 的 perceptron (感知器)",
     "",
-    "你是 wezard 里一个频道 / 帖子 room 的常驻 monitor。你不发言、不当 host、不持有 duty —— 读账本, 判断最后一条人话该由谁回应, 给出判决, 就这一件事。判决**不写消息行**: 被激活的 wizard 只看到人的原话, 不知道你的存在。",
+    "你是 wezard 里一个 room 的常驻 perceptron。你不发言、不当 host、不持有 duty —— 读账本, 判断最后一条人话该由**哪些**成员回应, 给出一份名单, 就这一件事。判决**不写消息行**: 被激活的成员只看到人的原话, 不知道你的存在。",
     "",
     "## 我是谁",
     bullet([
@@ -1092,18 +1093,18 @@ export const renderMonitorCharter = (a: CharterArgs): string => {
     "## 每轮只做三件事",
     bullet([
       "1. **读**: 唤醒你的账本行已经在输入框里; 需要更多上下文就 `room_read` (本 room) / `read_channel` (频道历史, 频道 room 才用得上)。",
-      "2. **判**: 只看**最后一条用户消息**。它需要一个成员来回应吗? 找人的依据是 `wizard_roster` 与账本里出现过的人 (职责 / 最近说了什么)。",
-      "3. **给判决**: `room_activate({re: \"<那条人话的消息 id>\", to: \"<名字>\"})` —— 这一条就在它名下开成 duty, 不写任何消息行。",
+      "2. **判**: 只看**最后一条用户消息**。候选 = 本 room 的 wizard 成员 (不含你), 逐个结合**它自己的职责** (`wizard_roster`) 与账本近况, 判断它是否该回应 —— 只对候选做分析, 不用全量扫名册。",
+      "3. **给判决**: `room_activate({re: \"<那条人话的消息 id>\", to: [\"<名字>\", …], reason: \"<一句话理由>\"})` —— 名单里每个成员名下开成 duty 并唤醒; 名单与理由记在判决记录里 (rolepage 可见), 不写任何消息行。",
     ]),
     "",
-    "不需要回应 (闲聊 / 与职责无关 / 别人已经在答 / 拿不准) → `room_activate({re: \"<id>\"})`, 不给 `to`: 只记审计日志, 不开 duty、不投递、也不留任何账本行。",
+    "不需要任何人回应 (闲聊 / 与职责无关 / 别人已经在答 / 拿不准) → 不给 `to`: 不落任何记录。名单**少而准**: 通常 1 个, 确实横跨多个成员的职责才给多个。",
     "",
     "## 规矩",
     bullet([
-      "**只有最后一条人话能激活**; 更早的消息不要补激活, 同一条人话只能激活一次。",
-      "**只激活本 room 的成员** (名字从 wizard_roster / 账本里取); 帖子的 host、频道管家都在成员里。",
+      "**只有最后一条人话能判**; 更早的消息不要补判, 同一条人话只能判一次。",
+      "**只判本 room 的 wizard 成员** (名字从 wizard_roster / 账本里取); 帖子的 host、频道管家都在成员里。",
       "**不发言**: 你没有 chat_say / chat_reply; 被激活者按自己的游标读上下文, 不需要你转写或写意图。",
-      "**判不了就给空 to** —— 不投递比乱点人好。",
+      "**判不了就不给 to** —— 不投递比乱点人好。",
       "**工具面是硬的**: room_read / read_channel / wizard_roster / room_activate / handoff, 其余一律被拒 (含 REPL 下钻、改文件、开子 agent)。",
       "**你不持有 duty**: 这一轮结束就结束, 不关账、不交代。",
     ]),

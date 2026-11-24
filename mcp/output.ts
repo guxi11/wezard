@@ -49,7 +49,7 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
   if (tool === "chat_say" || tool === "chat_ask" || tool === "chat_reply" || tool === "room_watch")
     return pick(row, ["ok", "room", "id", "seq", "status", "re", "duplicate", "degraded", "woke", "reason"]);
   if (tool === "room_open" || tool === "room_invite" || tool === "room_join" || tool === "room_approve" || tool === "room_leave" || tool === "room_activate" || tool === "notify" || tool === "send_file")
-    return pick(row, ["ok", "room", "id", "who", "members", "sent", "held", "bytes", "visible", "reason"]);
+    return pick(row, ["ok", "room", "id", "msg", "to", "who", "members", "sent", "held", "bytes", "visible", "reason"]);
   if (tool === "spawn_wizard" || tool === "clone_wizard") return pick(row, ["ok", "name", "cwd", "inherited", "model", "effort", "tier", "modelWarning", "dispatched", "queued", "event", "eventId", "planId", "warnings", "warning"]);
   if (tool === "wizard_identity") {
     const result: Row = { ...pick(row, ["ok", "name", "renamed", "class", "note"]) };

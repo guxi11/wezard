@@ -2,7 +2,7 @@
 // 断言的是「账本行上的显式字段直译成视图」—— 不再有从 turn 记录推断谁说了什么。
 import assert from "node:assert/strict";
 import {
-  buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, roomCreatedAt, parseWhen, renderRoomRead, roomHistory, roomKindOf, whoRef, wizardMessages,
+  buildRoomFact, buildRoomFacts, dutyFacts, lastSaidAt, roomCreatedAt, parseWhen, renderRoomRead, roomHistory, roomKindOf, verdictFacts, whoRef, wizardMessages,
 } from "../shared/room-view.js";
 import { emptyRoom, whoKey, type RenderNames } from "../shared/room.js";
 import { H, W, room, say, uid } from "./room-fixture.js";
@@ -155,4 +155,21 @@ const d2 = say(DM, { author: A, kind: "reply", text: "收到", re: [d1.id], orig
   assert.equal(typeof parseWhen("14:30", now), "number");
 }
 
-console.log("room-view: 快照 / 分页 / W-1 与 W-2 / room_read 均按账本行直译");
+// ── 感知判决 (perceive op): verdictFacts 给 rolepage, room_read 的纯文本不泄漏给成员 ──
+{
+  const G = room("chat:wrG", [A, B]);
+  const q = say(G, { author: H1, kind: "say", text: "谁来搭把手", origin: "inbound" });
+  const { applyOp } = await import("../shared/room.js");
+  applyOp(G, { op: "perceive", at: 5_000, room: G.id, duty: q.id, to: [A, B], asker: H1, by: W(uid(9)), why: "A 懂这块, B 在跟" });
+  const vs = verdictFacts(G, NAMES);
+  assert.equal(vs.length, 1);
+  assert.deepEqual(vs[0]!.toNames, ["alice", "bob"], "名单按渲染名");
+  assert.equal(vs[0]!.why, "A 懂这块, B 在跟");
+  assert.equal(vs[0]!.msg, q.id);
+  // 成员读侧 (room_read) 不出现判决痕迹。
+  const text = renderRoomRead([G], { id: "wizard:" + A.id, kind: "wizard" }, { room: "chat:wrG" }, NAMES, 9_000).text;
+  assert.ok(!text.includes("A 懂这块"), "room_read 不带判决理由");
+  assert.ok(!text.includes("alice, bob"), "room_read 不带名单");
+}
+
+console.log("room-view: 快照 / 分页 / W-1 与 W-2 / room_read 均按账本行直译 / 感知判决只给 rolepage");

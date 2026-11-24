@@ -62,7 +62,7 @@ import { ensureMeRoom, isMeRoom, meRowMirror, meUserOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
-  DAEMON, adhocRoomId, bubbleSourceOf, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, outboundSourceOf, planDm, planOutbound, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, bubbleSourceOf, canRename, dmPeers, dmRoomId, findPairAdhoc, hasMonitor, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, outboundSourceOf, perceptronCandidates, planDm, planOutbound, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -639,7 +639,6 @@ const main = async (): Promise<void> => {
         text: "[wezard] 本频道的管家已换绑为 ." + out.className + (ownSeat ? " (本 room 的实例 ." + displayName(ownSeat) + ")" : "")
           + " —— 各 room 的 host 换成本 room 的新实例; 旧 host 仍留在群里, 只是不再是 host" });
       if (!said.ok) roomLog.warn({ room: ownRoom, reason: said.reason }, "channel: rebind 系统行被拒");
-      out.rooms.forEach((f) => ensureMonitor(f.room));
       // §7 换绑后同钩子补拉: 帖子 host 实例本来就是本 room 的实例, 这里只保证它们在频道成员表里
       // (换绑不动它们; 幂等)。
       backfillChannelMembers();
@@ -1375,6 +1374,8 @@ const main = async (): Promise<void> => {
       onClosed: () => settleLeads(),
       replyHintWindow: () => cfg.rooms?.replyHint?.window ?? 10,
       tailOf: (target, triggers) => humanWakeTail(wakeTailPorts(cfg, m), target, triggers),
+      // 感知懒建 (2026-11-24): 人话需要感知而本 room 还没有 perceptron 时, append 先建再判 (见 ensurePerceptron)。
+      ensurePerceptron: (room: string) => { ensurePerceptron(room); },
       paste: async (target, text, tail) => {
         const r = await m.injectText(target, text, wakeInjectOpts(tail));
         if (r.ok) roomActivityTouch(target); // 注入成功 = 该 wizard 有新事件, 看门狗的 stale 窗口重置
@@ -1878,29 +1879,37 @@ const main = async (): Promise<void> => {
       if (READ_ROOM_FAIL(res, self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
-      const b = body as { re?: string | string[]; to?: string };
+      const b = body as { re?: string | string[]; to?: string | string[]; reason?: unknown };
       const re = idList(b.re);
       if (re.length !== 1) { json(res, 400, { ok: false, reason: "re 只收一条 (最后一条人话的消息 id)" }); return; }
       const roomId = roomStore.roomOfMsg(re[0]!);
       const s = roomId ? roomState(roomId) : undefined;
       if (!roomId || !s) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re[0] }); return; }
       if (s.members.get(whoKey(me))?.role !== "monitor") {
-        json(res, 403, { ok: false, reason: "只有本 room 的 monitor 能写 activate 判决" });
+        json(res, 403, { ok: false, reason: "只有本 room 的 perceptron 能写感知判决" });
         return;
       }
-      const ref = (b.to ?? "").toString().trim();
-      const to = ref ? (whoRefOf(ref) ?? memberRefOf(s, ref)) : undefined;
-      if (ref && !to) { json(res, 400, { ok: false, reason: "认不出这个地址: " + ref }); return; }
-      const v = judgeActivate(s, me, re, to);
-      if (!v.ok) { json(res, v.status, { ok: false, reason: v.reason }); return; }
-      // 判决不进消息记录 (2026-11-23 人定): 只落一条 assign op 开 duty, 然后踢泵。
-      // 被激活者看到的是人的原话 + 「你要交代」; 审计只有 daemon.log 这一行。
-      if (to) {
-        hub.write(roomId, [{ op: "assign", at: Date.now(), room: roomId, duty: re[0]!, to, asker: s.byId.get(re[0]!)!.author, by: me }]);
-        hub.kick();
+      // to = 应回应名单 (可多个, 2026-11-24 人定); 空 / 缺省 = 判不回应, 不落任何记录。
+      const tos: Who[] = [];
+      for (const ref of idList(Array.isArray(b.to) ? b.to : b.to ?? [])) {
+        const t = whoRefOf(ref) ?? memberRefOf(s, ref);
+        if (!t) { json(res, 400, { ok: false, reason: "认不出这个地址: " + ref }); return; }
+        if (!tos.some((x) => sameWho(x, t))) tos.push(t);
       }
-      roomLog.info({ room: roomId, re: re[0], to: to ? roomNameOf(to) : "" }, "monitor: activate");
-      json(res, 200, { ok: true, room: roomId, msg: re[0], to: to ? whoKey(to) : "" });
+      const v = judgeActivate(s, me, re, tos);
+      if (!v.ok) { json(res, v.status, { ok: false, reason: v.reason }); return; }
+      // 感知判决 (2026-11-24 人定): 一条 perceive op 带全名单 + 理由 —— 不写消息行、不占 seq、不镜像,
+      // 名单里每个成员名下开 duty 并唤醒; fold 出的 verdict 供 rolepage。空名单什么都不落。
+      if (tos.length) {
+        const why = typeof b.reason === "string" ? b.reason.trim() : "";
+        hub.write(roomId, [{ op: "perceive", at: Date.now(), room: roomId, duty: re[0]!, to: tos,
+          asker: s.byId.get(re[0]!)!.author, by: me, ...(why ? { why } : {}) }]);
+        hub.kick();
+        roomLog.info({ room: roomId, re: re[0], to: tos.map((t) => roomNameOf(t)), why }, "perceptron: perceive");
+      } else {
+        roomLog.info({ room: roomId, re: re[0] }, "perceptron: perceive (空判决, 不落记录)");
+      }
+      json(res, 200, { ok: true, room: roomId, msg: re[0], to: tos.map((t) => whoKey(t)) });
     });
     http.register("POST /room/read", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2152,9 +2161,9 @@ const main = async (): Promise<void> => {
       return room;
     };
     // ── 频道 / 帖子 room 与 monitor (§2.2 / §2.3) ───────────────────────
-    /** 一个 room 一个 monitor: 建身份 (kind "monitor", 档位可配) 并以 role:"monitor" 入座。
-     *  幂等; 已有 monitor 成员就直接返回。会话冷启动在后台做 (第一条人话也会把它冷启动)。 */
-    const monitorStarting = new Set<string>();
+    /** 一个 room 一个 perceptron (原 monitor, 2026-11-24 人定): 门控 = 存在需要感知的未点名
+     *  wizard 成员 (候选 ≥2, perceptronCandidates)。**不预起 pane** —— 只建身份 + 入座, 首次唤醒由
+     *  泵冷启动 (档位走 steward-model 的 monitor 规则, 不落 CLI 默认), 闲时 pane 可被资源回收。 */
     /** 一个 room 自己的管家实例 (人 2026-11-23: 不同的 room 要用不同的实例): 频道绑的那个身份在
      *  **这个 room** 的化身 —— 没有就领号新开 (类) / 另落一条同身份记录。绝不把别的 room 的实例
      *  拉过来当这个 room 的 host。名册 / 绑定缺席 = undefined。会话不在这里起: 第一条人话被唤醒时
@@ -2166,38 +2175,29 @@ const main = async (): Promise<void> => {
       const rec = target ? wizards.get(target) : undefined;
       return rec?.uid ? { kind: "wizard", id: rec.uid } : undefined;
     };
-    const ensureMonitor = (room: string): void => {
+    const ensurePerceptron = (room: string): void => {
       if (!cfg.wrc.channel.monitor.enabled) return;
       const st0 = roomState(room);
       if (!st0) return;
-      if ([...st0.members.values()].some((mm) => mm.role === "monitor")) return;
+      if (hasMonitor(st0)) return;
+      // 门控 (2026-11-24 人定): 有需要感知的未点名 wizard 成员才建; 只剩 host 一个时未点名人话没有歧义。
+      if (perceptronCandidates(st0).length < 2) return;
       const target = keyOf(baseOfKey(room), "monitor");
       const rec = wizards.get(target);
       wizards.upsert(target, {
         kind: "monitor",
         ...(rec ? {} : { bornAt: Date.now(), identity: target }),
-        description: "本 room 的 monitor: 读账本, 决定这条人话该激活谁 (room_activate)",
+        description: "本 room 的 perceptron: 读账本, 结合成员职责判断最后一条人话该由谁回应 (room_activate)",
         parent: undefined,
         lead: undefined,
         leadOf: undefined,
       });
-      const name = settleName(wizards, "monitor", target) || target;
       const uid = wizards.get(target)?.uid;
       if (!uid) return;
       const st = roomState(room);
       if (st && !st.members.has(whoKey({ kind: "wizard", id: uid })))
         hub.write(room, [{ op: "join", at: Date.now(), room, who: { kind: "wizard", id: uid }, ord: st.nextOrd, via: "invite", by: DAEMON, role: "monitor" }]);
-      if (monitorStarting.has(target) || m.hasMirrorTarget(target)) return;
-      monitorStarting.add(target);
-      // 档位固定吃 light (人 2026-11-23): 配错档名别静默落回 CLI 默认 (本机默认是 standard, 比
-      // monitor 需要的高一档), 退回 light 并记一条。
-      const pick = pickTier(cfg, cfg.wrc.channel.monitor.tier || "light", {});
-      const tier = pick.ok ? pick : pickTier(cfg, "light", {});
-      if (!pick.ok) roomLog.warn({ target, reason: pick.reason }, "monitor: 档位名认不出, 退回 light");
-      roomLog.info({ target, room, tier: tier.ok ? tier.tier : "", model: tier.ok ? tier.model ?? "" : "" }, "monitor: 建 room monitor");
-      void m.newSession(target, name, { silent: true, ...(tier.ok && tier.model ? { model: tier.model } : {}), ...(tier.ok && tier.effort ? { effort: tier.effort } : {}) })
-        .catch((e: unknown) => roomLog.warn({ target, err: errText(e) }, "monitor: 冷启动失败 (第一条人话会再试)"))
-        .finally(() => monitorStarting.delete(target));
+      roomLog.info({ target, room }, "perceptron: 建 room perceptron (懒建, 首次唤醒冷启动)");
     };
     /** 频道 room 不存在就开一个 (频道管家已绑定就作 founder —— monitor 需要有人可激活)。
      *  未绑定期不建 monitor (channel-onboarding 口径①): 否则每条人话都被 monitor 抢走, 引导就哑了。
@@ -2216,7 +2216,6 @@ const main = async (): Promise<void> => {
         } catch { /* 没绑定: 空频道 room, 引导 (或绑定后的管家) 会进来 */ }
         hub.write(room, ops);
       }
-      if (channelMonitorWanted(cfg, wizardStore(), room)) ensureMonitor(room);
       return room;
     };
     /** 频道引导期: 引导化身入座频道 room 并接住这条人话 (人话落频道 room —— 帖子 room 此刻没有
@@ -2460,7 +2459,6 @@ const main = async (): Promise<void> => {
         const ops = hostJoinOps(s, who, Date.now());
         if (ops.length) hub.write(room, ops);
       }
-      if (channelMonitorWanted(cfg, wizardStore(), room)) ensureMonitor(room);
     };
     /** 绑定落在**频道**上 (wrc.channel.steward): 频道 room 与各帖子 room 各坐**自己那个**实例当
      *  host, 各起一个 monitor (口径③)。引导期这两样都没建 (ensureChannelRoom / channelPostBorn 的
@@ -2489,7 +2487,6 @@ const main = async (): Promise<void> => {
         hub.write(postBase, postRoomBirthOps(postBase, founder, at));
         roomLog.info({ room: postBase, channel: channelRoom, founder, by: by.kind + ":" + by.id }, "channel: 帖子 room 诞生 (另起)");
       }
-      ensureMonitor(postBase);
       // 新 host 同步进频道 room: 频道 host 从此在成员表里看得到每个帖子 host。
       const cs = roomState(channelRoom);
       if (cs && founder) {
@@ -2621,8 +2618,6 @@ const main = async (): Promise<void> => {
         boundClassOf: (room) => boundClassOf(room) || channelClassOf(room),
       });
       if (rep.rebound || rep.rooms || rep.renamed.length) classLog.info({ ...rep }, "steward instances repaired (per-room)");
-      // 换成实例的频道 room / 帖子 room 若还没有 monitor, 这里补建。
-      for (const j of rep.joined) ensureMonitor(j.room);
       // 自愈只写成员, 起不了会话: 直绑 room 里「记录在、pane 没有」的管家实例这里补起。
       // 幂等 (有 pane 的不收); 管存量恢复 (频道那个 OliveBrown-2) 与今后任何 pane 丢失的漂移。
       const spawn = unspawnedStewards({ store: wizards, rooms: roomStore.ids(), stateOf: roomState,

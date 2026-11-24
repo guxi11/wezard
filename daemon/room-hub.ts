@@ -14,7 +14,7 @@
 // block 让它同一轮接着交代; 轮终这条路只在 hook 没来问时兜底。
 import type { Logger } from "pino";
 import {
-  DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
+  DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, hasMonitor, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
   renderMsgLine, replyHintDue, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
   isDirectParent,
 } from "../shared/room.js";
@@ -53,6 +53,10 @@ export interface HubPorts {
   stopGraceMs?: number;
   /** 「你要交代」用法提示的节流窗口 (= 最近多少次唤醒批次; 0 / 缺省 = 每次都附)。热读。 */
   replyHintWindow?: () => number;
+  /** 感知门控的懒建钩子 (2026-11-24): 人话 say 落绑定 room、未点名、未 @bot、本 room 还没有
+   *  perceptron 时, append 在进 judge **之前**回调它 (它写 join op 使 hasMonitor 成立),
+   *  judge 的 toMonitor 据此把这一行交给 perceptron。门控在 index.ts (候选 ≥2 才建)。 */
+  ensurePerceptron?: (room: string) => void;
 }
 
 interface AfterScan { closed?: readonly string[]; fake?: boolean; only?: readonly string[] }
@@ -87,10 +91,16 @@ export const createRoomHub = (p: HubPorts) => {
   const append = (room: string, d: Draft, extra: Partial<JudgeCtx> = {}): Verdict => {
     const s = state(room);
     if (!s) return { ok: false, status: 400, reason: "没有这个 room: " + room };
-    // monitor 的发言权是硬的 (§2.2, 2026-11-23 人定): **一行消息都不写** —— 判决走 assign op
+    // perceptron 的发言权是硬的 (§2.2, 2026-11-23 人定): **一行消息都不写** —— 判决走 perceive op
     // (room_activate), 不进消息记录; 不发言、不派活、不关账。
     if (s.members.get(whoKey(d.author))?.role === "monitor")
-      return { ok: false, status: 403, reason: "monitor 不写任何消息行: 判决用 room_activate (assign op)" };
+      return { ok: false, status: 403, reason: "perceptron 不写任何消息行: 判决用 room_activate (perceive op)" };
+    // 懒建 (2026-11-24): 第一条需要感知的人话先建 perceptron (join op 落在本 state 上), 再进 judge ——
+    // judge 的 toMonitor 立刻看得见它。回调抛错不拦 append (建不成 = 照旧落 host)。
+    if (p.ensurePerceptron && d.kind === "say" && d.author.kind === "human" && isBoundRoom(room)
+      && d.mention !== "bot" && !(d.to ?? []).some((t) => t.kind === "wizard") && !hasMonitor(s)) {
+      try { p.ensurePerceptron(room); } catch (e) { p.log?.warn({ room, err: String(e) }, "room: ensurePerceptron 失败 (本行照旧落 host)"); }
+    }
     const v = judge(s, d, {
       now: now(),
       isParent: (parent, child) => isDirectParent((u) => p.wizardOf(u)?.parentUid, parent, child),

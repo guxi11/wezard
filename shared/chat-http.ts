@@ -26,7 +26,7 @@ import { baseOfKey, sameBot } from "./session-label.js";
 import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, type ChannelOf, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, verdictFacts, type ChannelOf, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
 import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
@@ -369,6 +369,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
           return at ? { ...m, lastAt: at } : m;
         }),
         duties: dutyFacts(s, n),
+        // 感知判决 (perceive op): 全量给, 前端按 msg id 挂在人话行上 (成员读侧 room_read 不出)。
+        verdicts: verdictFacts(s, n),
         // 成员进出 (系统通知): 全量给 (一个 room 的进出再多也是几十条), 前端按 at 插进已加载那一段消息里。
         notes: memberNotes(s, n),
         msgs: hist.msgs.map(wireMsg(ledgerIndex([s]).lookup, n.nameOf)).map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),

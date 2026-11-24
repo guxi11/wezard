@@ -534,15 +534,23 @@ export const createWezardServer = (): McpServer => {
   server.registerTool(
     "room_activate",
     {
-      title: "Activate a wizard for the last human message (monitor only)",
+      title: "Perceive who should answer the last human message (perceptron only)",
       description:
-        "monitor 的判决: 把本 room 最后一条人话在 `to` 名下开成 duty 并唤醒它。**判决不写消息行** —— 被激活者只看到人的原话 (审计只在 daemon.log)。不给 `to` = 判定不回应 (不开 duty、不投递、不留账本行)。同一条人话只能激活一次。只有 monitor 能调, 别的 wizard 一律 403。",
+        "perceptron 的感知判决: 把本 room 最后一条人话在 `to` 名单里**每个成员**名下开成 duty 并唤醒。**判决不写消息行** —— 被激活者只看到人的原话; 名单与理由落在判决记录 (perceive op), rolepage 可见。不给 `to` (或空) = 判不回应: 不开 duty、不投递、不落任何记录。同一条人话只能判一次。只有本 room 的 perceptron 能调, 别的 wizard 一律 403。",
       inputSchema: currentAddressSchema({
         re: z.string().describe("最后一条人话的消息 id (账本行首方括号里的 id)。"),
-        to: z.string().optional().describe("激活谁 (wizard 名); 省略 = 不回应。"),
+        to: z.union([z.string(), z.array(z.string())]).optional().describe("应回应的成员名单 (wizard 名, 可多个); 省略 / 空 = 不回应。"),
+        reason: z.string().optional().describe("一句话理由 (为什么是它们): 记在判决记录里, rolepage 可见。"),
       }),
     },
-    async ({ re, to }) => unwrap("room_activate", await daemonPost("/room/activate", { re, ...(to ? { to } : {}) })),
+    async ({ re, to, reason }) => {
+      const list = Array.isArray(to) ? to : to ? [to] : [];
+      return unwrap("room_activate", await daemonPost("/room/activate", {
+        re,
+        ...(list.length ? { to: list } : {}),
+        ...(reason ? { reason } : {}),
+      }));
+    },
   );
   server.registerTool(
     "room_read",

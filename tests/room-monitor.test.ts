@@ -1,4 +1,4 @@
-// 频道 / 帖子 room 的 monitor 纯核心 (§2.1): 成员角色、host 跳过、人话只激活、activate 行。
+// room perceptron 纯核心 (§2.1 + 2026-11-24 门控): 成员角色、host 跳过、人话只唤醒感知器、门控 (候选 ≥2)。
 import assert from "node:assert/strict";
 import { applyOp, DAEMON, dutiesOpenedBy, hostOf, mirrors, openDuties, renderMsgLine, roomHost, say as _noop, type MsgRow, type Who } from "../shared/room.js";
 import { H, rejects, room as mkRoom, say, uid, W } from "./room-fixture.js";
@@ -31,6 +31,24 @@ const withMonitor = () => {
   assert.equal(row.monitor, true);
   assert.deepEqual(openDuties(s), [], "不在 host 槽位开 duty");
   assert.equal(roomHost(s), A);
+}
+
+// ②b 门控 (2026-11-24 人定): 候选 <2 (只剩 host 一个 wizard) 时即使有 perceptron 也不归它 —— 照旧落 host。
+{
+  const s = mkRoom("chat:wrG", [A]);
+  applyOp(s, { op: "join", at: 2_000, room: s.id, who: M, ord: s.nextOrd, via: "invite", by: A, role: "monitor" });
+  const row = say(s, { author: H1, kind: "say", text: "在吗" });
+  assert.equal(row.monitor, undefined, "候选不足: 不进感知");
+  assert.deepEqual(row.wake, [A.id], "照旧唤醒 host");
+  assert.deepEqual(openDuties(s).map((d) => d.slot), ["host"], "照旧开 host 槽位 duty");
+}
+
+// ②c 迁移重放的人话不进感知 (origin migrate) —— 迁移行本就不开任何 duty (dutiesOpenedBy 同判)
+{
+  const s = withMonitor();
+  const row = say(s, { author: H1, kind: "say", text: "旧账重放", origin: "migrate" });
+  assert.equal(row.monitor, undefined);
+  assert.deepEqual(openDuties(s), []);
 }
 
 // ③ @ 了机器人的人话直达 host (即使有 monitor), 照旧开 host 槽位 duty
