@@ -19,14 +19,14 @@ import type { Config } from "../shared/config.js";
 import { CHAT_ROUTE_KEYS } from "../shared/chat-http.js";
 import { daemonSocketPath } from "../shared/daemon-addr.js";
 import { expandHome } from "../shared/paths.js";
-import type { BotMux } from "./bot-mux.js";
+import type { DaemonWs } from "./ws.js";
 import { bindControlSocket, unlinkIfOwned, stillOwns, type BoundSocket } from "./control-socket.js";
 import { drainForReload, listPending } from "./pending.js";
 import { listenWithFallback, portsFileOf, writePorts, type PortEntry } from "../shared/ports.js";
 
 interface Ctx {
   cfg: Config;
-  ws: BotMux;
+  ws: DaemonWs;
   log: Logger;
   sourcePath: string;
   /** room 切换后的增量状态 (openDuties / watchdog), index.ts 在 room 模块就绪后改写 get; /status 展开它。 */
@@ -68,11 +68,10 @@ const readBody = async (req: IncomingMessage): Promise<unknown> => {
 /** /status 的响应体 (抽出来给单测: 修复单 §4 的 openDuties / watchdog 增量在这里并进来)。 */
 export const statusBody = (
   cfg: Config,
-  ws: BotMux,
+  ws: DaemonWs,
   sourcePath: string,
   roomStatus?: { get: () => Record<string, unknown> },
 ): Record<string, unknown> => {
-  const bots = ws.bots();
   return {
     ok: true,
     version: VERSION,
@@ -87,8 +86,6 @@ export const statusBody = (
     sourcePath,
     socket: daemonSocketPath(cfg),
     logFile: expandHome(cfg.daemon.logFile),
-    // 多机器人才有; wsConnected / botId 仍是主机器人的, 单机器人的输出一字不变。
-    ...(bots.length > 1 ? { bots } : {}),
     // room 模型增量 (修复单 §4): openDuties = 全部 room 未结 duty 总数 (pending 是审批卡, 别混);
     // watchdog = { failStreak, lastScanAt } — O1 拿它判「看门狗活着且没停摆」。
     ...(roomStatus ? roomStatus.get() : {}),

@@ -167,7 +167,7 @@ try {
     ]);
     const store = loadWizardStore(wizFile);
     const classes = loadClassStore(clsFile);
-    classes.create({ id: "chat:U0", bot: "", name: "taken", role: "steward", workspace: "/tmp/u0" });
+    classes.create({ id: "chat:U0", name: "taken", role: "steward", workspace: "/tmp/u0" });
 
     const plan = planClasses(store.all(), classes.all(), () => "");
     assert.deepEqual(plan.classes.map((c) => c.id).sort(), ["chat:P", "chat:V"], "只建能建的");

@@ -67,7 +67,7 @@ export interface WsStatus {
   authenticatedAt?: string;
 }
 
-/** 一条长连接只要凭据; 多机器人时 bot-mux 每个机器人各调一次。 */
+/** 一条长连接只要凭据。 */
 export const startWs = (bot: Config["bot"], log: Logger): DaemonWs => {
   log.info({ botId: bot.botId, ws: bot.websocketUrl }, "WS init");
   let state: WsStatus = { phase: "connecting", authenticated: false, reconnectAttempts: 0 };

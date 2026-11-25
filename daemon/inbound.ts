@@ -2,21 +2,20 @@
 import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, FileMessage, VideoMessage, VoiceMessage, BaseMessage, QuoteContent } from "@wecom/aibot-node-sdk";
 import { attachmentLine, inboxName, saveToInbox, sniffExt } from "./media.js";
 import type { Logger } from "pino";
-import { PRIMARY_BOT, type Config } from "../shared/config.js";
+import { type Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
 import { resolveCliBackend } from "../shared/cli-backends.js";
 import { lastModel, tailTurnsWithTools, type PeerInfo } from "./peers.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { parseWxCommand, wxCommandHandler } from "./weixin-cmd.js";
-import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim, shouldBotAutoClaim, persistBotClaim, ackBotClaim } from "./claim.js";
+import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim } from "./claim.js";
 import { getLastResponse } from "./last-response.js";
 import { scanClaudeSessions, type SessionInfo } from "./session-scan.js";
 import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
-import { botTagOf } from "./bot-mux.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, unlinkTags, uniqueTag, displayName, tagLink, stripSigil } from "../shared/session-label.js";
 import { chatNameOf, type CharterGuard } from "./chat-name.js";
 import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, openInstance, settleName, wizardStore } from "./wizard.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward, type StewardRoute } from "./steward.js";
@@ -36,10 +35,8 @@ const QUOTE_TAIL_TURNS = 12;
 
 // Chat-binding key: stable id for "this conversation thread". Used as
 // session-map key, mirror target, defaultChat. NOT used for auth.
-// 副机器人收到的聊天挂 `~<bot>` (bot-mux 在转发时给 body 记了是谁收的): 同一个人私聊两个机器人、
-// 同一个群里两个机器人, 是两个聊天、两套 wizard。授权不走这里 (authPrincipals 不带后缀)。
 const chatPrincipal = (msg: BaseMessage): string =>
-  withBot(msg.chattype === "group" && msg.chatid ? `chat:${msg.chatid}` : `user:${msg.from.userid}`, botTagOf(msg));
+  msg.chattype === "group" && msg.chatid ? `chat:${msg.chatid}` : `user:${msg.from.userid}`;
 
 // 寻址靠 wizard 的**全局名字** —— 人点名单写作 `.name` (`🧙 name` 同样认, 双态), 它可能住在任何一个聊天里。
 // Must be space-delimited or edge-of-string so paths / extensions like `a.ts`
@@ -70,7 +67,7 @@ export const resolveName = (base: string, name: string): string => {
   // 名字属于身份 (§2): 投递落「身份在本聊天的化身」—— 有就用本群的, 没有回落锚点化身
   //  (共享锚点上下文), 不自动新建。按群隔离会话是管家专用 (resolve → stewardReception);
   //  worker 跨群点名沿用同一会话, 不每群新开 pane (人 2026-11-17, 测试 steward-reception 钉住)。
-  if (rec && sameBot(base, rec.target)) return manifestationOf(wizardStore(), name, base) ?? rec.target;
+  if (rec) return manifestationOf(wizardStore(), name, base) ?? rec.target;
   const slot = name;
   // 这个 slot 已被一个改了名的 (冷) wizard 占着 → 挪到 `slot-N`, 别唤醒别人。
   const taken = new Set((wizardStore()?.all() ?? []).filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)));
@@ -701,9 +698,8 @@ export const installInboundRouter = (
   // caller should stop (claim consumed or message rejected).
   const gate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string, who: string, asked = ""): Promise<{ stop: boolean }> => {
     const auths = authPrincipals(msg);
-    // 多机器人: 收到这条的机器人自己的 allowFrom 与全局取并集。每条现算: 全局名单是热配置 (认领 / config_set 会改它)。
-    const botId = botTagOf(msg);
-    const allow = [...cfg.wrc.allowFrom, ...(cfg.bots.find((b) => b.id === botId)?.allowFrom ?? [])];
+    // 每条现算: 全局名单是热配置 (认领 / config_set 会改它)。
+    const allow = [...cfg.wrc.allowFrom];
     // Bootstrap / allowFrom operations are chat-scoped, not session-scoped;
     // use the chat principal, not the routed wizard — a first-time user typing
     // `.foo hello` still promotes them as `user:xxx` (not `user:xxx#foo`).
@@ -749,7 +745,7 @@ export const installInboundRouter = (
     const audit = parseAuditCommand(text);
     if (audit) {
       // 别的机器人名下的会话不进候选: `/audit .x` 点到那边的名字 = 不认识。
-      const mirror = resolveAuditMirror(bridge.status().mirrors.filter((x) => sameBot(who, x.target)), audit.name, who, chatPrincipal(msg));
+      const mirror = resolveAuditMirror(bridge.status().mirrors, audit.name, who, chatPrincipal(msg));
       let body: string;
       if (!mirror) {
         body = audit.name
@@ -768,9 +764,8 @@ export const installInboundRouter = (
       await replyText(frame, msg, who, body);
       return { stop: true };
     }
-    // 魔法短语认领只认主机器人 (`wezard init` 武装的就是它, 写全局 defaultChat / allowFrom);
-    // 副机器人各走各的自动认领, 见下。
-    if (!botId && tryConsumeClaim(text, basePrincipal)) {
+    // 魔法短语认领 (`wezard init` 武装的, 写全局 defaultChat / allowFrom)。
+    if (tryConsumeClaim(text, basePrincipal)) {
       log.info({ who: basePrincipal }, "claim consumed — bootstrapping defaultChat + allowFrom");
       try { persistClaim(cfg, sourcePath, basePrincipal); } catch (e) {
         log.error({ err: (e as Error).message }, "persistClaim failed");
@@ -783,7 +778,7 @@ export const installInboundRouter = (
     // Falls through so the same message is also dispatched as a real prompt —
     // user types "hi" and gets both the promotion ack and the assistant reply.
     const isDm = !(msg.chattype === "group" && msg.chatid);
-    if (!botId && shouldAutoClaim(cfg, isDm)) {
+    if (shouldAutoClaim(cfg, isDm)) {
       log.info({ who: basePrincipal }, "auto-claim — empty allowFrom, first DM sender promoted");
       try { persistClaim(cfg, sourcePath, basePrincipal); } catch (e) {
         log.error({ err: (e as Error).message }, "auto-claim persistClaim failed");
@@ -791,23 +786,13 @@ export const installInboundRouter = (
       await ackAutoClaim(client, basePrincipal, log);
       // fall through to dispatch
     }
-    // 副机器人: 它自己的 allowFrom 空着时, 第一个单聊它的人认领它 (与主机器人互不相干)。同样落下去照常派发。
-    if (shouldBotAutoClaim(cfg, botId, isDm)) {
-      const owner = `user:${msg.from.userid}`;
-      log.info({ who: owner, bot: botId }, "bot auto-claim — empty bots[].allowFrom, first DM sender promoted");
-      try { persistBotClaim(cfg, sourcePath, botId, owner); } catch (e) {
-        log.error({ err: (e as Error).message, bot: botId }, "bot auto-claim persist failed");
-      }
-      allow.push(owner);
-      await ackBotClaim(client, basePrincipal, botId, log);
-    }
     if (!isAllowed(allow, auths) && !isMirrorTarget(bridge, who)) {
-      log.warn({ from: who, auths, bot: botId || PRIMARY_BOT }, "drop: not in allowFrom");
+      log.warn({ from: who, auths }, "drop: not in allowFrom");
       try {
         await client.replyStream(
           frame,
           msg.msgid,
-          `未授权\n${renderIds(msg, allow)}\n请将上述任一权限id加入 config 的 wrc.allowFrom 数组${botId ? ` (或只给这个机器人: bots[id=${botId}].allowFrom)` : ""}`,
+          `未授权\n${renderIds(msg, allow)}\n请将上述任一权限id加入 config 的 wrc.allowFrom 数组`,
           true,
         );
       } catch { /* ignore */ }
@@ -991,8 +976,7 @@ export const installInboundRouter = (
     if (sc) {
       let sessions: SessionInfo[] = [];
       try {
-        // 已绑在别的机器人聊天上的会话不列、不许切过来 (没绑定的照旧可见)。
-        sessions = (await scanClaudeSessions()).filter((s) => ((t) => !t || sameBot(who, t))(bridge.targetForSession(s.sessionId)));
+        sessions = await scanClaudeSessions();
       } catch (e) {
         log.error({ err: (e as Error).message }, "/sessions scan failed");
       }
@@ -1120,7 +1104,7 @@ export const installInboundRouter = (
     if (!name) return opts.sourceRoute?.(base)?.target ?? stewardReception(base);
     const store = wizardStore();
     const rec = store?.byName(name);
-    if (store && rec && sameBot(base, rec.target)) {
+    if (store && rec) {
       const id = identityOf(rec);
       // 实例名 (`<类名>-<N>`) 是精确地址: 那一条就是那一条 (跨群也直接投它, 回复回本群)。
       if (rec.ordinal !== undefined && parseInstanceName(name)) return rec.target;
@@ -1201,7 +1185,7 @@ export const installInboundRouter = (
       return false;
     }
     // 与 gate 同一把 allowFrom 尺子: 陌生人交给老路 (gate 回未授权), 引导不搭理。
-    const allow = [...cfg.wrc.allowFrom, ...(cfg.bots.find((b) => b.id === botTagOf(msg))?.allowFrom ?? [])];
+    const allow = cfg.wrc.allowFrom;
     if (!isAllowed(allow, authPrincipals(msg))) return false;
     const text = raw.trim();
     // 引导期每条消息落一行: 「人说了但没反应」时要先分清是没进 daemon 还是判定没走通 —— 这条

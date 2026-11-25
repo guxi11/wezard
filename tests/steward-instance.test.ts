@@ -32,7 +32,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const store = loadWizardStore(join(dir, "wizards.json"), () => undefined, classes);
   const ws = join(dir, "dhtpm");
   mkdirSync(ws, { recursive: true });
-  classes.create({ id: "chat:wrD", bot: "", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
+  classes.create({ id: "chat:wrD", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
   store.upsert("chat:wrD", { identity: "chat:wrD", ordinal: 1, name: "OliveBrown-1", kind: "steward", workspace: ws });
   const S1 = store.get("chat:wrD")!;
   const binds: string[] = [];
@@ -89,7 +89,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   // 存量类的 nextOrdinal 落后于已用序号 (现场就是 1): 领号必须跳过, 否则又造一个同名实例。
   const wsZ = join(dir, "zedws");
   mkdirSync(wsZ, { recursive: true });
-  classes.create({ id: "chat:wrZ", bot: "", name: "Zed", role: "steward", workspace: wsZ, nextOrdinal: 1 });
+  classes.create({ id: "chat:wrZ", name: "Zed", role: "steward", workspace: wsZ, nextOrdinal: 1 });
   store.upsert("chat:wrZ", { identity: "chat:wrZ", ordinal: 1, name: "Zed-1", kind: "steward", workspace: wsZ });
   const zt = openInstance(store, "chat:wrNEWZ", "chat:wrZ")!;
   assert.equal(store.get(zt)!.name, "Zed-2", "跳过已用序号 (不发第二个 Zed-1)");
@@ -106,7 +106,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const store = loadWizardStore(join(dir, "wizards.json"), () => undefined, classes);
   const ws = join(dir, "dhtpm");
   mkdirSync(ws, { recursive: true });
-  classes.create({ id: "chat:wrD", bot: "", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
+  classes.create({ id: "chat:wrD", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
   store.upsert("chat:wrD", { identity: "chat:wrD", ordinal: 1, name: "OliveBrown-1", kind: "steward", workspace: ws });
   const S1 = W(store.get("chat:wrD")!.uid!);
   const M = W(uid(9));
@@ -182,7 +182,7 @@ const srcOf = (dir: string) => { const p = join(dir, "config.jsonc"); writeFileS
   const store = loadWizardStore(join(dir, "wizards.json"), () => undefined, classes);
   const ws = join(dir, "dhtpm");
   mkdirSync(ws, { recursive: true });
-  classes.create({ id: "chat:wrD", bot: "", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
+  classes.create({ id: "chat:wrD", name: "OliveBrown", role: "steward", workspace: ws, nextOrdinal: 2 });
   store.upsert("chat:wrD", { identity: "chat:wrD", ordinal: 1, name: "OliveBrown-1", kind: "steward", workspace: ws });
   const CH = "chat:wrCH";
   const chTarget = openInstance(store, CH, "chat:wrD")!;

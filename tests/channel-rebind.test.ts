@@ -40,7 +40,7 @@ const world = (tag: string) => {
   const src = join(dir, "config.jsonc");
   writeFileSync(src, "{\n  \"bot\": { \"botId\": \"b\" }\n}\n");
   const classes = loadClassStore(join(dir, "classes.json"));
-  classes.create({ id: "user:T", bot: "", name: "wezard", role: "steward", workspace: OLD_WS, nextOrdinal: 19 });
+  classes.create({ id: "user:T", name: "wezard", role: "steward", workspace: OLD_WS, nextOrdinal: 19 });
   const store: WizardStore = loadWizardStore(join(dir, "wizards.json"), () => undefined, classes);
   store.upsert("user:T", { identity: "user:T", kind: "global-steward", name: "wezard", workspace: OLD_WS, description: "wezard 群管家: 分派与验收" });
   // 三个 room 的旧实例 (每个 room 自己的那个) + 各自的 monitor。
@@ -130,7 +130,7 @@ const runRebind = (w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
 {
   const w = world("reuse");
   const before = w.classes.byName("wezard")!;
-  w.classes.create({ id: "chat:wrOtherX", bot: "", name: "repo", role: "steward", workspace: w.newWs, nextOrdinal: 2 });
+  w.classes.create({ id: "chat:wrOtherX", name: "repo", role: "steward", workspace: w.newWs, nextOrdinal: 2 });
   w.store.upsert("chat:wrOtherX", { identity: "chat:wrOtherX", kind: "steward", ordinal: 1, name: "repo-1", workspace: w.newWs });
   const r = runRebind(w, { name: undefined });
   assert.equal(r.ok, true, r.reason);

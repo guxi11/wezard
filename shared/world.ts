@@ -68,7 +68,7 @@ export interface WorldFactWizard {
   summary: string;
 }
 
-/** 类表 (daemon/classes.ts) 的一行: <bot, role, workspace> 唯一的人物设定。
+/** 类表 (daemon/classes.ts) 的一行: <role, workspace> 唯一的人物设定。
  *  实例名是 <name>-<ordinal>; rolepage 只用 name 标「所属类」。老 daemon 快照没有。 */
 export interface WorldFactClass { id: string; name: string; role: string; workspace: string }
 

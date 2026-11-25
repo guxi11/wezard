@@ -15,7 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { ChatPolicy, type Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { expandHome } from "../shared/paths.js";
-import { baseOfKey, botOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { baseOfKey, keyOf, tagOfKey, uniqueTag } from "../shared/session-label.js";
 import { parse } from "acorn";
 import { EXEC_SHELLS, execToolRefusal, shortToolOf } from "./exec-surface.js";
 import { instanceName, validClassName } from "./classes.js";
@@ -252,10 +252,10 @@ export const judgeOnboarding = (store: WizardStore | undefined, base: string, in
     return { kind: "bind-new", workspace: v.abs };
   }
   // 人给的是实例名 / 身份名: 落它的身份 (类实例 → 类名, 本 room 的实例落定时再解析)。
-  const hit = input.names.map((n) => store?.byName(n)).find((r) => r && sameBot(base, r.target) && !isGuideManifestation(r));
+  const hit = input.names.map((n) => store?.byName(n)).find((r) => r && !isGuideManifestation(r));
   if (hit) return bindOf(hit);
   // 人直接给类名 (类名不在 wizard 名册里, 在类表)。
-  const cls = input.names.map((n) => store?.classes?.byName(n)).find((c) => !!c && c.bot === botOfKey(base));
+  const cls = input.names.map((n) => store?.classes?.byName(n)).find((c) => !!c);
   if (cls) return { kind: "bind-existing", name: cls.name, target: cls.id, identity: cls.id, classId: cls.id };
   return { kind: "retry", reason: input.names.length ? "没认出目录, 名册里也没有叫 " + input.names.slice(0, 3).join(" / ") + " 的管家" : "没认出目录或管家名字" };
 };
@@ -375,7 +375,7 @@ export const applyOnboarding = (
   const classes = store.classes;
   const name = want || store.nextName();
   if (classes) {
-    classes.create({ id: base, bot: botOfKey(base), name, role: "steward", workspace: verdict.workspace });
+    classes.create({ id: base, name, role: "steward", workspace: verdict.workspace });
     store.upsert(base, { kind: "steward", workspace: verdict.workspace, identity: base, ordinal: 1, name: instanceName(name, 1) });
     return done({ name, target: base, workspace: verdict.workspace, fresh: true });
   }

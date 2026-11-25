@@ -8,7 +8,6 @@
 // 就是「这个帖子源来过、还没被处置」的全部事实; boot 重建后同一个扫描自然接上。
 import type { Config } from "../shared/config.js";
 import { isBoundRoom, openDuties, roomHost, whoKey, type BindOp, type RoomState, type UnbindOp, type Who } from "../shared/room.js";
-import { botOfKey } from "../shared/session-label.js";
 import { channelOf, postRefOf } from "./channel-posts.js";
 
 /** 绑定的判定面: 索引 / 账本 / 对账闸都由调用方现取 (hot, 不缓存)。 */
@@ -46,8 +45,6 @@ export const planBind = (
   if (source === room) return { ok: false, status: 400, reason: "源就是本 room 的主源, 不需要绑定" };
   // ④ 源类型 ∈ {群, 帖子}。
   if (!bindableSource(a.cfg, source)) return { ok: false, status: 400, reason: "这个源不能绑: 只有群聊 (chat:<群id>) 与频道帖子 (chat:<opk…>) 可作为源 (频道自己就是一个 room; 单聊不在本轮范围)" };
-  // ① 同 bot: 跨机器人的源与 room 之间没有收发通路。
-  if (botOfKey(source) !== botOfKey(room)) return { ok: false, status: 400, reason: "跨机器人的源与 room 不能绑定 (" + (botOfKey(source) || "主机器人") + " ≠ " + (botOfKey(room) || "主机器人") + ")" };
   // ③ 目标 room 存在且有 host。
   const s = a.stateOf(room);
   if (!s) return { ok: false, status: 404, reason: "没有这个 room: " + room };
@@ -263,7 +260,6 @@ export const bindCandidates = (a: {
     const veto: string[] = [];
     let score = 0;
     const lastAt = s.msgs.reduce((m, x) => Math.max(m, x.at), s.openedAt ?? 0);
-    if (botOfKey(s.id) !== botOfKey(a.source)) veto.push("跨机器人");
     if (!host) veto.push("没有 host (没人接)");
     if (busyMs > 0 && a.now - lastAt > busyMs && openDuties(s).length === 0)
       veto.push("死 room (近 " + Math.round((a.now - lastAt) / 60_000) + " 分钟无活动, 没有未结 duty)");

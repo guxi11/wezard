@@ -68,7 +68,7 @@ import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, reco
 import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, stripSigil, displayName, createdAck, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, stripSigil, displayName, createdAck, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
@@ -6507,9 +6507,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     ref: string,
   ): { ok: true; target: string; foreign: boolean } | { ok: false; reason: string; candidates?: string[] } => {
     const raw = stripSigil(ref);
-    // 多机器人隔离: 别的机器人名下的 wizard 在这里与「不存在」同形 —— 不说它在、不进 candidates。
-    // 单机器人时 sameBot 恒真, 这一行什么也不滤。
-    const all = allTargets().filter((k) => sameBot(self, k));
+    const all = allTargets();
     const hit = (target: string) => ({ ok: true as const, target, foreign: baseOfKey(target) !== baseOfKey(self) });
     if (!raw) return hit(baseOfKey(self));
     if (/^(user|chat|group|external_user):/.test(raw)) {
@@ -6517,7 +6515,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     // 名字属于身份 (§2): 优先落「身份在调用方本聊天的化身」(A 群里的 chat_ask 点名只找
     // A 群的化身, 不串 B 群的); 身份在本聊天没有化身时回落锚点化身 (旧世界的跨群寻址)。
-    const named = ((t) => (t && sameBot(self, t) ? t : undefined))(manifestationOf(wizardStore(), raw, baseOfKey(self)));
+    const named = manifestationOf(wizardStore(), raw, baseOfKey(self));
     if (named && all.includes(named)) return hit(named);
     if (named) return { ok: false, reason: `wizard '${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
     return {
@@ -6781,7 +6779,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const foreignPeers = async (self: string): Promise<PeerInfo[]> => {
     const selfBase = baseOfKey(self);
     // 只列活着的 / 有身份的 —— 冷绑定可能有几百个, 每个探活是两次 tmux。
-    const foreign = allTargets().filter((k) => baseOfKey(k) !== selfBase && sameBot(self, k) && (byTarget.has(k) || !!wizardStore()?.get(k)));
+    const foreign = allTargets().filter((k) => baseOfKey(k) !== selfBase && (byTarget.has(k) || !!wizardStore()?.get(k)));
     return (await Promise.all(foreign.map((t) => peerInfoOf(t, self)))).sort(byRecent);
   };
 

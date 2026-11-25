@@ -1,6 +1,6 @@
 // 频道换绑到一个工作区 (人 2026-11-23: 「绑定工作区为 cc-wecom」)。
 //
-// 频道 = 一条 (bot, steward, workspace) 的类绑定 (wrc.channel.steward.<topic> 存**类名**)。
+// 频道 = 一条 (steward, workspace) 的类绑定 (wrc.channel.steward.<topic> 存**类名**)。
 // 「换绑到目录 D」= 找到 / 新建 D 的管家类 → 写频道表 → 频道 room 与它每个帖子 room 里坐上
 // **新类在本 room 的实例**。换绑之后这个频道的管家身份就是 D 的那个类: 各 room 的旧管家不再是
 // 本 room 的 host (手闸 / 宪章随之不再算它), 但它**不离开 room** —— 它手上可能还有没交代的件,
@@ -12,7 +12,7 @@
 // 幂等: 已经绑这个类 = 只补座位; 本 room 已有这个类的实例 = 一个字节都不写。
 import type { Config } from "../shared/config.js";
 import { DAEMON, applyOp, roomHost, sameWho, whoKey, type RoomOp, type RoomState } from "../shared/room.js";
-import { baseOfKey, botOfKey } from "../shared/session-label.js";
+import { baseOfKey } from "../shared/session-label.js";
 import { channelOf, postsOfChannel } from "./channel-posts.js";
 import { instanceName, normPath, validClassName } from "./classes.js";
 import { bindChannelSteward, validateWorkspace } from "./onboarding.js";
@@ -71,16 +71,15 @@ export const rebindChannel = (a: ChannelRebindArgs): ChannelRebindResult => {
   const classes = a.store.classes;
   if (!classes) return fail("类表不可用");
 
-  const bot = botOfKey(base);
   const wantName = (a.name ?? "").trim();
   const named = wantName ? classes.byName(wantName) : undefined;
   if (named) {
-    if (named.role !== "steward" || named.bot !== bot) return fail("." + named.name + " 不是本机器人的管家类");
+    if (named.role !== "steward") return fail("." + named.name + " 不是管家类");
     if (named.workspace !== want) {
       return fail("类 " + named.name + " 的工作区是 " + (named.workspace || "(空)") + " —— 换目录要另起一个类 (不给 name 即自动)");
     }
   }
-  let cls = named ?? classes.byKey(bot, "steward", want);
+  let cls = named ?? classes.byKey("steward", want);
   let createdClass = false;
   if (!cls) {
     // 新建: 锚点 target 必须是空闲的 —— 它在频道 room 的默认会话位置上, 顶掉别人的记录 = 顶掉别人的会话。
@@ -94,7 +93,7 @@ export const rebindChannel = (a: ChannelRebindArgs): ChannelRebindResult => {
     const prev = stewardIdentityOf(a.cfg, a.store, base);
     const prevAnchor = prev ? anchorOf(a.store, prev) : undefined;
     cls = classes.create({
-      id: base, bot, name: clsName, role: "steward", workspace: want,
+      id: base, name: clsName, role: "steward", workspace: want,
       description: prevAnchor?.description ?? "",
       ...(prevAnchor?.expertise !== undefined ? { expertise: prevAnchor.expertise } : {}),
     });

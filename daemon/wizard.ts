@@ -218,15 +218,14 @@ const instancesOfRows = (rows: readonly WizardRecord[], classId: string): Wizard
     .filter((w) => identityOf(w) === classId && w.ordinal !== undefined)
     .sort((a, b) => (a.ordinal! - b.ordinal!) || (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
 
-/** `wizard_identity({to})` 的权限判据 (纯函数, "" = 放行): 改别人只在同 bot 内可寻址;
+/** `wizard_identity({to})` 的权限判据 (纯函数, "" = 放行): 改别人:
  *  学徒是连续身份, 谁都不能替它改名; 发起人必须是目标的**直属 parent**, 或者本身就是
  *  一个管家类实例 (群管家替本群的人改名是它的本分)。改自己永远放行 (调用方不走这里)。 */
 export const identityEditRefusal = (
   victim: WizardRecord | undefined,
-  o: { sameBot: boolean; editorIsParent: boolean; editorIsStewardInstance: boolean },
+  o: { editorIsParent: boolean; editorIsStewardInstance: boolean },
 ): string => {
   if (!victim) return "目标不存在";
-  if (!o.sameBot) return "跨机器人: 名字只在同一个 bot 内可寻址";
   if (victim.kind === "apprentice") return "学徒是连续身份, 不能被别人改名 / 改职责";
   if (!o.editorIsParent && !o.editorIsStewardInstance) return "没有权限: 只有它的直属 parent 或管家实例能改它";
   return "";

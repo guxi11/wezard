@@ -7,7 +7,7 @@
 
 | room | id | 例 |
 |---|---|---|
-| 绑定传输 (企微群 / 企微单聊 / topic 帖 / 微信) | **= 现有 base principal 原样** (含 `~bot` 后缀) | `chat:wrkSF…` · `user:T0388…` · `chat:wrkSF…~b2` |
+| 绑定传输 (企微群 / 企微单聊 / topic 帖 / 微信) | **= 现有 base principal 原样** | `chat:wrkSF…` · `user:T0388…` |
 | wizard 两人 (无绑定) | `dm:` + 两个实例的**稳定身份 uid** 字典序 `|` 拼接 —— 同一对唯一、复用 | `dm:w3f9a0c12e4b7|w8d21be07aa95` |
 | 3 人以上临时 (无绑定) | `adhoc:` + 8 位随机 hex, room_open 显式开, 或 chat_ask 点名多个群外 wizard 时按成员集合复用 / 新开 | `adhoc:9f3c01ab` |
 

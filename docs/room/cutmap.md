@@ -251,7 +251,7 @@ quiet 任务另有一条 `relayUnlessQuiet` (5235) 从 transcript 取终句转�
 | 环节 | 位置 | 说明 |
 |---|---|---|
 | 入口注册 | index.ts:551 `installInboundRouter`; 频道事件 index.ts:590 `installChannelEvents`; 审批卡 index.ts:603; mirror index.ts:743 | 三者都 `client.on(...)` |
-| 信封/头 | inbound.ts:1229-1239: `renderHumanEnvelope(userid, chatName, channel)` + `renderStewardHint` + `noticeSuffixFor` | channel = `chatPrincipal(msg)` = `chat:<chatid>` 或 `user:<userid>`, 副机器人带 `~bot` (inbound.ts:43) |
+| 信封/头 | inbound.ts:1229-1239: `renderHumanEnvelope(userid, chatName, channel)` + `renderStewardHint` + `noticeSuffixFor` | channel = `chatPrincipal(msg)` = `chat:<chatid>` 或 `user:<userid>` (inbound.ts:43) |
 | `.name` 解析 | inbound.ts:56 `parseTag` (只认行首, nameTokenRe); 目标 = `resolve(base, tag)` 1126 → `resolveName` 69 (全局名册) / `stewardReception` 1096 | 名字全局唯一; 本群没有该身份 → `openManifestation` 1075 新开实例 |
 | 默认落管家/guide | 无 `.name` → `stewardReception` (inbound.ts:1096) → `resolveSteward` (onboarding.ts/steward.ts) | 群管家绑定在运行时; 频道级见下 |
 | 新群引导 | `guideGate` inbound.ts:1168; 状态机 `loadOnboardingStore` 1136; `judgeOnboarding` 1213; `applyOnboarding` 1220; `reapGuide` 1140 | 未绑定群拦在路由之前; 引导化身 `<base>#guide`, 无工具面 |

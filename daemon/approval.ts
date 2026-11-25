@@ -9,8 +9,7 @@ import type {
 } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
-import { defaultChatOfBot, type Config } from "../shared/config.js";
-import { botTagOf } from "./bot-mux.js";
+import { type Config } from "../shared/config.js";
 import { createPending, getPending, getResolvedSnapshot, resolvePending, resolvePendingsByChat, failPending, stashResolved, markCardSent, isReloadError, type Decision } from "./pending.js";
 import {
   cacheGet,
@@ -35,12 +34,12 @@ import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail, open
 import { isApprentice } from "./apprentice.js";
 
 /** 学徒 (v3 §7) 的会话级豁免一律不生效 (⏱ 窗口 / skipAll): 卡永远到人。按「这个会话
- *  最近一轮记在哪个 target 名下」(targetOfSession) 判定 —— 与 bot 归属判定同源。 */
+ *  最近一轮记在哪个 target 名下」(targetOfSession) 判定。 */
 const apprenticeSession = (sessionId: string): boolean =>
   isApprentice(wizardStore(), targetOfSession(sessionId) ?? "");
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { botOfKey, displayName, tagBadge, withTagHeader, withBot } from "../shared/session-label.js";
+import { displayName, tagBadge, withTagHeader } from "../shared/session-label.js";
 import { chatPolicyOf } from "./chat-name.js";
 import { isStewardTarget } from "./steward.js";
 import { wizardStore } from "./wizard.js";
@@ -71,17 +70,11 @@ export const targetChatId = (key: string): string => {
 /** 卡片真正要去的那个聊天 (按频道换算之后) 此刻送得到吗 —— 微信 chat 不看企微长连接。 */
 const canReach = (client: WSClient, key: string): boolean => reachable(client, targetChatId(key));
 
-// 绑了镜像的会话, 卡片发到它的聊天 —— 机器人随会话 key 走。没绑镜像的不属于任何聊天、任何机器人:
-// 先全局 (主机器人), 全局都空才按配置顺序借副机器人自己的审批人 / 默认聊天 (挂上它的 `~<bot>`,
-// 卡片才从那个机器人推出去)。
+// 绑了镜像的会话, 卡片发到它的聊天。没绑镜像的不属于任何聊天: 审批人, 再不行 defaultChat。
 const pickApprover = (cfg: Config): string | undefined => {
   if (cfg.approval.approvers.length > 0) return cfg.approval.approvers[0];
-  if (cfg.defaultChat) return cfg.defaultChat;
-  return cfg.bots.flatMap((b) => [...b.approvers, b.defaultChat].filter(Boolean).map((p) => withBot(p, b.id)))[0];
+  return cfg.defaultChat || undefined;
 };
-/** 副机器人 `bot` 自己的审批人 / 默认聊天 (挂 `~bot`); 都没配 = undefined —— 不回落主机器人, 那是冒用它的连接。 */
-const botApprover = (cfg: Config, bot: string): string | undefined =>
-  ((b) => (b ? [...b.approvers, b.defaultChat].filter(Boolean).map((p) => withBot(p, bot))[0] : undefined))(cfg.bots.find((x) => x.id === bot));
 
 // ── Card construction ──────────────────────────────────────────────────
 interface CardArgs {
@@ -1865,10 +1858,7 @@ const resolveApprover = (
 ): string | undefined => {
   const mirror = sessionId ? getMirrorTarget?.(sessionId) : undefined;
   if (mirror) return mirror;
-  // 镜像对不上时, 这个会话跑过的轮次还记得它在谁名下: 归副机器人就按那个机器人兑。认不出 / 归主机器人 =
-  // 原样 (pickApprover, 主机器人优先)。单机器人时 bot 恒为 "", 不变。
-  const bot = sessionId ? botOfKey(targetOfSession(sessionId) ?? "") : "";
-  return bot ? botApprover(cfg, bot) : pickApprover(cfg);
+  return pickApprover(cfg);
 };
 
 // ── Subagent 归属解析 ──────────────────────────────────────────────────
@@ -2720,15 +2710,14 @@ export const installApprovalEventListener = (
         // 回复目标 = 卡片自己的会话身份, 逐级回收: 待决时在 pending 里; 已决时
         // pending 已删, 回落到 resolvePending 留下的 5min resolved 暂存; 再往后
         // (含 daemon 重启) 由 24h 的 detail 记录兜着 —— recordApproval 落卡时就
-        // 把 chatKey 一起存了。全部 miss (记录过期的真鬼卡) 才按点击帧是哪个
-        // 机器人收的兑到它自己的默认聊天 (副机器人没配 = 不回), 不回落主机器人
-        // 的全局 defaultChat; 单机器人时 botTagOf 恒 "", 就是 cfg.defaultChat。
+        // 把 chatKey 一起存了。全部 miss (记录过期的真鬼卡) 才
+        // 兑到全局 defaultChat (没配 = 不回)。
         const target =
           getPending(reqId)?.chatKey
           ?? getResolvedSnapshot(reqId)?.meta.chatKey
           ?? (rec?.kind === "approval" ? rec.chatKey : undefined)
-          ?? defaultChatOfBot(cfg, botTagOf(frame));
-        if (!target) { log.info({ reqId, bot: botTagOf(frame) }, "full command: 记录已过期且该机器人没有默认聊天, 不回"); return; }
+          ?? (cfg.defaultChat.trim() || undefined);
+        if (!target) { log.info({ reqId }, "full command: 记录已过期且没有默认聊天, 不回"); return; }
         const cmd = rec && rec.kind === "approval" ? commandOf(rec.toolName, rec.toolInput) : "";
         // 只能走主动 markdown 分块 (≤1800 字单条)。曾试过对点击事件做 stream 被动
         // 回复 (单条 20480 字节) —— 企微服务端拒绝: errcode=846605 invalid req_id,

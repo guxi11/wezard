@@ -15,7 +15,7 @@
 // reloads); in dev just avoid reloading mid-conversation when testing.
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { rawTagHeader, parseTagHeader, resolveTagTarget, targetOfTagUrl, withBot, botOfKey } from "../shared/session-label.js";
+import { rawTagHeader, parseTagHeader, resolveTagTarget, targetOfTagUrl } from "../shared/session-label.js";
 /** 聊天键的规范形 (原 chat-records.ts, 随其退役搬来): 裸 chatid → base principal。 */
 const chatPrincipalOf = (chatid: string): string => {
   const bare = (chatid ?? "").trim().replace(/~[^~]+$/, "");
@@ -23,9 +23,6 @@ const chatPrincipalOf = (chatid: string): string => {
   if (/^(chat|user|group):/.test(bare)) return bare;
   return bare.startsWith("wr") ? `chat:${bare}` : `user:${bare}`;
 };
-import { PRIMARY_BOT } from "../shared/config.js";
-import { botTagOf, pinFrameBot } from "./bot-mux.js";
-import { connFor } from "./reach.js";
 import { withMessageFooter, withoutMessageFooter, type MessageFooterPolicy } from "../shared/message-footer.js";
 
 export interface ResponseFormatContext {
@@ -52,10 +49,8 @@ const bareFromFrame = (frame: WsFrame<BaseMessage> | WsFrameHeaders | undefined)
   // frames have no chat context and we just skip recording.
   const body = (frame as WsFrame<BaseMessage> | undefined)?.body;
   if (!body) return "";
-  // 副机器人收到的帧, 聊天键带 `~<bot>` —— 与会话 key 剥出来的 chatid (sendMessage 那一路) 对齐。
-  const bot = [botTagOf(frame), botTagOf(body)].find((tag) => tag && tag !== PRIMARY_BOT) ?? "";
-  if (body.chattype === "group" && body.chatid) return withBot(body.chatid, bot);
-  if (body.from?.userid) return withBot(body.from.userid, bot);
+  if (body.chattype === "group" && body.chatid) return body.chatid;
+  if (body.from?.userid) return body.from.userid;
   return "";
 };
 
@@ -173,16 +168,14 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
   // "WebSocket not connected", 那条消息就永久丢了 (近两天十几条都是这么没的)。主动推送
   // 不赶这几秒: 先等连上再发, 等不到再照常失败。
   const CONNECT_WAIT_MS = 30_000;
-  // 等的是这个聊天归属的那条连接 (多机器人时不一定是主机器人)。
-  const untilConnected = async (chatid: string): Promise<void> => {
-    const conn = connFor(client, chatid);
-    for (const t0 = Date.now(); !conn.isConnected && Date.now() - t0 < CONNECT_WAIT_MS; ) {
+  const untilConnected = async (): Promise<void> => {
+    for (const t0 = Date.now(); !client.isConnected && Date.now() - t0 < CONNECT_WAIT_MS; ) {
       await new Promise((r) => setTimeout(r, 500));
     }
   };
 
   client.sendMessage = async (chatid, body) => {
-    if (!ownTransport(chatid)) await untilConnected(chatid);
+    if (!ownTransport(chatid)) await untilConnected();
     // Only markdown pushes carry quotable text (and are the empty-message
     // risk class); template_card / media bubbles pass through untouched.
     if (body.msgtype === "markdown") {
@@ -206,11 +199,10 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
     sendFrozen: async (chatid: string, content: string, stream?: { frame: WsFrameHeaders; id: string }, guard?: () => boolean): Promise<WsFrame> => {
       if (!gate("durable-final", content)) throw { headers: {}, errcode: -1, errmsg: "empty final rejected before send" };
       if (!ownTransport(chatid)) {
-        await untilConnected(chatid);
-        if (!connFor(client, chatid).isConnected) throw { headers: {}, errcode: -1, errmsg: "disconnected before final send" };
+        await untilConnected();
+        if (!client.isConnected) throw { headers: {}, errcode: -1, errmsg: "disconnected before final send" };
       }
       if (guard && !guard()) throw { headers: {}, errcode: -1, errmsg: "final send stopped before transport" };
-      if (stream) pinFrameBot(stream.frame, botOfKey(chatid));
       const ack = stream ? await origReplyStream(stream.frame, stream.id, content, true)
         : await origSendMessage(chatid, { msgtype: "markdown", markdown: { content } });
       record(chatid, content);

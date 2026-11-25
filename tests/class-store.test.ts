@@ -42,18 +42,17 @@ try {
   // ── 写穿表: 唯一性 / 规范化 / 落盘 ───────────────────────────────────
   const file = join(ROOT, "classes.json");
   const classes = loadClassStore(file);
-  const a = classes.create({ id: "chat:A", bot: "", name: "boss", role: "steward", workspace: "/tmp/ws-a/", description: "A 群管家", memory: ["m1"] });
+  const a = classes.create({ id: "chat:A", name: "boss", role: "steward", workspace: "/tmp/ws-a/", description: "A 群管家", memory: ["m1"] });
   assert.equal(a.workspace, "/tmp/ws-a", "workspace 规范化 (去尾 /)");
   assert.equal(a.nextOrdinal, 1);
   assert.equal(classes.byName("BOSS")?.id, "chat:A", "类名大小写不敏感");
-  assert.equal(classes.byKey("", "steward", "/tmp/ws-a/")?.id, "chat:A", "byKey 走同一把规范化尺子");
-  assert.equal(classes.byKey("", "steward", ""), undefined, "workspace \"\" 不参与判重");
-  assert.equal(classes.byKey("b2", "steward", "/tmp/ws-a"), undefined, "别的机器人不串");
+  assert.equal(classes.byKey("steward", "/tmp/ws-a/")?.id, "chat:A", "byKey 走同一把规范化尺子");
+  assert.equal(classes.byKey("steward", ""), undefined, "workspace \"\" 不参与判重");
 
-  assert.throws(() => classes.create({ id: "chat:B", bot: "", name: "Boss", role: "steward", workspace: "/tmp/ws-b" }), /class name taken/);
-  assert.throws(() => classes.create({ id: "chat:C", bot: "", name: "other", role: "steward", workspace: "/tmp/ws-a" }), /class key taken/);
-  assert.throws(() => classes.create({ id: "chat:A", bot: "", name: "again", role: "steward" }), /already exists/);
-  assert.throws(() => classes.create({ id: "chat:D", bot: "", name: "bad-2", role: "steward" }), /invalid class name/);
+  assert.throws(() => classes.create({ id: "chat:B", name: "Boss", role: "steward", workspace: "/tmp/ws-b" }), /class name taken/);
+  assert.throws(() => classes.create({ id: "chat:C", name: "other", role: "steward", workspace: "/tmp/ws-a" }), /class key taken/);
+  assert.throws(() => classes.create({ id: "chat:A", name: "again", role: "steward" }), /already exists/);
+  assert.throws(() => classes.create({ id: "chat:D", name: "bad-2", role: "steward" }), /invalid class name/);
   assert.throws(() => classes.upsert("nope", { description: "x" }), /unknown class/);
 
   // 序号: 单调递增, 落盘的是「下一个」; drop 掉的实例不还号。
@@ -68,7 +67,7 @@ try {
   const renamed = reloaded.rename("chat:A", "chief");
   assert.equal(renamed.name, "chief");
   assert.equal(reloaded.byName("boss"), undefined);
-  assert.equal(reloaded.create({ id: "chat:E", bot: "", name: "boss", role: "steward" }).name, "boss");
+  assert.equal(reloaded.create({ id: "chat:E", name: "boss", role: "steward" }).name, "boss");
 
   // upsert: 只动给的字段; 记忆超上限按 wizard.ts 的同一截断。
   const patched = reloaded.upsert("chat:A", { description: "改过的职责", memory: Array.from({ length: 80 }, (_, i) => "m" + i) });

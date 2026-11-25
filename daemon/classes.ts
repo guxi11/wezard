@@ -1,4 +1,4 @@
-// 类 / 实例 (P1): 一个 bot 内的「人物设定」, 与它的稳定地址。
+// 类 / 实例 (P1): 「人物设定」, 与它的稳定地址。
 //
 //   类   = <role, workspace> 唯一的人物设定 (名字 / 职责 / 专长 / 记忆 / workspace), 一张独立表
 //   实例 = 类落在某个聊天里的那条 wizard 记录; 名字 = `<类名>-<N>`, N 每类从 1 单调递增、永不复用
@@ -13,7 +13,7 @@ import { copyFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
-import { botOfKey, tagOfKey } from "../shared/session-label.js";
+import { tagOfKey } from "../shared/session-label.js";
 import { foldName, identityOf, MEMORY_MAX, pickName, type WizardRecord, type WizardStore } from "./wizard.js";
 
 /** 迁移前备份的后缀: `<wizardsFile>.pre-classes.bak`, 只在第一次写盘前复制一次。 */
@@ -36,9 +36,7 @@ export interface ClassRecord {
   /** 类 id: 迁移来的 = 原 identity (锚点 target 字符串); 新建的 = 首个实例的 target。
    *  保持「identity id 就是 target 字符串」这条不变量, 全仓的账本字符串因此一个都不用改。 */
   id: string;
-  /** 归哪个机器人 (target 的 ~bot 后缀, "" = 主机器人)。 */
-  bot: string;
-  /** 类名 (bot 内唯一, 不以 -数字 结尾, ≤ CLASS_NAME_MAX)。 */
+  /** 类名 (全机唯一, 不以 -数字 结尾, ≤ CLASS_NAME_MAX)。 */
   name: string;
   /** 人物设定的角色; 本阶段只有 "steward" 会被迁入。 */
   role: string;
@@ -56,9 +54,9 @@ export interface ClassStore {
   get: (id: string) => ClassRecord | undefined;
   /** 类名 (大小写不敏感, 与 wizard.ts 的 foldName 同一折叠)。 */
   byName: (name: string) => ClassRecord | undefined;
-  /** <bot, role, workspace> 唯一的类; workspace "" 不参与 (还不是一个可判定的地址)。 */
-  byKey: (bot: string, role: string, workspace: string) => ClassRecord | undefined;
-  /** 撞 id / 撞名 / 撞 <bot, role, workspace> 都抛错 —— 静默覆盖会让两个人物共用一个地址。 */
+  /** <role, workspace> 唯一的类; workspace "" 不参与 (还不是一个可判定的地址)。 */
+  byKey: (role: string, workspace: string) => ClassRecord | undefined;
+  /** 撞 id / 撞名 / 撞 <role, workspace> 都抛错 —— 静默覆盖会让两个人物共用一个地址。 */
   create: (init: ClassInit) => ClassRecord;
   upsert: (id: string, patch: Partial<Omit<ClassRecord, "id">>) => ClassRecord;
   /** 领一个序号并落盘 (+1); 返回领到的那个。 */
@@ -122,10 +120,10 @@ export const loadClassStore = (filePath: string): ClassStore => {
     const k = foldName((name ?? "").trim());
     return k ? all().find((c) => foldName(c.name) === k) : undefined;
   };
-  const byKey = (bot: string, role: string, workspace: string): ClassRecord | undefined => {
+  const byKey = (role: string, workspace: string): ClassRecord | undefined => {
     const want = normPath(workspace);
     if (!want) return undefined;
-    return all().find((c) => c.bot === bot && c.role === role && c.workspace === want);
+    return all().find((c) => c.role === role && c.workspace === want);
   };
   const create = (init: ClassInit): ClassRecord => {
     const id = (init.id ?? "").trim();
@@ -135,7 +133,6 @@ export const loadClassStore = (filePath: string): ClassStore => {
     if (byName(init.name)) throw new Error(`class name taken: ${init.name}`);
     const rec = tidy({
       id,
-      bot: init.bot,
       name: init.name.trim(),
       role: init.role,
       workspace: init.workspace ?? "",
@@ -146,8 +143,8 @@ export const loadClassStore = (filePath: string): ClassStore => {
       createdAt: init.createdAt ?? Date.now(),
     });
     if (rec.workspace) {
-      const twin = byKey(rec.bot, rec.role, rec.workspace);
-      if (twin) throw new Error(`class key taken: ${rec.bot}/${rec.role}/${rec.workspace} = ${twin.id}`);
+      const twin = byKey(rec.role, rec.workspace);
+      if (twin) throw new Error(`class key taken: ${rec.role}/${rec.workspace} = ${twin.id}`);
     }
     return db.set(id, rec);
   };
@@ -161,8 +158,8 @@ export const loadClassStore = (filePath: string): ClassStore => {
       if (clash && clash.id !== id) throw new Error(`class name taken: ${next.name}`);
     }
     if (patch.workspace !== undefined && next.workspace && next.workspace !== base.workspace) {
-      const twin = byKey(next.bot, next.role, next.workspace);
-      if (twin && twin.id !== id) throw new Error(`class key taken: ${next.bot}/${next.role}/${next.workspace} = ${twin.id}`);
+      const twin = byKey(next.role, next.workspace);
+      if (twin && twin.id !== id) throw new Error(`class key taken: ${next.role}/${next.workspace} = ${twin.id}`);
     }
     return db.set(id, next);
   };
@@ -332,7 +329,7 @@ export const planClasses = (
     ids.forEach((id) => consumed.add(id));
   };
   /** 把一组 (合并时是多组) 记录规划成一个类 + 一串有序号实例。 */
-  const planGroup = (ids: readonly string[], classId: string, name: string, first?: string, bot = botOfKey(classId)): void => {
+  const planGroup = (ids: readonly string[], classId: string, name: string, first?: string): void => {
     const kin = ids.flatMap((id) => groups.get(id) ?? []);
     if (!kin.length) return;
     const label = `${classId} (${name || "<无名>"})`;
@@ -342,10 +339,10 @@ export const planClasses = (
     const anchor = kin.find((w) => w.target === firstKey) ?? anchorIn(groups.get(classId) ?? kin, classId)!;
     const workspace = normPath(anchor.workspace) || normPath(cwdOf(anchor.target));
     const twin = workspace
-      ? [...existingClasses, ...pending].find((c) => c.bot === bot && c.role === "steward" && c.workspace === workspace)
+      ? [...existingClasses, ...pending].find((c) => c.role === "steward" && c.workspace === workspace)
       : undefined;
     if (twin) {
-      conflicts.push(`skip: ${label} — 与 ${twin.id} 同占 ${bot || "主"}/${workspace}, 两边的旧形态都保留, 待人确认是否合并`);
+      conflicts.push(`skip: ${label} — 与 ${twin.id} 同占 ${workspace}, 两边的旧形态都保留, 待人确认是否合并`);
       ids.forEach((id) => skipped.add(id));
       return;
     }
@@ -354,7 +351,6 @@ export const planClasses = (
     const instances = kin.slice().sort((a, b) => Number(a.target !== firstKey) - Number(b.target !== firstKey) || byBirth(a, b));
     pending.push({
       id: classId,
-      bot,
       name,
       role: "steward",
       workspace,

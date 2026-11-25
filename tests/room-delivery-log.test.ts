@@ -89,7 +89,7 @@ hub.write(room, [
 
 // §4: /status 响应体并进 roomStatus 增量 (openDuties / watchdog), 不给就不出现。
 {
-  const fakeWs = { bots: () => [], client: { isConnected: true }, status: () => ({}) } as never;
+  const fakeWs = { client: { isConnected: true }, status: () => ({}) } as never;
   const cfg = { wrc: { defaultCli: "claude" }, bot: { botId: "b" }, defaultChat: "", daemon: { logFile: "/tmp/x.log", stateDir: "/tmp/wz-st" } } as never;
   const withRoom = statusBody(cfg, fakeWs, "/src", { get: () => ({ openDuties: 3, watchdog: { failStreak: 0, lastScanAt: 123 } }) });
   assert.equal(withRoom.openDuties, 3, "/status 带 openDuties");

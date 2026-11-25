@@ -7,7 +7,6 @@ import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
 import { errText } from "./last-response.js";
 import { planMedia, type MediaKind, type MediaSpec, type SendMedia } from "./media.js";
-import { connFor } from "./reach.js";
 
 // SDK 1.0.7 把每个回执的等待写死 5s (aibot-node-sdk #27), 大文件分片的回执常 6–8s 才到,
 // 被误判失败、重传又被服务端拒。上传期间放宽, 最后一个上传结束时还原 —— 期间别的发送
@@ -35,13 +34,12 @@ const chatIdOf = (target: string): string => baseOfKey(target).replace(/^(user|c
 /** 上传一份本地媒体, 换 media_id —— 频道帖子 / 评论的 image_list · inline_file_list 要它
  *  (那条路不能走 sendMediaMessage: 频道没有群 chatid)。校验与 sendMedia 共用 planMedia。 */
 export const uploadMediaId = async (
-  face: WSClient, target: string, spec: MediaSpec, log: Logger,
+  client: WSClient, target: string, spec: MediaSpec, log: Logger,
 ): Promise<{ ok: true; kind: MediaKind; name: string; bytes: number; mediaId: string } | { ok: false; reason: string }> => {
   const plan = planMedia(spec);
   if (!plan.ok) return plan;
   const chatId = chatIdOf(target);
   if (!chatId) return { ok: false, reason: `认不出收件聊天: ${target}` };
-  const client = connFor(face, chatId);
   if (!client.isConnected) return { ok: false, reason: "企微长连接没连上, 稍后再试" };
   const { kind, name, bytes } = plan;
   const restore = widenAck(client);

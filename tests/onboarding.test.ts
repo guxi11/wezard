@@ -181,11 +181,6 @@ try {
   kin.upsert("chat:wrW", { kind: "worker", name: "worker1", workspace: wsWork });
   assert.deepEqual(judgeOnboarding(kin, "chat:wrN5", classifyOnboardingInput(wsWork), (t) => (t === "chat:wrW" ? wsWork : "")),
     { kind: "bind-new", workspace: wsWork }, "只有管家 (steward / global-steward) 算这个目录的管家");
-  const wsOther = join(dir, "otherbot");
-  mkdirSync(wsOther);
-  kin.upsert("chat:wrOB~otherbot", { kind: "steward", name: "otherbotsteward", workspace: wsOther });
-  assert.deepEqual(judgeOnboarding(kin, "chat:wrN6", classifyOnboardingInput(wsOther), (t) => (t.endsWith("~otherbot") ? wsOther : "")),
-    { kind: "bind-new", workspace: wsOther }, "别的机器人的管家不算 (各自一套名册)");
 
   // ── 引导会话形态: slot、双证、不误杀人手开的 .guide ─────────────────
   const g = loadWizardStore(join(dir, "wizards4.json"));

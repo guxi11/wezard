@@ -17,11 +17,7 @@ const code = ts.transpileModule("let scheduledTaskInject;\n" + source.slice(star
 
 const fired: Array<{ target: string; text: string; ext: string }> = [];
 const ran: Array<{ target: string; text: string; taskId: string; quiet: boolean }> = [];
-let sameBotValue = true;
 const ctx = vm.createContext({
-  tasks: { get: () => ({ owner: "user:owner" }) },
-  ownerOf: () => "user:owner",
-  sameBot: () => sameBotValue,
   fireTaskTrigger: (target: string, text: string, ext: string) => { fired.push({ target, text, ext }); },
   runTaskInRunner: async (target: string, text: string, taskId: string, quiet: boolean) => { ran.push({ target, text, taskId, quiet }); return { ok: true }; },
 });
@@ -36,13 +32,6 @@ assert.deepEqual(ran, [], "non-fresh must not spawn a runner");
 // fresh: 交给 runner, quiet 原样带过去。
 assert.equal((await inject("user:owner", "hello2", { taskId: "t2", fresh: true, quiet: true })).ok, true);
 assert.deepEqual(ran, [{ target: "user:owner", text: "hello2", taskId: "t2", quiet: true }]);
-// 跨 bot 拒绝, 不落 trigger 也不起 runner。
-sameBotValue = false;
-const before = fired.length + ran.length;
-const cross = await inject("user:other", "x", { taskId: "t3", fresh: false });
-assert.equal(cross.ok, false);
-assert.equal(fired.length + ran.length, before);
-
 // deliverScheduled 本体 (模块级): uncertain 不回退也不重试。
 const options: ScheduledDispatchOptions = { taskId: "unknown", fresh: false, quiet: true, signal: new AbortController().signal,
   guard: () => true, submit: (f) => f() };

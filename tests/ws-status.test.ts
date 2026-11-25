@@ -4,7 +4,6 @@ import { WebSocketServer, WebSocket } from "ws";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { startWs } from "../daemon/ws.js";
-import { startMux } from "../daemon/bot-mux.js";
 import { startHttp } from "../daemon/http.js";
 import { daemonRequest } from "../shared/daemon-client.js";
 import { mkdtempSync } from "node:fs";
@@ -39,7 +38,7 @@ assert.equal(ws.status().authenticated, true);
 const sockDir = mkdtempSync(join(tmpdir(), "wz-wsst-"));
 cfg.daemon.socket = join(sockDir, "daemon.sock");
 cfg.daemon.port = 0;
-const http = startHttp({ cfg, ws: startMux(cfg, log, () => ws), log, sourcePath: "/test/config.jsonc" });
+const http = startHttp({ cfg, ws, log, sourcePath: "/test/config.jsonc" });
 await http.ready;
 try {
   const status = (await daemonRequest("GET", "/status", { socketPath: http.socketPath })).json as any;

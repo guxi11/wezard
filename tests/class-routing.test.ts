@@ -40,7 +40,7 @@ try {
   const clsFile = join(dir, "classes.json");
   {
     const classes = loadClassStore(clsFile);
-    classes.create({ id: "chat:boss", bot: "", name: "alpha", role: "steward", workspace: "/tmp/a" });
+    classes.create({ id: "chat:boss", name: "alpha", role: "steward", workspace: "/tmp/a" });
     writeFileSync(wizFile, rows([
       rec("chat:boss", { name: "alpha-1", ordinal: 1, bornAt: 1 }),
       rec("chat:B#alpha-2", { identity: "chat:boss", name: "alpha-2", ordinal: 2, bornAt: 2 }),
@@ -81,15 +81,13 @@ try {
 
   // ── 4. wizard_identity({to}) 的权限矩阵 ─────────────────────────────
   const me = store.get("chat:boss")!;
-  const kid = { ...rec("chat:K#kid"), parent: "chat:boss" } as never;
   const stranger = { ...rec("chat:S#s") } as never;
   const apprentice = { ...rec("chat:AP"), kind: "apprentice" } as never;
-  assert.equal(identityEditRefusal(undefined, { sameBot: true, editorIsParent: true, editorIsStewardInstance: false }), "目标不存在");
-  assert.match(identityEditRefusal(kid, { sameBot: false, editorIsParent: true, editorIsStewardInstance: true }), /跨机器人/);
-  assert.match(identityEditRefusal(apprentice, { sameBot: true, editorIsParent: true, editorIsStewardInstance: true }), /学徒/);
-  assert.match(identityEditRefusal(stranger, { sameBot: true, editorIsParent: false, editorIsStewardInstance: false }), /没有权限/);
-  assert.equal(identityEditRefusal(stranger, { sameBot: true, editorIsParent: true, editorIsStewardInstance: false }), "", "直属 parent");
-  assert.equal(identityEditRefusal(stranger, { sameBot: true, editorIsParent: false, editorIsStewardInstance: true }), "", "管家实例");
+  assert.equal(identityEditRefusal(undefined, { editorIsParent: true, editorIsStewardInstance: false }), "目标不存在");
+  assert.match(identityEditRefusal(apprentice, { editorIsParent: true, editorIsStewardInstance: true }), /学徒/);
+  assert.match(identityEditRefusal(stranger, { editorIsParent: false, editorIsStewardInstance: false }), /没有权限/);
+  assert.equal(identityEditRefusal(stranger, { editorIsParent: true, editorIsStewardInstance: false }), "", "直属 parent");
+  assert.equal(identityEditRefusal(stranger, { editorIsParent: false, editorIsStewardInstance: true }), "", "管家实例");
   assert.equal(me.ordinal, 1);
 
   // ── 5. 合并清单: 多组并一个类 + 幂等 + exclude ──────────────────────
@@ -163,7 +161,7 @@ try {
       rec("chat:M2", { name: "g2", workspace: "/tmp/m2", bornAt: 2 }),
     ]));
     const cs = loadClassStore(join(d, "classes.json"));
-    cs.create({ id: "chat:M2", bot: "", name: "g2", role: "steward", workspace: "/tmp/m2", nextOrdinal: 2 });
+    cs.create({ id: "chat:M2", name: "g2", role: "steward", workspace: "/tmp/m2", nextOrdinal: 2 });
     const st = loadWizardStore(f, () => undefined, cs);
     const pl = planClasses(st.all(), cs.all(), () => "", {
       merges: [{ into: "chat:M1", name: "gg", first: "chat:M1", members: ["chat:M1", "chat:M2"] }],
@@ -202,7 +200,7 @@ try {
       rec("chat:H2#x", { identity: "chat:H1", name: "heal", bornAt: 2 }),
     ]));
     const cs = loadClassStore(join(d, "classes.json"));
-    cs.create({ id: "chat:H1", bot: "", name: "heal", role: "steward", workspace: "/tmp/h", nextOrdinal: 2 });
+    cs.create({ id: "chat:H1", name: "heal", role: "steward", workspace: "/tmp/h", nextOrdinal: 2 });
     const st = loadWizardStore(f, () => undefined, cs);
     st.upsert("chat:H1", { name: "heal-1", ordinal: 1 }); // 模拟 create 成功、renames 中途崩
     const m = migrateClasses(st, cs, f);
@@ -222,7 +220,7 @@ try {
       rec("chat:R2#alpha-2", { identity: "chat:R1", name: "alpha-2", ordinal: 2, bornAt: 2 }),
     ]));
     const cs = loadClassStore(join(d, "classes.json"));
-    cs.create({ id: "chat:R1", bot: "", name: "alpha", role: "steward", workspace: "/tmp/r", nextOrdinal: 3 });
+    cs.create({ id: "chat:R1", name: "alpha", role: "steward", workspace: "/tmp/r", nextOrdinal: 3 });
     const st = loadWizardStore(wf, () => undefined, cs);
     assert.equal(st.rename("chat:R1", "beta"), "beta-1", "返回的是实例名");
     assert.equal(cs.get("chat:R1")!.name, "beta", "类行是新类名");

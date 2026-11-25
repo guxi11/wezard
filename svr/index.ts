@@ -31,7 +31,6 @@ import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadFacts, saveFacts } from "./facts-store.js";
 import { loadConfig } from "../shared/config.js";
-import { bindMultiBot } from "../shared/session-label.js";
 import { roomsDirOf } from "../shared/room.js";
 import { canonicalDir } from "../shared/instance-id.js";
 import { DEFAULT_PORT_SPAN, EXIT_CONFIG, listenWithFallback, portsFileOf, writePorts } from "../shared/ports.js";
@@ -63,8 +62,6 @@ const buildDefaults = (): Args => {
   };
   try {
     const { config } = loadConfig();
-    // 多机器人隔离 (内部会话不归任何机器人): 与 daemon 同一份配置才对得上。
-    bindMultiBot(config.bots.length > 0);
     const s = config.svr;
     return {
       host: s.host || fallback.host,

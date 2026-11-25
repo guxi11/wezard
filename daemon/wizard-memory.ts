@@ -18,7 +18,6 @@
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { expandHome } from "../shared/paths.js";
-import { botOfKey } from "../shared/session-label.js";
 
 export type MemoryScope = "chat" | "workspace";
 
@@ -31,18 +30,12 @@ export const memoryRoot = (stateDir: string): string => join(dirname(expandHome(
 
 const scopeDir = (scope: MemoryScope): string => (scope === "chat" ? "chats" : "workspaces");
 
-// 多机器人: 同一个 cwd 下两个机器人的 wizard 不共享工作区记忆 —— 副机器人那份文件名挂 `@<bot>`。
-// `@` 不会出现在 fileKey 的输出里 (它被换成 `_`), 所以撞不上哪个真实目录; 主机器人 (bot "") 原样,
-// 既有文件一个字不变。群记忆不需要: chat 的 key 是 base, 本身就带着 `~<bot>`。
-const fileOf = (key: string, bot: string): string => `${fileKey(key)}${bot ? `@${bot}` : ""}`;
-
-/** `bot` 只对 workspace 有意义 (见 fileOf); 调用方按 botOfKey(wizard) 给。 */
-export const memoryPath = (stateDir: string, scope: MemoryScope, key: string, bot = ""): string =>
-  join(memoryRoot(stateDir), scopeDir(scope), `${fileOf(key, scope === "workspace" ? bot : "")}.md`);
+export const memoryPath = (stateDir: string, scope: MemoryScope, key: string): string =>
+  join(memoryRoot(stateDir), scopeDir(scope), `${fileKey(key)}.md`);
 
 /** 提议收件箱: 与 md 同名、同子目录, 整理者据此把一份收件箱对回它的 md。 */
-export const inboxPath = (stateDir: string, scope: MemoryScope, key: string, bot = ""): string =>
-  join(memoryRoot(stateDir), "inbox", scopeDir(scope), `${fileOf(key, scope === "workspace" ? bot : "")}.jsonl`);
+export const inboxPath = (stateDir: string, scope: MemoryScope, key: string): string =>
+  join(memoryRoot(stateDir), "inbox", scopeDir(scope), `${fileKey(key)}.jsonl`);
 
 export interface MemoryProposal {
   at: number;
@@ -91,7 +84,7 @@ export const readMemory = (path: string): string => {
 /** 一个 wizard 读哪两份共享记忆; 没有工作区就只有 chat 那份。工作区那份按 base 的机器人分。 */
 export const mdsOf = (stateDir: string, base: string, cwd: string): { scope: MemoryScope; md: string }[] => [
   { scope: "chat", md: memoryPath(stateDir, "chat", base) },
-  ...(cwd ? [{ scope: "workspace" as const, md: memoryPath(stateDir, "workspace", cwd, botOfKey(base)) }] : []),
+  ...(cwd ? [{ scope: "workspace" as const, md: memoryPath(stateDir, "workspace", cwd) }] : []),
 ];
 
 /** 工作区收件箱 (含已认领的) 里提议者留下的 cwd —— cwdOfMd 的候选来源之一。读不到就是空。 */
@@ -108,8 +101,8 @@ export const proposedCwds = (stateDir: string): string[] => {
 };
 
 /** 一份工作区 md 对应的 cwd: 在已知的那些 cwd × 机器人里找正向算出来正好是它的; 不是工作区 md 就 undefined。 */
-export const cwdOfMd = (stateDir: string, md: string, cwds: readonly string[], bots: readonly string[] = [""]): string | undefined =>
-  cwds.find((c) => bots.some((b) => memoryPath(stateDir, "workspace", c, b) === md));
+export const cwdOfMd = (stateDir: string, md: string, cwds: readonly string[]): string | undefined =>
+  cwds.find((c) => memoryPath(stateDir, "workspace", c) === md);
 
 // ── 情景记忆 ─────────────────────────────────────────────────────────
 // 交接简报按名字留档 (`memory/episodes/<name>.jsonl`, 只追加): 名字是 wizard 的身份,

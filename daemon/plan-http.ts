@@ -1,6 +1,5 @@
 import type { IncomingMessage } from "node:http";
 import { PlanInputSchema, PlanUpdateSchema, type PlanOrigin } from "../shared/plan.js";
-import { sameBot } from "../shared/session-label.js";
 import { ZodError } from "zod";
 import type { HttpServer } from "./http.js";
 import { json } from "./http.js";
@@ -46,7 +45,7 @@ export const registerPlanRoutes = (http: HttpServer, options: {
       if (Object.keys(input).some((key) => key !== "planId") || typeof input.planId !== "string" || !input.planId.trim())
         throw new Error("planId required; unknown fields are not allowed");
       const plan = options.store.get(input.planId);
-      if (!plan || !sameBot(self, plan.owner)) { json(res, 404, { ok: false, reason: "plan not found" }); return; }
+      if (!plan) { json(res, 404, { ok: false, reason: "plan not found" }); return; }
       json(res, 200, { ok: true, plan });
     } catch (error) { errorResponse(res, error); }
   });
@@ -59,7 +58,7 @@ export const registerPlanRoutes = (http: HttpServer, options: {
       if (Object.keys(input).some((key) => key !== "name") || (input.name !== undefined && typeof input.name !== "string"))
         throw new Error("only the optional name field is allowed");
       const owner = input.name ? options.resolveOwner(input.name) : self;
-      if (!owner || !sameBot(self, owner)) { json(res, 404, { ok: false, reason: `unknown wizard '${String(input.name)}'` }); return; }
+      if (!owner) { json(res, 404, { ok: false, reason: `unknown wizard '${String(input.name)}'` }); return; }
       json(res, 200, { ok: true, plans: options.store.list(owner) });
     } catch (error) { errorResponse(res, error); }
   });

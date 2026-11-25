@@ -10,7 +10,7 @@
 // 「boot 时把存量聊天的 untagged wizard 写进运行时绑定」不另做快照: untagged 记录本身就是
 // 事实之源, 每次现读 (stewardIdentityOf 的回落分支) —— 快照反而会在 respawn / forget 之后漂移。
 import type { Config } from "../shared/config.js";
-import { baseOfKey, botOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { baseOfKey, keyOf, tagOfKey, uniqueTag } from "../shared/session-label.js";
 import { instanceName, normPath } from "./classes.js";
 import { anchorOf, identityFieldsOf, identityOf, openInstance, type WizardKind, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf } from "./channel-posts.js";
@@ -38,9 +38,9 @@ export const stewardIdentityOf = (cfg: Config, store: WizardStore | undefined, b
     // 绑定存的是**类名** (人 2026-11-23) —— 类名不在 wizard 名册里 (名册里是 <类名>-<序号> 的实例),
     // 先问类表, 再回落到普通身份名。
     const cls = store?.classes?.byName(name);
-    if (cls && cls.bot === botOfKey(base)) return cls.id;
+    if (cls) return cls.id;
     const rec = store?.byName(name);
-    if (rec && sameBot(base, rec.target)) return identityOf(rec);
+    if (rec) return identityOf(rec);
   }
   const own = store?.get(base);
   return own ? identityOf(own) : undefined;
@@ -61,14 +61,14 @@ export const stewardsAt = (
 ): WizardRecord[] => {
   if (!store) return [];
   const want = normPath(workspace);
-  // 类世界先问类表: <bot, role, workspace> 唯一的那条类记录就是判据 (人 2026-11-18)。
+  // 类世界先问类表: <role, workspace> 唯一的那条类记录就是判据 (人 2026-11-18)。
   // 命中就回它的锚点实例 —— 调用方要的是「这个目录上的管家是谁」。
-  const cls = want ? store.classes?.byKey(botOfKey(base), "steward", want) : undefined;
+  const cls = want ? store.classes?.byKey("steward", want) : undefined;
   const listed = cls ? anchorOf(store, cls.id) : undefined;
   if (listed) return [listed];
   const anchors = [...new Set(store.all().map((w) => identityOf(w)))]
     .map((id) => anchorOf(store, id))
-    .filter((a): a is WizardRecord => !!a && !!a.name && !!a.kind && STEWARD_KINDS.includes(a.kind) && sameBot(base, a.target))
+    .filter((a): a is WizardRecord => !!a && !!a.name && !!a.kind && STEWARD_KINDS.includes(a.kind))
     .sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
   const explicit = anchors.filter((a) => normPath(a.workspace ?? "") === want);
   const inferred = anchors.filter((a) => !(a.workspace ?? "").trim() && !!normPath(cwdOf(a.target)) && normPath(cwdOf(a.target)) === want);
@@ -166,13 +166,13 @@ export const stewardRoute = (
     // 绑的是类名 (人 2026-11-23): 类名不在 wizard 名册里, 先问类表 —— 本 room 没有化身时
     // open() 给的是 fresh 描述子 (classId), 调用方领号新开, 不会拉别的 room 的实例。
     const cls = store.classes?.byName(bound);
-    if (cls && cls.bot === botOfKey(base)) return open(cls.id);
+    if (cls) return open(cls.id);
     const rec = store.byName(bound);
-    if (rec && sameBot(base, rec.target)) return open(identityOf(rec));
+    if (rec) return open(identityOf(rec));
   }
   if (store.get(base)) return { target: base };
   const globalSteward = store.all()
-    .filter((w) => w.kind === "global-steward" && w.name && sameBot(base, w.target))
+    .filter((w) => w.kind === "global-steward" && w.name)
     .slice()
     .sort((a, b) => Number(a.target !== identityOf(a)) - Number(b.target !== identityOf(b)) || a.bornAt - b.bornAt)[0];
   if (globalSteward) return open(identityOf(globalSteward));

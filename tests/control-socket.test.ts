@@ -136,7 +136,7 @@ const mkLog = (): any => {
     l[level] = (obj: unknown, msg?: string) => logs.push({ level, msg: msg ?? String(obj), obj });
   return l;
 };
-const ws: any = { client: { isConnected: true }, bots: () => [], status: () => ({}), reconnect: () => undefined, shutdown: async () => undefined };
+const ws: any = { client: { isConnected: true }, status: () => ({}), reconnect: () => undefined, shutdown: async () => undefined };
 const mkCfg = (name: string, port: number, extra: Record<string, unknown> = {}) =>
   ConfigSchema.parse({ bot: { botId: "t", secret: "t" }, daemon: { socket: join(root, name, "daemon.sock"), stateDir: join(root, name, "st"), host: "127.0.0.1", port, ...extra } });
 

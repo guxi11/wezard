@@ -54,8 +54,6 @@ assert.match((bind({ source: ROOM_R }) as { reason: string }).reason, /主源/);
 // ④ 源类型: 单聊 / 频道自己都不行
 assert.match((bind({ source: "user:U1" }) as { reason: string }).reason, /不能绑/);
 assert.match((bind({ source: CHAN }) as { reason: string }).reason, /不能绑/);
-// ① 跨 bot
-assert.match((bind({ source: SRC_POST + "~b2" }) as { reason: string }).reason, /跨机器人/);
 // ③ room 不存在 / 没有 host
 assert.equal((bind({ room: "chat:nope" }) as { status: number }).status, 404);
 const emptyS = chanRoom("chat:wrE", [], "wecom-group");
@@ -193,10 +191,9 @@ const sStrong = mk("chat:wrS", [W(uid(5))], [{ text: "账单迁移的 review 结
 const sText = mk("chat:wrT", [W(uid(6))], [{ text: "完全一样的正文 账单迁移的 review 结论", at: near }]);
 const sDead = mk("chat:wrD", [W(uid(7))]);
 const sNoHost = mk("chat:wrN", []);
-const sCross = mk("chat:wrB~b2", [W(uid(8))], [{ text: "别的机器人", at: near }]);
 const cand = (over: Partial<Parameters<typeof bindCandidates>[0]> = {}) => bindCandidates({
   cfg, source: GROUP, text: "账单迁移的 review 结论", asker: "u1",
-  states: [sStrong, sText, sDead, sNoHost, sCross], roomOfSource: () => undefined,
+  states: [sStrong, sText, sDead, sNoHost], roomOfSource: () => undefined,
   now: T0, simMin: 0.3, busyWindowMin: 60,
   hostInfoOf: (u) => (u === uid(7) ? { name: "x", responsibility: "账单迁移 / review" } : undefined),
   ...over,
@@ -209,7 +206,6 @@ const byRoom = new Map(rep.candidates.map((c) => [c.room, c]));
 assert.ok(byRoom.get("chat:wrT")!.evidence.some((e) => e.includes("正文相关")), "正文 trigram >= simMin 出证据");
 assert.ok(byRoom.get("chat:wrD")!.veto.some((e) => e.includes("死 room")), "死 room veto");
 assert.ok(byRoom.get("chat:wrN")!.veto.some((e) => e.includes("没有 host")), "没 host veto");
-assert.ok(byRoom.get("chat:wrB~b2")!.veto.some((e) => e.includes("跨机器人")), "跨 bot veto");
 // veto 的排在最后
 assert.equal(rep.candidates[rep.candidates.length - 1]!.veto.length > 0, true);
 // 源已绑别处 → blocked, 但仍给候选供人判断

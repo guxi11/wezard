@@ -22,7 +22,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
 import type { URL } from "node:url";
-import { baseOfKey, sameBot } from "./session-label.js";
+import { baseOfKey } from "./session-label.js";
 import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
@@ -105,32 +105,12 @@ const recentFacts = (f: WorldFacts, records: readonly DetailRecord[], now: numbe
   };
 };
 
-// 多机器人隔离: 一张票据只看得见与它 (票据 selfTarget) sameBot 的记录与名册。
-const ofBot = (self: string) => (key: string | undefined): boolean => !key || sameBot(self, key);
-const botFacts = (f: WorldFacts, self: string): WorldFacts => {
-  const mine = ofBot(self);
-  const keep = <V>(o: Readonly<Record<string, V>>): Record<string, V> => Object.fromEntries(Object.entries(o).filter(([k]) => mine(k)));
-  const uidTarget = new Map(f.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.target] as const));
-  return {
-    ...f,
-    wizards: f.wizards.filter((w) => mine(w.target)),
-    plans: f.plans.filter((p) => mine(p.owner)),
-    schedules: f.schedules.filter((x) => mine(x.owner || x.createdBy || x.target)),
-    chatNames: keep(f.chatNames),
-    ...(f.humanNames ? { humanNames: keep(f.humanNames) } : {}),
-    ...(f.weixin ? { weixin: f.weixin.filter((x) => mine(x.base)) } : {}),
-    ...(f.classes ? { classes: f.classes.filter((c) => mine(c.id)) } : {}),
-    // 绑定 room 的 id 就是聊天 base; dm / adhoc 的 id 是 uid —— 按成员是不是本 bot 的实例判。
-    ...(f.rooms ? { rooms: f.rooms.filter((r) => mine(r.id) || r.members.some((m) => m.who.kind === "wizard" && mine(uidTarget.get(m.who.id)))) } : {}),
-  };
-};
-const viewerOf = (t: Ticket): string => t.selfTarget;
 // 多 daemon 共 svr: 记录由转发它的 daemon 署名 (`src`), 票据只看同一来源的。没署名的 (daemon 本地
 // store、旧 daemon 推来的) 不分区, 维持原来的合并视图 —— 这是兼容, 不是放宽。
 const srcOf = (r: DetailRecord): string | undefined => (r as { src?: string }).src || undefined;
 const sameSrc = (src: string | undefined) => (r: DetailRecord): boolean => !src || !srcOf(r) || srcOf(r) === src;
-/** 这张票据看得见的那一条: 同机器人 + 同来源。 */
-const sees = (t: Ticket) => (r: DetailRecord): boolean => sameSrc(t.src)(r) && ofBot(viewerOf(t))((r as { target?: string }).target);
+/** 这张票据看得见的那一条: 同来源。 */
+const sees = (t: Ticket) => (r: DetailRecord): boolean => sameSrc(t.src)(r);
 const ticketRecords = (records: readonly DetailRecord[], t: Ticket): DetailRecord[] => records.filter(sees(t));
 
 /** 浏览器收 gzip 吗 (ServerResponse.req 就是这条请求)。远端 svr 的 room / world 回包 5~70KB, 资源 200KB+, 全文本, 压后 1/5 ~ 1/8。 */
@@ -313,7 +293,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       .then((f) => {
         const now = Date.now();
         const records = listRecent(t);
-        return withData(recentFacts(botFacts(roomsNow(withChatNameFallback(f), t), viewerOf(t)), records, now), records, now);
+        return withData(recentFacts(roomsNow(withChatNameFallback(f), t), records, now), records, now);
       })
       .catch(() => EMPTY_FACTS);
   const listRecent = (t: Ticket): DetailRecord[] => ticketRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), t);
