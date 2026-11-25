@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import {
   applyExtOp, checkQuota, deriveOutcome, emptyExtIndex, extAuthor, foldExtIndex, judgeAck, judgeCancel, judgeExtAuth,
-  localDayStart, nextLocalDayStart, parseExtIndex, type ExtPrincipal, type ExtRequest, type ExtSection,
+  localDayStart, nextLocalDayStart, parseExtIndex, overdueOwnerRoom, quotaAlertSys, receptionDenial, redactText, secretsInJson,
+  type ExtPrincipal, type ExtRequest, type ExtSection, type ReceptionAction,
 } from "../shared/external.js";
 import { DAEMON, dutyKey, foldRoom, whoKey, type MsgRow, type RoomOp, type Who } from "../shared/room.js";
 
@@ -130,6 +131,57 @@ const rec = (over: Partial<ExtRequest> = {}): ExtRequest =>
   assert.equal(judgeExtAuth(on, "CoC", "good", "").ok, false, "还没生成口令文件");
   const v = judgeExtAuth(on, "CoC", "good", "good");
   assert.equal(v.ok && v.principal.reception, "recv");
+}
+
+
+// ⑥ 第 2 步: redactText 各模式 / 禁用表 / 逾期落点 / 告警去重键
+{
+  const secret = "d4a1f0c2b3e49586a7c8d9e0f1a2b3c4";
+  const red = (t: string, extra: string[] = []) => redactText(t, [secret, ...extra]);
+  assert.equal(red("口令是 " + secret + " 别外传"), "口令是 *** 别外传", "已知口令全文替换");
+  assert.equal(red("短口令 xy 不算", ["xy"]), "短口令 xy 不算", "< 8 字符的已知串不动");
+  assert.equal(red("token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"), "token ***", "JWT");
+  assert.equal(red("key sk-proj-abcdefghijk123"), "key ***", "sk- 前缀");
+  assert.equal(red("gh ghp_abcdefghijklmnop1234"), "gh ***", "ghp_ 前缀");
+  assert.equal(red("hex 0123456789abcdef0123456789abcdef 结束"), "hex *** 结束", "≥32 位十六进制");
+  assert.equal(red("短 0123456789abcdef 留下"), "短 0123456789abcdef 留下", "16 位 hex 不动");
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nAAAA\n-----END RSA PRIVATE KEY-----";
+  assert.equal(red("前 " + pem + " 后"), "前 *** 后", "私钥块");
+  assert.equal(red("普通的话, 没有凭据"), "普通的话, 没有凭据", "无凭据原样");
+  assert.deepEqual(secretsInJson({ a: "longenough1", b: { c: ["short", "another-long-value"] }, d: 3 }), ["longenough1", "another-long-value"], "secrets.json 只取 ≥8 的字符串");
+}
+
+{
+  const isBound = (r: string) => r.startsWith("chat:") || r.startsWith("user:");
+  const act = (o: Partial<ReceptionAction> & { route: string }) => ({ selfName: "recv", ...o });
+  for (const route of ["POST /config/set", "POST /mirror/workspace", "POST /room/bind", "POST /room/unbind", "POST /room/fork", "POST /room/name", "POST /room/invite", "POST /tasks/schedule", "POST /tasks/cancel"])
+    assert.ok(receptionDenial(act({ route }), isBound), route + " 一律拒");
+  assert.ok(receptionDenial(act({ route: "POST /wizard/clone", inherit: true }), isBound), "clone_wizard 拒");
+  assert.equal(receptionDenial(act({ route: "POST /wizard/clone", inherit: false }), isBound), undefined, "spawn_wizard 放行");
+  assert.ok(receptionDenial(act({ route: "POST /wizard/stop", targetName: "worker-1" }), isBound), "停别人拒");
+  assert.equal(receptionDenial(act({ route: "POST /wizard/stop", targetName: "recv" }), isBound), undefined, "停自己放行");
+  assert.ok(receptionDenial(act({ route: "POST /wizard/identity", targetName: "worker-1" }), isBound), "改别人身份拒");
+  assert.equal(receptionDenial(act({ route: "POST /wizard/identity", targetName: "recv" }), isBound), undefined, "改自己放行");
+  assert.ok(receptionDenial(act({ route: "POST /room/leave", targetName: "worker-1" }), isBound), "移别人拒");
+  assert.equal(receptionDenial(act({ route: "POST /room/leave", targetName: "recv" }), isBound), undefined, "自己退出放行");
+  assert.ok(receptionDenial(act({ route: "POST /wizard/remember", scope: "chat" }), isBound), "remember chat 拒");
+  assert.ok(receptionDenial(act({ route: "POST /wizard/remember", scope: "workspace" }), isBound), "remember workspace 拒");
+  assert.equal(receptionDenial(act({ route: "POST /wizard/remember", scope: "self" }), isBound), undefined, "remember self 放行");
+  for (const route of ["POST /room/say", "POST /room/ask", "POST /room/reply", "POST /room/notify", "POST /room/file"]) {
+    assert.ok(receptionDenial(act({ route, rooms: ["chat:wrG"] }), isBound), route + " 进绑定 room 拒");
+    assert.equal(receptionDenial(act({ route, rooms: ["adhoc:1234abcd"] }), isBound), undefined, route + " 进 adhoc 放行");
+    assert.equal(receptionDenial(act({ route, rooms: [] }), isBound), undefined, route + " 目标不明时放行");
+  }
+  assert.equal(receptionDenial(act({ route: "POST /room/read" }), isBound), undefined, "读账本放行");
+  assert.equal(receptionDenial(act({ route: "POST /dispatch" }), isBound), undefined, "delegate 放行");
+  assert.ok(receptionDenial(act({ route: "POST /room/say", rooms: ["user:wx1"] }), isBound), "user: 也是绑定 room (与 isBoundRoom 同口径)");
+}
+
+{
+  assert.equal(overdueOwnerRoom("chat:wrMain", (r) => r === "chat:wrMain"), "chat:wrMain", "owner 是绑定 room → 发它");
+  assert.equal(overdueOwnerRoom("chat:wrMain", () => false), undefined, "owner 不是绑定 room → 不发");
+  assert.equal(overdueOwnerRoom("", () => true), undefined, "owner 空 → 不发");
+  assert.equal(quotaAlertSys("CoC", "day", "2026-11-25"), "ext-quota:CoC:day:2026-11-25");
 }
 
 process.stdout.write("external: ok\n");

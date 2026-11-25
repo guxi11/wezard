@@ -175,9 +175,10 @@ export const isWaiting = (s: ExtState): boolean => s === "open" || s === "need";
 // ── 额度 ────────────────────────────────────────────────────────────────
 
 export interface ExtQuota { perMinute: number; perDay: number; maxOpen: number }
+/** kind = 超的是哪一条 (告警文案与去重键要用)。 */
 export type ExtQuotaVerdict =
   | { ok: true }
-  | { ok: false; reason: string; retryAt: number };
+  | { ok: false; kind: "minute" | "day" | "open"; reason: string; retryAt: number };
 
 const pad2 = (n: number): string => String(n).padStart(2, "0");
 const clockOf = (t: number): string => {
@@ -208,16 +209,16 @@ export const checkQuota = (
   if (recent.length >= q.perMinute) {
     const oldest = Math.min(...recent.map((r) => r.at));
     const at = oldest + EXT_MINUTE_MS;
-    return { ok: false, retryAt: at, reason: "每分钟最多 " + q.perMinute + " 次新请求 (最近一分钟已有 " + recent.length + " 次), " + clockOf(at) + " 之后恢复" };
+    return { ok: false, kind: "minute", retryAt: at, reason: "每分钟最多 " + q.perMinute + " 次新请求 (最近一分钟已有 " + recent.length + " 次), " + clockOf(at) + " 之后恢复" };
   }
   const today = asks.filter((r) => r.at >= localDayStart(now));
   if (today.length >= q.perDay) {
     const at = nextLocalDayStart(now);
-    return { ok: false, retryAt: at, reason: "今天 (" + dayTextOf(now) + ") 最多 " + q.perDay + " 次新请求, 已用 " + today.length + " 次; " + dayTextOf(at) + " 00:00 恢复" };
+    return { ok: false, kind: "day", retryAt: at, reason: "今天 (" + dayTextOf(now) + ") 最多 " + q.perDay + " 次新请求, 已用 " + today.length + " 次; " + dayTextOf(at) + " 00:00 恢复" };
   }
   const waiting = asks.filter((r) => isWaiting(outcomeOf(r)));
   if (waiting.length >= q.maxOpen) {
-    return { ok: false, retryAt: 0, reason: "同时最多 " + q.maxOpen + " 件未结 (现在 " + waiting.length + " 件 open/need), 等接待 wizard 交代或撤回后恢复" };
+    return { ok: false, kind: "open", retryAt: 0, reason: "同时最多 " + q.maxOpen + " 件未结 (现在 " + waiting.length + " 件 open/need), 等接待 wizard 交代或撤回后恢复" };
   }
   return { ok: true };
 };
@@ -262,6 +263,105 @@ export const judgeCancel = (rec: ExtRequest | undefined, principal: string, stat
   if (state !== "open" && state !== "need") return { ok: false, reason: "这条已经是 " + state + ", 不用撤回" };
   return { ok: true };
 };
+
+
+// ── 外部接待 wizard 的禁用表 (第 2 步 §1) ────────────────────────────────
+// 判据是**身份**而不是轮次: 接待 wizard 只服务外部请求, 两者等价, 且身份判据跨得过下一轮。
+// 路由层拦 (CodeBuddy 的调用都包在 REPL 脚本里, 只看外层工具名拦不住)。纯判定, 拒绝的文案在这里。
+
+/** 无条件拒的路由 → 动作文案 (「外部接待 wizard X 不能<动作>, 需要就请 owner 做」)。 */
+export const RECEPTION_DENY: Readonly<Record<string, string>> = {
+  "POST /config/set": "改配置",
+  "POST /mirror/workspace": "换工作区",
+  "POST /room/bind": "把信息源绑进 room",
+  "POST /room/unbind": "解绑信息源",
+  "POST /room/fork": "另起帖子 room",
+  "POST /room/name": "给 room 改名 / 改公告",
+  "POST /room/invite": "邀请别人进 room",
+  "POST /tasks/schedule": "排定时任务",
+  "POST /tasks/cancel": "取消定时任务",
+  "POST /wizard/stop": "停别的 wizard",
+  "POST /wizard/identity": "改别人的身份",
+  "POST /wizard/clone": "克隆 wizard (会把上下文复制出去)",
+  "POST /room/leave": "把别人移出 room",
+};
+/** 可以动自己、不能动别人的几条 (targetName 缺省 / 等于自己 → 放行)。 */
+const SELF_ONLY: ReadonlySet<string> = new Set(["POST /wizard/stop", "POST /wizard/identity", "POST /room/leave"]);
+/** 发话类路由: 目标 room 是绑定 room 就拒。 */
+export const SPEAK_ROUTES: ReadonlySet<string> = new Set([
+  "POST /room/say", "POST /room/ask", "POST /room/reply", "POST /room/notify", "POST /room/file",
+]);
+
+export interface ReceptionAction {
+  route: string;
+  /** 接待 wizard 自己的实例名 (文案 + 「动自己」判定)。 */
+  selfName: string;
+  /** 发话类路由已解析出来的目标 room。 */
+  rooms?: readonly string[];
+  /** 动到的那个人 / wizard 的名字。 */
+  targetName?: string;
+  /** wizard_remember 的作用域。 */
+  scope?: string;
+  /** /wizard/clone 的 inherit: true = clone_wizard (拒), false = spawn_wizard (放行)。 */
+  inherit?: boolean;
+}
+
+/** undefined = 放行; 否则是 403 的原因 (直接回给调用方)。 */
+export const receptionDenial = (a: ReceptionAction, isBound: (room: string) => boolean): string | undefined => {
+  const deny = (what: string): string =>
+    "外部接待 wizard " + a.selfName + " 不能" + what + ", 需要就请 owner 做";
+  const selfOnly = SELF_ONLY.has(a.route) && (!a.targetName || a.targetName === a.selfName);
+  // spawn_wizard 与 clone_wizard 共用 /wizard/clone: 只有 inherit 的才拒 (子 wizard 不继承限制, 有意)。
+  const spawn = a.route === "POST /wizard/clone" && a.inherit === false;
+  const what = RECEPTION_DENY[a.route];
+  if (what && !selfOnly && !spawn) return deny(what);
+  if (a.route === "POST /wizard/remember" && (a.scope === "chat" || a.scope === "workspace"))
+    return deny("写 " + a.scope + " 作用域的记忆");
+  if (SPEAK_ROUTES.has(a.route)) {
+    const bound = (a.rooms ?? []).filter(isBound);
+    if (bound.length) return deny("往绑定 room 发话 (" + bound.join(", ") + ")");
+  }
+  return undefined;
+};
+
+// ── 答复脱敏 (第 2 步 §3) ────────────────────────────────────────────────
+// 只作用在 /external 出口 (ask / wait / inbox 的 answer), 账本原样不动。
+
+export const REDACTED = "***";
+
+/** 抹掉已知口令原文 + 常见凭据形状。secrets 里 < 8 字符的不替换 (太短会毁正文)。 */
+export const redactText = (text: string, secrets: readonly string[]): string => {
+  if (!text) return text;
+  let out = text;
+  for (const s of secrets) if (s && s.length >= 8 && out.includes(s)) out = out.split(s).join(REDACTED);
+  out = out.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED); // JWT
+  out = out.replace(/\b(?:sk-|ghp_)[A-Za-z0-9_-]{8,}/g, REDACTED);
+  out = out.replace(/\b[0-9a-fA-F]{32,}\b/g, REDACTED); // 长 hex (token / 私钥指纹)
+  out = out.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REDACTED);
+  return out;
+};
+
+/** secrets.json 里所有 ≥8 字符的字符串值 (口令集合的一部分; 由调用方读盘后传进来)。 */
+export const secretsInJson = (value: unknown): string[] => {
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") { if (v.length >= 8) out.push(v); return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v && typeof v === "object") Object.values(v as Record<string, unknown>).forEach(walk);
+  };
+  walk(value);
+  return out;
+};
+
+// ── 逾期 / 告警的落点 (第 2 步 §4 / §5) ──────────────────────────────────
+
+/** 逾期升级行的落点: owner 现在是**归属 room id**; 不是绑定 room (或空) → undefined (只记账本 + warn)。 */
+export const overdueOwnerRoom = (owner: string, isBound: (room: string) => boolean): string | undefined =>
+  owner && isBound(owner) ? owner : undefined;
+
+/** 额度告警去重键 (账本行的 sys 键): 每个调用方每天每种额度最多一次。 */
+export const quotaAlertSys = (principal: string, kind: "minute" | "day" | "open", day: string): string =>
+  "ext-quota:" + principal + ":" + kind + ":" + day;
 
 // ── 落行文本 ────────────────────────────────────────────────────────────
 
