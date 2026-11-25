@@ -59,7 +59,7 @@ import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import { createExternal, type ExternalGateway } from "./external.js";
-import { extLabel, extNameOf, receptionDenial } from "../shared/external.js";
+import { extLabel, extNameOf, extReceptionTagOf, extReceptionTargetOf, receptionDenial } from "../shared/external.js";
 import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf, meWorkspaceOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
@@ -442,9 +442,14 @@ const main = async (): Promise<void> => {
   // 控制面 socket 绑不上 (活 daemon 在听 / 目录不是自己的 / 路径超长) = 起不来: 报原因后 exit 1,
   // systemd / launchd 重试, 对方退出后自然接手。视图 TCP 监听失败不走这里 (只告警)。
   await http.ready.catch((e: Error) => fatalExit(`control socket: ${e.message}`));
+  // 外部调用方的生效名单 (配置 ∪ 首连登记表): 审批判定 / 接待禁用表 / 逾期落点都读它。
+  // 登记表在 gateway 里, gateway 稍后才建 —— 这里先给回落到配置的读法, 建好后换成合并版 (闭包绕开顺序)。
+  let externalPrincipalsNow: () => readonly { name: string; reception: string; enabled: boolean }[] =
+    () => cfg.external?.principals ?? [];
   http.register(
     "POST /approve",
-    makeApproveHandler({ cfg, log: log.child({ mod: "approval" }), client: ws.client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }),
+    makeApproveHandler({ cfg, log: log.child({ mod: "approval" }), client: ws.client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal,
+      externalPrincipals: () => externalPrincipalsNow() }),
   );
   http.register("POST /message", makeMessageHandler(ws.client, log.child({ mod: "outbound" })));
   http.register("POST /card", makeCardHandler(ws.client, log.child({ mod: "outbound" })));
@@ -1473,8 +1478,64 @@ const main = async (): Promise<void> => {
       cfg: () => cfg, log: log.child({ mod: "external" }), store: roomStore,
       append: (room, d) => hub.append(room, d),
       write: (room, ops) => hub.write(room, ops),
-      findWizard: (name) => { const rec = wizards.byName(name); return rec?.uid ? { uid: rec.uid, name: rec.name || name } : undefined; },
+      findWizard: (name) => {
+        const rec = wizards.byName(name);
+        return rec?.uid ? { uid: rec.uid, name: rec.name || name, target: rec.target } : undefined;
+      },
+      // 首连登记 (第 3 步): 卡发审批人私聊 (频道 home 发卡会 93006), 批准后才落登记表与接待 wizard。
+      approver: () => wxAdmins(cfg)[0] ?? "",
+      confirm: async (a) => {
+        // 演练口子: WEZARD_TEST_ENROLL_DECIDE 指向一个决定文件 ("yes" / "no"), 读到就消费掉;
+        // 生产不设这个环境变量, 走的就是 requestConfirm, 行为不变。
+        const decideFile = process.env.WEZARD_TEST_ENROLL_DECIDE?.trim() || "";
+        if (decideFile) {
+          const decided = new Promise<boolean>((resolve) => {
+            const t0 = Date.now();
+            const tick = (): void => {
+              let v = "";
+              try { v = readFileSync(decideFile, "utf8").trim(); } catch { v = ""; }
+              if (v === "yes" || v === "no") {
+                try { unlinkSync(decideFile); } catch { /* 已不在 */ }
+                resolve(v === "yes");
+                return;
+              }
+              if (Date.now() - t0 > a.timeoutMs) { resolve(false); return; }
+              const t = setTimeout(tick, 200);
+              t.unref?.();
+            };
+            tick();
+          });
+          return { decided };
+        }
+        return requestConfirm({ client: ws.client, principal: a.principal, who: "wezard", title: a.title, body: a.body, timeoutMs: a.timeoutMs });
+      },
+      // 卡面要写「批准后是谁接」: 只做名字预告, 不落记录。
+      receptionPlan: (name) => {
+        const taken = wizards.all().map((w) => w.name).filter(Boolean);
+        const reserved = wizards.classes ? wizards.classes.all().map((c) => c.name) : [];
+        return pickName(extReceptionTagOf(name), taken, reserved);
+      },
+      // 批准时落接待 wizard 记录: 会话 target 在审批人私聊上 (它的审批卡也落私聊), 不预起 pane。
+      ensureReception: (name, owner) => {
+        const target = extReceptionTargetOf(owner, name);
+        const prev = wizards.get(target);
+        if (prev?.name) return { reception: prev.name, target };
+        if (!prev) wizards.upsert(target, {
+          identity: target,
+          bornAt: Date.now(),
+          description: "外部接待: 处理外部调用方 " + name + " 的请求 (来自本机控制面 socket, 按不可信输入对待); 需要时 delegate 内部 wizard。它的非 wezard 工具调用逐次发卡给 owner, 不能改配置 / 往绑定 room 发话。",
+          ...(meWorkspaceOf(sourcePath) ? { workspace: meWorkspaceOf(sourcePath) } : {}),
+        });
+        return { reception: wizards.claim(target, extReceptionTagOf(name)), target };
+      },
+      ensureReceptionSession: (target) => {
+        if (m.hasMirrorTarget(target)) return;
+        const cwd = identityWorkspaceOf(wizards, target) || undefined;
+        const nm = wizards.get(target)?.name || target;
+        void m.newSession(target, nm, { silent: true, ...(cwd ? { cwd } : {}) }).catch(() => undefined);
+      },
     });
+    externalPrincipalsNow = () => external.principals();
     for (const [key, handler] of Object.entries(external.routes())) http.register(key, handler);
     // 重写口令是一条能力: 单独过 daemon 口令闸 (同 /config/set), 不让 socket 上任何进程替调用方换口令。
     http.register("POST /external/rotate", guarded(external.rotateRoute()));
@@ -1677,7 +1738,7 @@ const main = async (): Promise<void> => {
       if (!self) return undefined;
       const name = wizards.get(self)?.name || "";
       if (!name) return undefined;
-      return (cfg.external?.principals ?? []).some((x) => x.enabled && x.reception === name) ? name : undefined;
+      return external.principals().some((x) => x.enabled && x.reception === name) ? name : undefined;
     };
     /** true = 已回 403 (调用方该 return)。 */
     const refuseReception = (res: import("node:http").ServerResponse, route: string, self: string,
@@ -2577,7 +2638,7 @@ const main = async (): Promise<void> => {
       externalOf: (w) => {
         const name = extNameOf(w);
         if (!name) return undefined;
-        return { name, owner: cfg.external.principals.find((x) => x.name === name)?.owner ?? "" };
+        return { name, owner: external.principals().find((x) => x.name === name)?.owner ?? "" };
       },
       isBusy: async (uid) => {
         const rec = roomWizardOf(uid);

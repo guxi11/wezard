@@ -12,10 +12,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import {
-  applyExtOp, askText, cancelText, checkQuota, deriveOutcome, extAuthor, extIndexFileOf, externalHomeOf, externalTokenOf,
-  foldExtIndex, isWaiting, judgeAck, judgeCancel, judgeExtAuth, localDayKey, overdueOwnerRoom, parseExtIndex, quotaAlertSys,
-  redactText, roomTitle, secretsInJson, EXT_TEXT_MAX, EXT_WAIT_DEFAULT, EXT_WAIT_MAX,
-  type ExtIndex, type ExtIndexOp, type ExtOutcome, type ExtPrincipal, type ExtRequest,
+  applyExtOp, askText, cancelText, checkQuota, deriveOutcome, enrolledSysText, enrollCardText, extAuthor, extIndexFileOf,
+  extNameProblem, extRegistryFileOf, externalHomeOf, externalTokenOf, foldExtIndex, isWaiting, judgeAck, judgeCancel,
+  judgeEnroll, judgeExtAuth, localDayKey, mergedSection, overdueOwnerRoom, parseExtIndex, parseExtRegistry, quotaAlertSys,
+  redactText, roomTitle, secretsInJson, serializeExtRegistry,
+  EXT_DEFAULT_MAX_OPEN, EXT_DEFAULT_PER_DAY, EXT_DEFAULT_PER_MINUTE, EXT_ENROLL_CARD_MS, EXT_ENROLL_COOLDOWN_MS,
+  EXT_ENROLL_MAX_PENDING, EXT_TEXT_MAX, EXT_WAIT_DEFAULT, EXT_WAIT_MAX,
+  type ExtIndex, type ExtIndexOp, type ExtOutcome, type ExtPrincipal, type ExtRegistryEntry, type ExtRequest, type ExtSection,
 } from "../shared/external.js";
 import { isBoundRoom } from "../shared/room.js";
 import { DAEMON_TOKEN_FILE } from "../shared/daemon-token.js";
@@ -34,8 +37,18 @@ export interface ExternalPorts {
   append: (room: string, d: Draft) => Verdict;
   /** room-hub 的 write —— 非 msg op 与我们自己构造的 system 行走它。 */
   write: (room: string, ops: readonly RoomOp[]) => RoomState;
-  /** 接待 wizard 按实例名现查 (uid 是账本里的身份)。 */
-  findWizard: (name: string) => { uid: string; name: string } | undefined;
+  /** 接待 wizard 按实例名现查 (uid 是账本里的身份, target 用于冷启动)。 */
+  findWizard: (name: string) => { uid: string; name: string; target: string } | undefined;
+  /** 审批人 (wxAdmins(cfg)[0], 必是 user:<id>): 登记卡发给他, 新调用方的 owner 也是他。"" = 没有审批人。 */
+  approver: () => string;
+  /** 发一张确认卡并等它被点。生产 = approval.requestConfirm; 演练可注入 (仍只在这条注册路径上)。 */
+  confirm: (a: { principal: string; title: string; body: string; timeoutMs: number }) => Promise<{ decided: Promise<boolean> }>;
+  /** 接待 wizard 名字预告 (只读): 卡面要写「批准后是谁接」, 真正落记录在批准时。 */
+  receptionPlan: (name: string) => string;
+  /** 批准时落接待 wizard 记录 (只落记录, 不预起 pane), 返回落定的名字与会话 target。 */
+  ensureReception: (name: string, owner: string) => { reception: string; target: string } | undefined;
+  /** 接待 wizard 还没有活会话时起一个 (与 .me 的 ensureSession 同一条路: 泵贴不进没绑定的 pane)。 */
+  ensureReceptionSession?: (target: string) => void;
   now?: () => number;
 }
 
@@ -60,6 +73,33 @@ export const createExternal = (p: ExternalPorts) => {
   const now = (): number => p.now?.() ?? Date.now();
   const stateDir = (): string => p.cfg().daemon.stateDir;
   const log = p.log;
+
+  // ── 登记表 (第 3 步: 首连审批登记) ────────────────────────────────────
+  // 文件 = <stateDir>/external/principals.json (0600, 原子写)。生效名单 = 配置 ∪ 登记表, 同名以配置为准;
+  // 鉴权 / 口令 / 脱敏 / status / rotate / 逾期 / 审批一律走 principals(), 别处不再直读 cfg.external.principals。
+  const loadRegistry = (): ExtRegistryEntry[] => {
+    const f = extRegistryFileOf(stateDir());
+    let raw = "";
+    try { raw = readFileSync(f, "utf8"); } catch { return []; }
+    const { entries, badLines } = parseExtRegistry(raw);
+    if (badLines.length) log.warn({ file: f, lines: badLines }, "external: 登记表坏行已跳过");
+    return entries;
+  };
+  let registry = loadRegistry();
+  const saveRegistry = (): void => {
+    const f = extRegistryFileOf(stateDir());
+    mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+    const tmp = f + ".tmp";
+    writeFileSync(tmp, serializeExtRegistry(registry), { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, f);
+  };
+  const extCfg = (): ExtSection => p.cfg().external ?? { enabled: false, principals: [] };
+  const section = (): ExtSection => mergedSection(extCfg(), registry);
+  const principals = (): ExtPrincipal[] => [...section().principals];
+  // 待决的登记卡 (名字 → 发卡时刻) 与拒绝后的冷却 (名字 → 解禁时刻)。只在内存: 重启清零是刻意的。
+  const enrollPending = new Map<string, number>();
+  const enrollCooldown = new Map<string, number>();
 
   // ── 索引 ──────────────────────────────────────────────────────────────
   const loadIndex = (): ExtIndex => {
@@ -107,7 +147,7 @@ export const createExternal = (p: ExternalPorts) => {
   };
   /** boot 与配置热载后各跑一次: 新加的调用方在第一次调用之前就有口令文件可读。 */
   const syncTokens = (): void => {
-    for (const pr of p.cfg().external.principals) {
+    for (const pr of principals()) {
       try { ensureToken(pr.name); }
       catch (e) { log.warn({ principal: pr.name, err: (e as Error).message }, "external: 口令文件生成失败"); }
     }
@@ -145,7 +185,7 @@ export const createExternal = (p: ExternalPorts) => {
   // 口令集合按 mtime 缓存: 文件一变 (轮换 / 改 secrets) 下一次调用就重建, 不每次读盘。
   const secretFiles = (): string[] => [
     DAEMON_TOKEN_FILE, p.cfg().svr.tokenFile,
-    ...p.cfg().external.principals.map((x) => externalTokenOf(stateDir(), x.name)),
+    ...principals().map((x) => externalTokenOf(stateDir(), x.name)),
     SECRETS_PATH,
   ];
   let secretCache: { key: string; list: string[] } = { key: "", list: [] };
@@ -211,7 +251,7 @@ export const createExternal = (p: ExternalPorts) => {
   const auth = (req: IncomingMessage, a: Aud, reply: Reply): ExtPrincipal | undefined => {
     const name = headerOf(req, "x-wezard-ext").trim();
     a.principal = name || undefined;
-    const v = judgeExtAuth(p.cfg().external, name, headerOf(req, "x-wezard-ext-token"), name ? readToken(name) : "");
+    const v = judgeExtAuth(section(), name, headerOf(req, "x-wezard-ext-token"), name ? readToken(name) : "");
     if (!v.ok) { reply(403, { ok: false, reason: v.reason }); return undefined; }
     return v.principal;
   };
@@ -282,6 +322,9 @@ export const createExternal = (p: ExternalPorts) => {
     if (!index.requests.has(v.row.id))
       record({ op: "ask", at: now(), principal: pr.name, req: v.row.id, room, ...(thread ? { thread } : {}), ...(re ? { re } : {}) });
     const rec = index.requests.get(v.row.id)!;
+    // 接待 wizard 冷着就顺手起会话: 泵贴不进没有绑定的 pane (与 .me 的 ensureSession 同一条路)。
+    try { p.ensureReceptionSession?.(ws.target); }
+    catch (e) { log.warn({ reception: ws.name, err: (e as Error).message }, "external: 接待 wizard 冷启动失败 (行已落, 下次唤醒会重试)"); }
     const wait = clampSec(b.wait, 0);
     reply(200, wait > 0 ? await waitFor(rec, wait * 1000) : snapshot(rec));
   });
@@ -352,10 +395,84 @@ export const createExternal = (p: ExternalPorts) => {
     reply(200, { ok: true, req: rec.req, state: "canceled", woke: v.row.wake });
   });
 
+  /** 登记卡的落定 (批准 / 拒绝 / 超时): 后台跑; 失败只记日志, 不影响已经回给调用方的 pending。 */
+  const settleEnroll = async (name: string, owner: string, decide: () => Promise<boolean>): Promise<void> => {
+    let yes = false;
+    try { yes = await decide(); } catch (e) { log.warn({ principal: name, err: (e as Error).message }, "external: 登记卡等待失败"); }
+    if (!yes) {
+      enrollCooldown.set(name, now() + EXT_ENROLL_COOLDOWN_MS);
+      log.info({ principal: name, cooldownMs: EXT_ENROLL_COOLDOWN_MS }, "external: 登记被拒或超时, 冷却一小时");
+      return;
+    }
+    const made = p.ensureReception(name, owner);
+    if (!made) {
+      enrollCooldown.set(name, now() + EXT_ENROLL_COOLDOWN_MS);
+      log.warn({ principal: name, owner }, "external: 登记通过了但接待 wizard 落不下来");
+      return;
+    }
+    registry = [...registry.filter((x) => x.name !== name), {
+      name, reception: made.reception, owner, enabled: true,
+      perMinute: EXT_DEFAULT_PER_MINUTE, perDay: EXT_DEFAULT_PER_DAY, maxOpen: EXT_DEFAULT_MAX_OPEN,
+      approvedAt: now(), approvedBy: owner,
+    }];
+    try { saveRegistry(); } catch (e) { log.warn({ principal: name, err: (e as Error).message }, "external: 登记表写盘失败 (内存里已生效)"); }
+    try { ensureToken(name); } catch (e) { log.warn({ principal: name, err: (e as Error).message }, "external: 登记后生成口令失败"); }
+    // owner 私聊写一行 system; 那间房还没开就只记日志 —— 人刚点过卡, 少一行提醒不改变已登记的事实。
+    try {
+      const v = p.append(owner, { author: DAEMON, kind: "system", origin: "daemon", text: enrolledSysText(name, made.reception), sys: "ext-enroll:" + name });
+      if (!v.ok) log.info({ principal: name, owner, reason: v.reason }, "external: 登记通知没写进 owner room");
+    } catch (e) { log.warn({ principal: name, owner, err: (e as Error).message }, "external: 登记通知写入失败"); }
+    log.info({ principal: name, reception: made.reception, owner }, "external: 已登记外部调用方");
+  };
+
+  /** 首连审批登记 (第 3 步): 不要求口令 —— 登记本身就是「第一次连上来要人批」那一步。 */
+  const enroll = guard("POST /external/enroll", async (req, res, _url, a, reply) => {
+    const b = await bodyOf(req);
+    const name = typeof b.name === "string" ? b.name.trim() : "";
+    a.principal = name || undefined;
+    const bad = extNameProblem(name);
+    if (bad) { reply(400, { ok: false, state: "bad-name", reason: bad }); return; }
+    const v = judgeEnroll({
+      name, principals: principals(), pending: [...enrollPending.keys()],
+      cooldownUntil: enrollCooldown.get(name) ?? 0, now: now(), maxPending: EXT_ENROLL_MAX_PENDING,
+    });
+    if (v.state === "enrolled") { reply(200, { ok: true, state: "enrolled" }); return; }
+    if (v.state === "disabled") { reply(403, { ok: false, state: "disabled", reason: v.reason }); return; }
+    if (v.state === "pending") { reply(200, { ok: true, state: "pending" }); return; }
+    if (v.state === "cooldown") {
+      reply(429, { ok: false, state: "cooldown", reason: "刚被拒过, " + isoOf(v.retryAt) + " 之后才能再发登记卡", retryAt: isoOf(v.retryAt) });
+      return;
+    }
+    if (v.state === "cap") {
+      reply(429, { ok: false, state: "cap", reason: "本机同时待决的登记卡最多 " + EXT_ENROLL_MAX_PENDING + " 张, 等人点完再试" });
+      return;
+    }
+    const owner = p.approver();
+    if (!owner) { reply(503, { ok: false, reason: "没有审批人 (approval.approvers / defaultChat / allowFrom 里都没有 user:), 登记卡发不出去" }); return; }
+    const at = now();
+    enrollPending.set(name, at);
+    const reception = p.receptionPlan(name);
+    let confirmed: { decided: Promise<boolean> };
+    try {
+      confirmed = await p.confirm({
+        principal: owner, title: "外部 agent 首次连接待批准",
+        body: enrollCardText({ name, at, reception, owner, quota: {
+          perMinute: EXT_DEFAULT_PER_MINUTE, perDay: EXT_DEFAULT_PER_DAY, maxOpen: EXT_DEFAULT_MAX_OPEN,
+        } }),
+        timeoutMs: EXT_ENROLL_CARD_MS,
+      });
+    } catch (e) {
+      enrollPending.delete(name);
+      reply(503, { ok: false, reason: "登记卡发不出去 (" + (e as Error).message + "), 没登记" });
+      return;
+    }
+    reply(200, { ok: true, state: "pending" });
+    void settleEnroll(name, owner, () => confirmed.decided).finally(() => enrollPending.delete(name));
+  });
   /** GET /external/status (过 daemon 口令闸): 每个调用方的启用态 / 今日用量 / 未结 / 接待 wizard。
    *  接待 wizard 的今日 token 用量不在这里 —— usage.ts 按会话扫一周 transcript, 没有「按 wizard 现成取」的口子。 */
   const status = guard("GET /external/status", async (_req, _res, _url, _a, reply) => {
-    const s = p.cfg().external;
+    const s = section();
     const t = now();
     const day = localDayKey(t);
     const rows = s.principals.map((x) => {
@@ -373,7 +490,7 @@ export const createExternal = (p: ExternalPorts) => {
     const b = await bodyOf(req);
     const name = typeof b.name === "string" ? b.name.trim() : "";
     a.principal = name || undefined;
-    const pr = p.cfg().external.principals.find((x) => x.name === name);
+    const pr = principals().find((x) => x.name === name);
     if (!pr) { reply(404, { ok: false, reason: "没有这个调用方: " + (name || "<空>") }); return; }
     ensureToken(pr.name, true);
     reply(200, { ok: true, name: pr.name, tokenFile: externalTokenOf(stateDir(), pr.name) });
@@ -382,6 +499,7 @@ export const createExternal = (p: ExternalPorts) => {
   return {
     // rotate 重写的是调用方的凭据 = 一条能力, 不能只靠 socket 认人: 由 index.ts 套 daemon 口令闸后单独注册。
     routes: (): Record<string, Handler> => ({
+      "POST /external/enroll": enroll,
       "POST /external/ask": ask,
       "POST /external/wait": wait,
       "GET /external/inbox": inbox,
@@ -391,6 +509,8 @@ export const createExternal = (p: ExternalPorts) => {
     rotateRoute: (): Handler => rotate,
     statusRoute: (): Handler => status,
     syncTokens,
+    /** 生效名单 (配置 ∪ 首连登记表): daemon 里接待判定 / 逾期落点都读它。 */
+    principals,
     /** 诊断 / 测试: 当前索引快照。 */
     index: (): ExtIndex => index,
     isWaiting,

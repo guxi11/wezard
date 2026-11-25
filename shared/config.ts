@@ -392,7 +392,7 @@ const ExternalPrincipal = z.object({
   maxOpen: z.number().int().min(1).default(5).describe("同时未结 (open / need) 的请求上限 (超出 429)"),
 });
 const External = z.object({
-  enabled: z.boolean().default(false).describe("外部接入总开关: 关 = 所有 /external 路由 403 (口令文件与索引保留)"),
+  enabled: z.boolean().default(true).describe("外部接入总开关 (缺省开): 没登记的调用方只能触发登记卡, 所以缺省开不放权; 关 = 所有 /external 路由 403 (口令 / 索引 / 登记表保留)"),
   principals: z.array(ExternalPrincipal).default([]).describe("允许接入的外部 agent: 名字 / 接待 wizard / 额度"),
 }).superRefine((v, ctx) => {
   const names = v.principals.map((x) => x.name);
