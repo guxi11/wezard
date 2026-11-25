@@ -141,3 +141,49 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 - [x] 额度告警 + ext status
 - [x] 演练新增项 PASS, typecheck, room / approval 相关测试无新增红
 
+## 第 3 步实现任务: 首连审批登记 (人 2026-11-26 改口径, 执行者按此做, 以本文件为准)
+
+人原话 (wcd ea7cafaf.202): 「不用这样吧，可以在第一次 agent 连的时候发审批，不用配置到 ext 里」。即: **不预先写 external 配置**; 外部 agent 第一次连上来时发一张审批卡, 人点了就登记启用。注意: 放权卡发不进频道 (93006), 卡一律发到**人的私聊**。
+
+### 口径 (lead 定的缺省)
+
+- **总开关缺省开**: `external.enabled` 的 default 改成 `true`。没登记的调用方什么都做不了 (只能触发登记卡), 所以缺省开不放权; 人要整体关仍写 false。
+- **登记表不在配置里**: `<stateDir>/external/principals.json` (0600, 原子写), 每项 `{name, reception, owner, perMinute, perDay, maxOpen, enabled, approvedAt, approvedBy}`。生效名单 = 配置里的 `external.principals` ∪ 登记表, **同名以配置为准** (人仍可手写覆盖)。所有读 `cfg.external.principals` 的地方 (daemon/external.ts 鉴权 / 口令 / 脱敏口令集 / status / rotate / syncTokens、daemon/index.ts 的 receptionNameOf 与 overdue externalOf、daemon/approval.ts 的 receptionCallerOf、cli/ext.ts 的 resolveName) 改为读这个合并后的名单 —— 抽一个函数, 别各处拼。
+- **审批卡发给谁**: 与 `confirmBind` 同一个人 —— `wxAdmins(cfg)[0]` (approvers → defaultChat 的 user: → allowFrom 的 user:), 必是 `user:` 私聊; 取不到就 503 「没有审批人」。复用 `requestConfirm`。卡面写: 调用方名字、首次连接时间、来自 `wezard ext` (本机 socket)、批准后的接待 wizard 名 / 额度 / 告警落点, 以及一句「批准 = 它能向接待 wizard 提请求, 接待 wizard 的非 wezard 工具仍逐次发卡」。
+- **缺省值** (批准时写进登记表):
+  - `owner` = 审批人私聊 `user:<id>` (这是绑定 room, 逾期与额度告警发到人私聊)。
+  - 额度 = schema 缺省 (10/分, 50/天, 5 未结)。
+  - `reception` = daemon **自建一个专属接待 wizard**, 名字 `ext-<名字小写>` (撞名退 -N, 照 `ensureMeWizard` 的 `store.claim` 做法), 会话 target = `<审批人私聊 base>#ext-<名字小写>` (home 在人私聊 → 它的审批卡也落私聊, 不会撞 93006), 工作区 = wezard 配置根 (`meWorkspaceOf(sourcePath)`), description「外部接待: 处理外部调用方 <名字> 的请求, 需要时 delegate 内部 wizard」。只落记录, 不预起 pane。
+- **接待 wizard 冷启动**: ask 落行后, 接待没有活会话就顺手起 (与频道 .me 的 `ensureSession` 同一条路: `m.newSession(target, …, {silent:true, cwd})`), 否则泵贴不进。经 ExternalPorts 新增一个口子注入, external.ts 不直接碰 mirror。
+
+### 接口
+
+- `POST /external/enroll {name}` (socket, **不要求口令**): 
+  - name 形状同 schema (`^[\w.-]+$`, ≤32)。已在生效名单且启用 → 200 `{state:"enrolled"}` (幂等)。被禁用 → 403。
+  - 同名已有一张待决卡 → 200 `{state:"pending"}` 不再发卡。
+  - 被拒后冷却 1 小时 (内存记, 重启清零即可), 冷却中 → 429 带 retryAt。全机同时待决卡 ≤3, 超了 429。—— 防 socket 上任何进程刷卡。
+  - 否则发卡, 立即回 200 `{state:"pending"}`; 卡的 decided 在后台 settle: yes → 落登记表 + 建接待 wizard 记录 + 生成口令文件 + 往 owner 私聊写一行 system「已登记外部调用方 <名>, 接待 .<接待名>」; no / 超时 (`CONFIRM_TIMEOUT_MS`) → 记冷却 (超时不记冷却, 下次可再发)。
+  - 审计照 guard 打一行。
+- 其余路由不变。未登记 / 无口令的调用方打 ask 等 → 403 原因改为「还没登记: 先 wezard ext enroll (或直接 ask, CLI 会自动发登记)」。
+
+### CLI
+
+- 新子命令 `wezard ext enroll [--as <名字>] [--wait <秒≤60>]`: 打 /external/enroll; pending 时按 --wait 每 2 秒查一次 (再打 enroll 即可, 幂等) 直到 enrolled 或超时; 打印 `{state}`。
+- `ask / wait / inbox / ack / cancel`: 名字解析 = --as → `$WEZARD_EXT_NAME` → 生效名单里唯一启用的那个; **读不到口令文件且名字来自 --as / env 时**, 自动走一次 enroll (不等待), 输出 `{ok:false, state:"pending", reason:"已向本机主人发登记审批卡, 批准后再试"}` 退出码 3 (区别于 1 / 2)。
+- help 里加 enroll。
+
+### 演练与测试
+
+- 纯判定 (合并名单、enroll 判定: 形状 / 已登记 / 待决 / 冷却 / 待决上限) 进 shared/external.ts + tests/external.test.ts。
+- 演练 `scripts/external-rehearsal.sh` 加 ⑫: 不写 external 配置 (只保证 enabled 缺省开), `ext --as Neo ask` → 退出码 3 + 待决; 用测试口子模拟人点「确认」(看现有演练怎么模拟放权卡 / 没有就在 requestConfirm 外加一个仅测试环境生效的注入, 不许影响生产路径) → 登记表与口令文件出现、接待记录 `ext-neo` 在名册 → ask 落行在接待 room; 再测一次「拒绝」→ 冷却 429。原有 63 项继续 PASS (它们用配置名单, 合并后应不受影响)。
+- typecheck; external / external-reception / room-* / approval-mode / danger-* / steward-guard 无新红。
+- 文档: 本文件「配置与口令」「CLI」「CoC 侧调用约定」三节按新口径改写 (约定第 0 条: 首次用 `ext --as CoC enroll --wait 60`, 告诉用户去私聊点卡); CHANGELOG 由 lead 写。
+
+### 第 3 步进度 (执行者自维护)
+
+- [ ] 合并名单函数 + 各处改读 + enabled 缺省开
+- [ ] /external/enroll + 登记表 + 接待 wizard 自建 + 冷启动
+- [ ] CLI enroll + 自动登记
+- [ ] 单测 + 演练 ⑫ + 回归
+- [ ] 文档三节改写
+
