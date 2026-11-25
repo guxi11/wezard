@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createServer } from "node:net";
 import { WebSocketServer, WebSocket } from "ws";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { startWs } from "../daemon/ws.js";
 import { startMux } from "../daemon/bot-mux.js";
 import { startHttp } from "../daemon/http.js";
+import { daemonRequest } from "../shared/daemon-client.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const log = pino({ level: "silent" });
 const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -32,19 +35,19 @@ await ws.ready;
 assert.deepEqual(beforeAuth, { connected: true, authenticated: false }, "transport open does not mean authenticated");
 assert.equal(ws.status().phase, "authenticated");
 assert.equal(ws.status().authenticated, true);
-const reserve = createServer();
-await new Promise<void>((resolve) => reserve.listen(0, "127.0.0.1", resolve));
-const httpPort = (reserve.address() as { port: number }).port;
-await new Promise<void>((resolve) => reserve.close(() => resolve()));
-cfg.daemon.port = httpPort;
+// 控制面是 unix socket; 视图端口关掉 (port 0), 本测试不碰它。
+const sockDir = mkdtempSync(join(tmpdir(), "wz-wsst-"));
+cfg.daemon.socket = join(sockDir, "daemon.sock");
+cfg.daemon.port = 0;
 const http = startHttp({ cfg, ws: startMux(cfg, log, () => ws), log, sourcePath: "/test/config.jsonc" });
+await http.ready;
 try {
-  const status = await (await fetch(`http://127.0.0.1:${httpPort}/status`)).json() as any;
+  const status = (await daemonRequest("GET", "/status", { socketPath: http.socketPath })).json as any;
   assert.equal(status.backend, "codex");
   assert.equal(status.wsConnected, true);
   assert.equal(status.ws.authenticated, true);
   const ready = once(ws.client as any, "authenticated");
-  const reconnect = await fetch(`http://127.0.0.1:${httpPort}/reconnect`, { method: "POST" });
+  const reconnect = await daemonRequest("POST", "/reconnect", { socketPath: http.socketPath });
   assert.equal(reconnect.status, 200);
   await ready;
   assert.equal(connections, 2, "reconnect uses the existing daemon, not a second process");

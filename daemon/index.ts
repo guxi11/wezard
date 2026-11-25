@@ -426,6 +426,9 @@ const main = async (): Promise<void> => {
   // room 模型的 /status 增量 (修复单 §4): startHttp 在 room 模块之前起, 用可改写的 holder 接。
   const roomStatusRef = { get: (): Record<string, unknown> => ({}) };
   const http = startHttp({ cfg, ws, log, sourcePath, roomStatus: roomStatusRef });
+  // 控制面 socket 绑不上 (活 daemon 在听 / 目录不是自己的 / 路径超长) = 起不来: 报原因后 exit 1,
+  // systemd / launchd 重试, 对方退出后自然接手。视图 TCP 监听失败不走这里 (只告警)。
+  await http.ready.catch((e: Error) => fatalExit(`control socket: ${e.message}`));
   http.register(
     "POST /approve",
     makeApproveHandler({ cfg, log: log.child({ mod: "approval" }), client: ws.client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }),

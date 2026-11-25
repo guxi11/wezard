@@ -47,13 +47,18 @@ const uniqueBots = (c: { bot: { botId: string }; bots: BotEntry[] }, ctx: z.Refi
 };
 
 const Daemon = z.object({
-  host: knob(z.string().default("127.0.0.1").describe("守护进程 HTTP 监听地址"), { gate: "card" }),
-  port: knob(z.number().int().min(1).max(65535).default(17890).describe("守护进程 HTTP 监听端口"), { gate: "card" }),
-  // 一个 worker 进程 (daemon) 服务全部 pane 时, 每 pane 一个 stdio 子进程就是多余的一份
-  // 注册表与一份口令读取 (本机实测 42 个 pane = 42 个 node 子进程 ≈ 1.0GB RSS);
-  // http 形态让 agent CLI 直连 daemon 的 /mcp, 身份走请求头, 一个子进程都不起。
+  // 控制面是 unix socket (只挡得住别的 uid, TCP 回环挡不住); host/port 退成浏览器视图的只读监听。
+  socket: knob(z.string().default("").describe("守护进程控制面 unix socket 路径; 空 = <stateDir>/run/daemon.sock (路径须 ≤103 字节, 所在目录须是自己的)"), { gate: "card" }),
+  host: knob(z.string().default("127.0.0.1").describe("浏览器视图 (rolepage / 详情页) 只读监听地址"), { gate: "card" }),
+  port: knob(z.number().int().min(0).max(65535).default(17890).describe("浏览器视图 (rolepage / 详情页) 只读监听端口; 0 = 不开视图监听 (控制面不走它, 被占用也只告警)"), { gate: "card" }),
+  // 每个 pane 一个全量 MCP server 子进程是多余的一份注册表 (本机实测 RssAnon ≈ 33MB/pane);
+  // relay 只用 node 内建模块把 stdio 转成 daemon socket 上的 POST /mcp (≈ 7~9MB/pane),
+  // 身份走请求头, 口令不出本 uid。旧值 http (直连 TCP /mcp) 已随控制面迁走, 读成 relay。
   mcpTransport: knob(
-    z.enum(["stdio", "http"]).default("http").describe("agent CLI 接 wezard MCP 的方式: http=直连 daemon 的 POST /mcp, 不给每个 pane 起子进程 (默认; 只对认 type:\"http\" 的 claude / claude-internal / codebuddy 生效, 别的后端与 codex 自动回落 stdio), stdio=每 pane 一个子进程"),
+    z.preprocess(
+      (v) => (v === "http" ? "relay" : v),
+      z.enum(["relay", "stdio"]).default("relay").describe("agent CLI 接 wezard MCP 的方式: relay=每 pane 一个只用 node 内建模块的小进程, 把 stdio 转发到 daemon 的 unix socket (默认), stdio=每 pane 一个全量 mcp/server.js (排障用); 旧值 http 已废弃, 自动当 relay"),
+    ),
     { gate: "card" },
   ),
   stateDir: z.string().default("~/.wezard/state").describe("守护进程状态目录"),

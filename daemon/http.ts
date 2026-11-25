@@ -1,18 +1,26 @@
-// Local control HTTP — talks to hooks, slash commands, MCP server.
-// Bound to 127.0.0.1 by default (daemon.host). Loopback is not a permission boundary:
-// routes that write sensitive state — config, allowFrom claims, task files the daemon
-// will execute — and the MCP endpoint /mcp require the daemon token
-// (x-wezard-token, ~/.wezard/daemon-token, 0600). The rest is readable by anything
-// on the box that can reach the port.
+// Local control HTTP — talks to hooks, slash commands, MCP.
+// The control plane is a unix domain socket (daemon.socket, default
+// <stateDir>/run/daemon.sock, dir 0700 / socket 0600): the kernel keeps every other uid
+// out, which a loopback TCP port never did. Routes that write sensitive state — config,
+// allowFrom claims, task files the daemon will execute — and the MCP endpoint /mcp still
+// require the daemon token (x-wezard-token, ~/.wezard/daemon-token, 0600): the socket
+// stops other users, the token stops a model under the same uid from `curl --unix-socket`
+// around an approval card.
+// A browser cannot dial a unix socket, so an optional TCP listener (daemon.host/port)
+// stays — but it only mounts the read-only view routes (rolepage / detail / healthz);
+// everything else answers 410 there.
 // Endpoints intentionally tiny & sync-friendly.
 import { existsSync, readFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { URL, fileURLToPath } from "node:url";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
+import { CHAT_ROUTE_KEYS } from "../shared/chat-http.js";
+import { daemonSocketPath } from "../shared/daemon-addr.js";
 import { expandHome } from "../shared/paths.js";
 import type { BotMux } from "./bot-mux.js";
+import { bindControlSocket, unlinkIfOwned, stillOwns, type BoundSocket } from "./control-socket.js";
 import { drainForReload, listPending } from "./pending.js";
 
 interface Ctx {
@@ -74,6 +82,7 @@ export const statusBody = (
     pending: listPending().length,
     uptimeSec: Math.round(process.uptime()),
     sourcePath,
+    socket: daemonSocketPath(cfg),
     logFile: expandHome(cfg.daemon.logFile),
     // 多机器人才有; wsConnected / botId 仍是主机器人的, 单机器人的输出一字不变。
     ...(bots.length > 1 ? { bots } : {}),
@@ -114,14 +123,50 @@ export interface HttpServer {
   close: () => Promise<void>;
   /** Register additional routes after construction (e.g. /approve once approval module loads). */
   register: (key: string, handler: Handler) => void;
+  /** 控制面 socket 已绑好; 绑不上 (活 daemon 在听 / 目录不对 / 路径超长) 则 reject —— 调用方应报错退出。 */
+  ready: Promise<void>;
+  socketPath: string;
 }
+
+/** 浏览器视图能碰的路由: rolepage 一族 + 详情页 + 探活。其余一律不在 TCP 上服务。 */
+const VIEW_ROUTES: ReadonlySet<string> = new Set([...CHAT_ROUTE_KEYS, "GET /detail", "GET /healthz"]);
+
+const movedReason = (sock: string): string =>
+  `wezard 控制面已迁到 unix socket (${sock}); 这个会话起于旧版, 需要重开 (daemon 会在它空闲时自动回收, 下一句话 --resume 重起)`;
+
+/** JSON-RPC 版的同一句话: 旧 http MCP 客户端按 id 收到明确原因, 而不是静默超时 (通知没有 id → 202 空体)。 */
+const rpcMoved = (body: unknown, sock: string): unknown => {
+  const err = (id: unknown) => ({ jsonrpc: "2.0", id, error: { code: -32000, message: movedReason(sock) } });
+  const one = (m: unknown): unknown =>
+    m && typeof m === "object" && "id" in m ? err((m as { id: unknown }).id) : undefined;
+  return Array.isArray(body) ? body.map(one).filter((x) => x !== undefined) : one(body);
+};
+
+/** 视图端口上的非视图路由: 410; POST /mcp 回 JSON-RPC error (HTTP 200, 免得 MCP 客户端只报「传输失败」吞掉原因)。 */
+const refuseOnView = async (req: IncomingMessage, res: ServerResponse, key: string, sock: string): Promise<void> => {
+  if (key === "POST /mcp") {
+    const out = rpcMoved(await readBody(req), sock);
+    if (out === undefined || (Array.isArray(out) && out.length === 0)) { res.statusCode = 202; res.end(); return; }
+    json(res, 200, out);
+    return;
+  }
+  json(res, 410, { ok: false, reason: movedReason(sock) });
+};
 
 export const startHttp = (ctx: Ctx): HttpServer => {
   const dynamic = new Map<string, Handler>();
+  const socketPath = daemonSocketPath(ctx.cfg);
+  // 进程内 MCP (mcp/tools.ts 的 daemonPost 回打自己) 与 daemon 起的子进程都读它。
+  process.env.WEZARD_DAEMON_SOCK = socketPath;
 
-  const server = createServer(async (req, res) => {
+  /** viewOnly: TCP 视图监听 —— 只放行 VIEW_ROUTES, 其余 410。 */
+  const listener = (viewOnly: boolean) => async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const key = `${req.method ?? "GET"} ${url.pathname}`;
+    if (viewOnly && !VIEW_ROUTES.has(key)) {
+      await refuseOnView(req, res, key, socketPath);
+      return;
+    }
     const handler = dynamic.get(key) ?? routes[key];
     if (!handler) {
       json(res, 404, { error: "not_found", route: key });
@@ -133,18 +178,50 @@ export const startHttp = (ctx: Ctx): HttpServer => {
       ctx.log.error({ err: (e as Error).message, route: key }, "http handler failed");
       if (!res.headersSent) json(res, 500, { error: "internal", message: (e as Error).message });
     }
+  };
+
+  const control = createServer(listener(false));
+  const view = createServer(listener(true));
+  let bound: BoundSocket | undefined;
+  let viewUp = false;
+
+  // 视图监听失败 (端口被别人占了 / 没权限) 不致命: 控制面照常, 第二个用户不再崩溃循环。
+  const startView = (): void => {
+    const { host, port } = ctx.cfg.daemon;
+    if (port === 0) {
+      ctx.log.info("view listener disabled (daemon.port=0)");
+      return;
+    }
+    view.once("error", (e: NodeJS.ErrnoException) => {
+      viewUp = false;
+      ctx.log.warn({ host, port, code: e.code, err: e.message }, "view listener disabled");
+    });
+    view.listen(port, host, () => {
+      viewUp = true;
+      ctx.log.info({ host, port }, "view listening (read-only)");
+    });
+  };
+
+  const ready = bindControlSocket(control, socketPath).then((b) => {
+    bound = b;
+    ctx.log.info({ socket: socketPath }, "HTTP listening (control socket)");
+    startView();
   });
 
-  server.listen(ctx.cfg.daemon.port, ctx.cfg.daemon.host, () => {
-    ctx.log.info({ host: ctx.cfg.daemon.host, port: ctx.cfg.daemon.port }, "HTTP listening");
-  });
+  const closeServer = (s: Server, listening: boolean): Promise<void> =>
+    new Promise<void>((resolve) => (listening ? s.close(() => resolve()) : resolve()));
 
   return {
-    close: () =>
-      new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      }),
+    close: async () => {
+      // libuv 关 pipe server 时无条件 unlink 路径: 路径上已是接手者的 inode 就别 close,
+      // 进程马上退出, 内核会回收 fd; 否则正常 close 后再兜一次 (幂等)。
+      const owns = bound ? stillOwns(bound) : false;
+      await Promise.all([closeServer(control, owns), closeServer(view, viewUp)]);
+      if (bound) unlinkIfOwned(bound);
+    },
     register: (key, handler) => dynamic.set(key, handler),
+    ready,
+    socketPath,
   };
 };
 

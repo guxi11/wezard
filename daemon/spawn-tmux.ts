@@ -228,7 +228,7 @@ const sessionHooksFor = (cfg: Config, log: Logger): SessionHookSpec | undefined 
 const sessionMcpFor = (cfg: Config, log: Logger): SessionMcpSpec | undefined => {
   try {
     return prepareSessionMcp(expandHome(cfg.daemon.stateDir), {
-      port: cfg.daemon.port, transport: cfg.daemon.mcpTransport,
+      port: cfg.daemon.port, transport: cfg.daemon.mcpTransport === "stdio" ? "stdio" : "http", // P2 换成 relay
     });
   } catch (e) {
     log.warn({ err: (e as Error).message }, "spawn-tmux: session MCP injection failed — pane starts without wezard tools");

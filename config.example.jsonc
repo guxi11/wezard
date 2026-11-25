@@ -17,6 +17,9 @@
 
   // ── Daemon (resident process) ─────────────────────────────────────
   "daemon": {
+    // 控制面 = unix socket (hook / MCP / CLI 都走它; 空 = <stateDir>/run/daemon.sock, 路径 ≤103 字节)。
+    "socket": "",
+    // 浏览器视图 (rolepage / 详情页) 的只读 TCP 监听; port 0 = 不开。控制路由在这上面一律 410。
     "host": "127.0.0.1",
     "port": 17890,
     "stateDir": "~/.wezard/state",
