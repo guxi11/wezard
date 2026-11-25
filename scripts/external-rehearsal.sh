@@ -48,6 +48,8 @@ stop_daemon() {
 }
 cleanup() {
   stop_daemon
+  # ⑫ 的接待 wizard 冷启动会真的起 tmux; 演练用 TMUX_TMPDIR 把它关在临时目录里, 收尾连服务器一起收掉。
+  TMUX_TMPDIR="$T/tmux" tmux kill-server 2>/dev/null || true
   if [ "$KEEP" = "1" ]; then echo "现场保留: $T"; else rm -rf "$T"; fi
 }
 trap cleanup EXIT
@@ -113,6 +115,8 @@ sock()      { curl -sS --noproxy '*' --unix-socket "$SOCK" -m 30 "$@"; }
 sock_post() { curl -sS --noproxy '*' --unix-socket "$SOCK" -m 30 -X POST -H 'content-type: application/json' -d "$2" "http://wezard$1"; }
 # 默认以 CoC 身份调用 (配置里启用着多个调用方, CLI 不会替我们挑); 要换身份就在子命令后再写 --as <名字>。
 ext()       { local c="$1"; shift; HOME="$H" WEZARD_CONFIG="$CFG" WEZARD_DAEMON_SOCK="$SOCK" node "$ROOM/dist/cli/ext.js" "$c" --as CoC "$@"; }
+# 指定调用方 (⑫ 的 Neo / Morpheus 不在配置里, 只能 --as)。
+extas()     { local who="$1" c="$2"; shift 2; HOME="$H" WEZARD_CONFIG="$CFG" WEZARD_DAEMON_SOCK="$SOCK" node "$ROOM/dist/cli/ext.js" "$c" --as "$who" "$@"; }
 
 jget() {
   node -e '
@@ -128,8 +132,12 @@ process.stdin.on("data", (c) => (d += c)).on("end", () => {
 }
 
 start_daemon() {
+  # TMUX_TMPDIR: ⑫ 的冷启动起 tmux 也只能起在临时服务器里 (不碰人的 tmux)。
+  # WEZARD_TEST_ENROLL_DECIDE: ⑫ 专用的登记卡决定文件 (写到 yes / no, 读一次即消费);
+  #   只有登记卡那条路径会看它, 生产不设这个环境变量 = 走真卡片。
   env -u TMUX -u TMUX_PANE -u WEZARD_DAEMON_SOCK -u WEZARD_STATE_DIR \
-    HOME="$H" WEZARD_CONFIG="$CFG" node "$ROOM/dist/daemon/index.js" >>"$T/daemon.stdout.log" 2>&1 &
+    HOME="$H" WEZARD_CONFIG="$CFG" TMUX_TMPDIR="$T/tmux" WEZARD_TEST_ENROLL_DECIDE="$T/enroll-decide" \
+    node "$ROOM/dist/daemon/index.js" >>"$T/daemon.stdout.log" 2>&1 &
   DPID=$!
   for _ in $(seq 1 300); do
     if sock -o /dev/null -f "http://wezard/healthz" 2>/dev/null; then return 0; fi
@@ -446,6 +454,70 @@ const j = JSON.parse(process.argv[1]); const p = (j.principals || []).find((x) =
 process.stdout.write(String(p.today) + ":" + String(p.perDay) + ":" + (p.open > 0 ? "open" : "0"));' "$st")
 node -e 'const [t, d, o] = process.argv[1].split(":"); process.exit(Number(t) >= 1 && Number(d) === 50 && o === "open" ? 0 : 1)' "$st_coc" \
   && pass "⑪ ext status 里 CoC 的今日 / 上限 / 未结 都对 ($st_coc)" || bad "⑪ ext status 的 CoC 行不对: $st_coc"
+
+# ── ⑫ 首连审批登记 (第 3 步): 不预写 external 配置 ─────────────────────────
+say "⑫ 去掉 external 配置节 (只靠缺省 enabled=true) + 给一个审批人 user:T1, 重启 daemon"
+stop_daemon
+node -e '
+const fs = require("fs");
+const cfg = process.argv[1];
+const j = JSON.parse(fs.readFileSync(cfg, "utf8"));
+delete j.external;
+j.approval = { approvers: ["user:T1"] };
+fs.writeFileSync(cfg, JSON.stringify(j, null, 2));
+' "$CFG"
+start_daemon || bad "⑫ daemon 起不来"
+
+out12=$(extas Neo ask "第一次连: 在吗" 2>"$T/n12.err")
+rc12=$?
+check "$rc12" "3" "⑫ 未登记时 ask 自动发登记卡, 退出码 3"
+check "$(printf '%s' "$out12" | jget state)" "pending" "⑫ 回包 state=pending"
+grep -q "登记审批卡" "$T/n12.err" && pass "⑫ stderr 告诉 agent 等人点卡" || bad "⑫ stderr 没写登记卡提示: $(cat "$T/n12.err")"
+[ -f "$STATE/external/principals.json" ] && bad "⑫ 还没批准就写了登记表" || pass "⑫ 待决期间登记表不存在"
+[ -f "$H/.wezard/external/Neo.token" ] && bad "⑫ 还没批准就生成了口令" || pass "⑫ 待决期间没有口令文件"
+
+echo yes >"$T/enroll-decide"
+for _ in $(seq 1 40); do [ -f "$H/.wezard/external/Neo.token" ] && break; sleep 0.5; done
+[ -f "$H/.wezard/external/Neo.token" ] && pass "⑫ 点了确认后口令文件出现" || bad "⑫ 点了确认后 20s 内没有口令文件"
+reg12=$(node -e '
+const fs = require("fs");
+const [stateDir] = process.argv.slice(1);
+try {
+  const j = JSON.parse(fs.readFileSync(stateDir + "/external/principals.json", "utf8"));
+  const p = (j.principals || []).find((x) => x.name === "Neo") || {};
+  process.stdout.write([p.reception, p.owner, p.enabled, p.approvedBy].join("|"));
+} catch { process.stdout.write(""); }' "$STATE")
+check "$reg12" "ext-neo|user:T1|true|user:T1" "⑫ 登记表记下接待 / owner / 审批人"
+wiz12=$(node -e '
+const fs = require("fs");
+const [home, target] = process.argv.slice(1);
+try {
+  const j = JSON.parse(fs.readFileSync(home + "/.wezard/wizards.json", "utf8"));
+  const r = j[target];
+  process.stdout.write(r ? String(r.name) : "");
+} catch { process.stdout.write(""); }' "$H" "user:T1#ext-neo")
+check "$wiz12" "ext-neo" "⑫ 名册里有接待 wizard ext-neo (会话在审批人私聊)"
+
+out13=$(extas Neo ask "登记后再问一句")
+check "$(printf '%s' "$out13" | jget state)" "open" "⑫ 登记后 ask 落行 (open)"
+
+out14=$(extas Morpheus ask "我也要连" 2>/dev/null)
+check "$?" "3" "⑫ 第二个调用方也走登记卡"
+echo no >"$T/enroll-decide"
+cool=''
+for _ in $(seq 1 40); do
+  sleep 0.5
+  out15=$(extas Morpheus enroll 2>/dev/null)
+  cool=$(printf '%s' "$out15" | jget state)
+  [ "$cool" = "cooldown" ] && break
+done
+check "$cool" "cooldown" "⑫ 被拒后冷却: 再登记回 429 冷却中"
+node -e '
+const fs = require("fs");
+const [stateDir] = process.argv.slice(1);
+const j = JSON.parse(fs.readFileSync(stateDir + "/external/principals.json", "utf8"));
+process.exit((j.principals || []).some((x) => x.name === "Morpheus") ? 1 : 0);' "$STATE" \
+  && pass "⑫ 被拒的调用方没进登记表" || bad "⑫ 被拒的 Morpheus 却进了登记表"
 
 echo "-----"
 if [ "$FAIL" -eq 0 ]; then
