@@ -1223,6 +1223,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "plan 是 DAG 状态记忆，不绑定 executor、不自动派活或验收；可并行节点由 owner 自己安排与验收",
       "所有任务完成或取消后，owner 显式完成 plan；结果由你自己这一轮向提问者收口",
       "派活文本只写**活本身** —— 你是谁、结论怎么交代, 信封替你说; 要反问就 `chat_reply({status:\"need\"})`, 要跟对方新提一件事就另开一条 `chat_ask`",
+      "**工具回包是 JSON 文本, 不是对象**: 在 REPL / PTC 里先 `JSON.parse` 再读字段 —— 直接对回包读 `.name` / `.id` 只得到 `undefined` (派活后写成「已经交给 .undefined」就是这么来的)。",
     ]),
     "分身有成本 (一份上下文): 少于两三件时自己做更快; 但 coding 仍遵守 light 执行约束, 统筹者不因此亲自接手实现。",
     "",

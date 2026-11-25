@@ -28,6 +28,13 @@ const fail = (msg: string) => ({
   content: [{ type: "text" as const, text: msg }],
 });
 
+// 回包形状的常驻提醒。MCP 的 text 结果在 CodeBuddy 的 REPL/PTC 里是一段**字符串**,
+// 而模型常把它当对象读 (d.name / d.id) —— 读到的是 undefined, 于是写出
+// 「已经交给 .undefined」「after:["undefined"]」。失败回包 (isError) 反而是 {error},
+// 更让人以为成功也是一个对象; 所以每个会被转述名字的派活工具都要写明这一句。
+const RESULT_IS_JSON_TEXT =
+  "回包是一段 JSON **文本** (不是对象): 在 REPL / PTC 里先 JSON.parse 再读字段; 直接对回包读 .name / .id 得到的是 undefined。";
+
 type Shape = Record<string, z.ZodTypeAny>;
 
 const currentAddressSchema = <T extends Shape>(shape: T) => z.object(shape).strict();
@@ -149,7 +156,7 @@ const handoffSelf = (tool: string, brief: string) =>
 const DELEGATE_DESC =
       "派活一步到位: 给 task 或 taskFile+params。产出是一条 chat_ask —— 选中的 wizard 收到一条 duty, 只能用 chat_reply 交代, 没有别的回执通道; 返回实际决定、目标、room 与档位, dryRun 只返回决定与简短理由。lead 只在复杂任务使用。planId 只记录 event 与 plan 的关联，daemon 不会代替 owner 推进 DAG。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活另派不等于强制新生, 允许复用近期实际材料相关、空闲且无职责占用的非 lead; 按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: 指明函数、接口、文件、按钮等具体对象且范围清楚的低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 hard。\n" +
-      "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性。复杂任务用 `lead:true`: lead 建 plan，按阶段创建执行者并验收；简单任务直接派活、不建 plan。";
+      "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性。复杂任务用 `lead:true`: lead 建 plan，按阶段创建执行者并验收；简单任务直接派活、不建 plan。回包里的 `name` 是落定的执行者名字 —— " + RESULT_IS_JSON_TEXT;
 
 const DELEGATE_SCHEMA = {
       // task 与 taskFile 二选一 (§8): 不存在「task 作摘要」的用法 —— 旧 daemon 会把
@@ -223,7 +230,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
 };
 
 const OFFSPRING_TAIL =
-  "名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409, 附 `alive` / `busy` / `idleForMs` —— 据此分辨它是真在干活 (换个名字) 还是冷绑定 (先 stop_wizard 再同名重生); 返回里的 `name` 是落定的名字。 它自己也能再生分身, 层级不限; 名下同时活着的有上限。";
+  "名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409, 附 `alive` / `busy` / `idleForMs` —— 据此分辨它是真在干活 (换个名字) 还是冷绑定 (先 stop_wizard 再同名重生); 返回里的 `name` 是落定的名字。 它自己也能再生分身, 层级不限; 名下同时活着的有上限。" + " " + RESULT_IS_JSON_TEXT;
 
 // Every call builds a fresh server: the SDK binds one server to one transport (and
 // JSON-RPC ids are per-connection), so a daemon-side http endpoint that serves many
@@ -365,7 +372,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Ask a wizard in a room (opens a duty)",
       description:
-        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它; 也可点名本 room 的人 (`human:<userid>`) 向人提问 —— 人名下的 duty 不用 chat_reply, 人在本 room 的下一句话就关账 (带企微引用只关被引用的那条) 并唤醒你, 不需要了就对那条 id chat_reply canceled / passed。对方 wizard 只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 wizard → 按成员集合 {你 + 它们} 复用或新开一个 adhoc (你是 host, 不会把它们拉进缺省群; 这条分支里 `interrupt` 只给被点名者的直属 parent); `to` 里含人且不全在缺省 room → 400, 要先在同一个 room。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答。",
+        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它; 也可点名本 room 的人 (`human:<userid>`) 向人提问 —— 人名下的 duty 不用 chat_reply, 人在本 room 的下一句话就关账 (带企微引用只关被引用的那条) 并唤醒你, 不需要了就对那条 id chat_reply canceled / passed。对方 wizard 只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 wizard → 按成员集合 {你 + 它们} 复用或新开一个 adhoc (你是 host, 不会把它们拉进缺省群; 这条分支里 `interrupt` 只给被点名者的直属 parent); `to` 里含人且不全在缺省 room → 400, 要先在同一个 room。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答; 回包还带落定的收件人名 (`name` / `names`, 转述「已经交给 .X」时用它, 别自己拼)。" + RESULT_IS_JSON_TEXT,
       inputSchema: currentAddressSchema({
         room: z.string().optional().describe(ROOM_DOC),
         to: z.union([z.string(), z.array(z.string())]).describe(TO_DOC),

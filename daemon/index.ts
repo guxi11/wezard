@@ -1613,8 +1613,9 @@ const main = async (): Promise<void> => {
         ? "本轮被多个 room 一起唤醒 (" + d.many.map(roomLabel).join(", ") + ") — 显式给 room"
         : "没有缺省 room (本轮没有被唤醒) — 显式给 room" };
     };
-    const roomReply = (res: import("node:http").ServerResponse, v: Verdict): void => {
+    const roomReply = (res: import("node:http").ServerResponse, v: Verdict, extra: Record<string, unknown> = {}): void => {
       if (v.ok) json(res, 200, { ok: true, room: v.row.room, id: v.row.id, seq: v.row.seq, woke: v.row.wake,
+        ...extra,
         ...(v.row.closes?.length ? { closes: v.row.closes } : {}), ...(v.degraded.length ? { degraded: v.degraded } : {}),
         ...(v.duplicate ? { duplicate: true } : {}) });
       else json(res, v.status, { ok: false, reason: v.reason });
@@ -1664,10 +1665,16 @@ const main = async (): Promise<void> => {
       const after = idList(b.after);
       // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。显式给的已关账 → 同样回落。
       const forOf = hub.resolveFor(me.id, b.for);
-      roomReply(res, hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
+      const v = hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
         ...(after.length ? { after } : {}), ...(forOf ? { for: forOf } : {}),
         ...((b.planId ?? "").toString().trim() ? { planId: (b.planId ?? "").toString().trim() } : {}),
-        ...(b.interrupt ? { interrupt: true } : {}) }));
+        ...(b.interrupt ? { interrupt: true } : {}) });
+      // 回包里带落定的收件人名: 模型常把回包当对象直接读 `name` 去转述「已经交给 .X」,
+      // 缺了它就写成 .undefined (2026-11-24 群里的实录)。
+      const names = v.ok
+        ? (v.row.to ?? []).map((w) => w.kind === "wizard" ? peerAddress(cfg, wizards.byUid(w.id)?.target ?? w.id) : w.id).filter(Boolean)
+        : [];
+      roomReply(res, v, names.length === 1 ? { name: names[0], names } : names.length ? { names } : {});
     });
     http.register("POST /room/reply", async (req, res) => {
       const { self, body } = await readPeerBody(req);

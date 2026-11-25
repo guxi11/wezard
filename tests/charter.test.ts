@@ -40,7 +40,9 @@ const codingChapter = chapter(charter, "## 怎么干活: 编排");
 assert.ok(codingChapter.includes("**Coding 默认编排**"));
 for (const fragment of ["范围清楚、低风险", "默认用 light", 'tier:"light"', "不递归派 coder"])
   assert.ok(codingChapter.includes(fragment), `coding light-default contract must include ${fragment}`);
-for (const fragment of ["多步的活默认开一个跟进 room", "只有需要人和执行者直接对话", "不提前合并或宣告完成", "不守着、不轮询 `peek_peer`"])
+for (const fragment of ["多步的活默认开一个跟进 room", "只有需要人和执行者直接对话", "不提前合并或宣告完成", "不守着、不轮询 `peek_peer`",
+  // 回包是 JSON 文本, 不是对象 —— 不写这一句, 模型就会 `d.name` 读到 undefined, 群里写出「已经交给 .undefined」。
+  "工具回包是 JSON 文本, 不是对象", "已经交给 .undefined"])
   assert.ok(codingChapter.includes(fragment), `orchestration contract must include ${fragment}`);
 
 const roomChapter = chapter(charter, "## room 是唯一的沟通对象");
