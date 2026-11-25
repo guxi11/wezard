@@ -26,8 +26,17 @@ export const withoutMessageFooter = (content: string): string => {
   return match && targetOfTagUrl(match[1]!) ? withoutMessageFooter(content.slice(0, match.index).trimEnd()) : content;
 };
 
+/** 出站**兜底** (不是根治): 模型在派活回包上取 `.name` 拿到 undefined 时会把「已经交给 .undefined」
+ *  写进正文 —— 这里在最后一道改写里换成一句人话, 保证企微 / 频道里不再出现 `.undefined`。
+ *  根治在回包侧 (mcp/output.ts 的 `said` + chat_ask 的 name / names 不再被 pick 掉); 这一层只认这一种
+ *  拼坏的名字 (后面紧跟标识符字符的 `.undefined` 不碰, 那是代码 / 变量名), 账本里的原文也不改 ——
+ *  留证据, 只改发给人的那份。 */
+export const scrubUndefinedName = (content: string): string =>
+  content.replace(/\.undefined(?![A-Za-z0-9_])/g, "一个执行者");
+
 /** Every known sender has a detail footer; only the destination default omits its name header. */
 export const withMessageFooter = (content: string, policy?: MessageFooterPolicy): string => {
+  content = scrubUndefinedName(content);
   if (!policy) return content;
   const candidate = footerUrl(content);
   const footerTarget = candidate && targetOfTagUrl(candidate);
