@@ -115,3 +115,29 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 - [x] cli/ext.ts + wezard.sh
 - [x] 演练脚本七项 PASS
 - [x] typecheck + room 测试无新增红
+
+## 第 2 步实现任务: 安全加固 (执行者按此做, 以本文件为准)
+
+前提: 第 1 步已上线 (5408b4e)。「外部轮」按**接待 wizard 这个身份**判, 不给单个轮次打标 —— 接待 wizard 只服务外部请求, 两者等价, 身份判据更稳 (轮次标记跨不过下一轮的上下文)。判据: 调用方的会话 / pane 解析到的 wizard 名 ∈ `external.principals[].reception` (启用的那些), 现查配置, 热生效。
+
+1. **禁用表 (路由层拦, 不靠工具名)**: CodeBuddy 的调用都包在 REPL 脚本里, 只看外层工具名拦不住, 所以在 daemon 路由处理里按「调用方是接待 wizard」拒 (403, 原因写「外部接待 wizard 不能 …, 需要就请 owner 做」)。先 grep mcp/tools.ts 列出每个工具打的路由, 再逐个落:
+   - 拒: 改配置 (/config/set)、停别的 wizard、set_workspace、room_bind / room_unbind / room_fork、room_invite / room_leave (移别人)、room_name、schedule_task / cancel_task、wizard_identity (改别人)、wizard_remember 的 chat / workspace 作用域、clone_wizard (会把外部上下文复制出去)。
+   - 拒往**绑定 room** 发话: chat_say / chat_reply / chat_ask / notify / send_file 的目标 room 是绑定 room (isBoundRoom) → 拒。dm / adhoc 照常 (它要在自己的接待 room 里交代, 也要能 delegate / chat_ask 内部 wizard —— 那些落 dm / adhoc)。
+   - 照常: chat_reply / chat_say / chat_ask 进非绑定 room、delegate、spawn_wizard (派出去的子 wizard 不继承这些限制, 这是有意的: 判断由接待 wizard 做)、room_read (只读它是成员的)、wizard_roster、pending_items、plan_*、wizard_whoami、handoff 自己。
+2. **审批收紧**: `daemon/approval.ts` 里, 会话归属是接待 wizard 时, 凡 matcher 拦下的工具一律发卡 —— 不走 allowRules、放行窗口、会话缓存、skipAll。卡面加一行「外部接待 <名> · 由外部调用方 <调用方名> 的请求驱动」。wezard 自己的 MCP 工具 (含 REPL 脚本里只调 wezard 工具的情形) 维持现状不发卡, 否则它连 chat_reply 都交代不了 —— 单测必须覆盖: 接待 wizard 调 chat_reply 不发卡; 调 Bash `ls` 发卡; 同一条 Bash 对普通 wizard 命中 allowRules 时不发卡。
+3. **答复脱敏**: 纯函数 `redactText(text, secrets)` 放 shared/external.ts: 已知口令原文 (daemon-token、全部 ext 口令、svr-token、secrets.json 里 ≥8 字符的字符串值) 全文替换成 `***`; 再按模式抹: `eyJ…` JWT、`sk-`/`ghp_` 前缀串、≥32 位十六进制串、`-----BEGIN … PRIVATE KEY-----` 块。只作用在 /external 出口 (ask/wait/inbox 回包的 answer), 账本原样不动。口令集合按 mtime 缓存, 不每次读盘。
+4. **逾期通知 owner**: 配置 `owner` 改义为**归属 room id** (绑定 room, 如主群 `chat:…`; 空 = 不通知), describe 同步改。`daemon/room-overdue.ts`: duty 的提问者是外部作者 (`ext:<名>`) 时, 升级行发到该调用方 owner room, 不发接待 wizard 的 home; 文本「⏰ 外部调用方 <名> 的请求 <req> 已 N 分钟没回 (接待 <名>, 在 <room>)」。对 holder 的提醒 (remind) 不变。owner 不是绑定 room 或为空 → 只记账本 + warn。
+5. **额度告警与用量**: 某调用方当天第一次被 429 时, 往 owner room 发一行「外部调用方 <名> 触发额度: <哪一条>」(每个调用方每天每种额度最多一次, 去重按账本 sys 键)。新增 `GET /external/status` (过 daemon 口令闸) + CLI `wezard ext status`: 每个调用方的启用状态、今日请求数 / 上限、未结数、接待 wizard、最近一次调用时刻; 接待 wizard 今日 token 用量若 daemon/usage.ts 能按 wizard 现成取到就带上, 取不到就不带并在交代里说明。
+6. 单测补进 tests/external.test.ts (或新文件): redactText 各模式与已知口令; 禁用表判定 (纯函数抽出来测: 接待 / 非接待 × 绑定 / 非绑定 × 各工具路由); 逾期落点选择; 告警去重。
+7. 演练脚本加: 接待 wizard 身份调 notify / chat_say 进绑定 room 被拒、进接待 adhoc room 放行; 调 /config/set 被拒; 接待 wizard 交代正文里含 daemon-token 原文, ext wait 拿到的 answer 是 `***`; 逾期通知落 owner room (把阈值调小); 额度告警只发一次; ext status 输出。
+8. 提交与交代口径同第 1 步 (只 add 自己的 hunk, edit→add→commit 同一条 Bash; 不 push 不 reload)。CHANGELOG 由 lead 写。
+
+### 第 2 步进度 (执行者自维护)
+
+- [ ] 禁用表 (路由层) + 单测
+- [ ] 审批收紧 + 单测
+- [ ] redactText + 出口接线
+- [ ] 逾期通知 owner
+- [ ] 额度告警 + ext status
+- [ ] 演练新增项 PASS, typecheck, room / approval 相关测试无新增红
+
