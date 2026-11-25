@@ -1203,6 +1203,18 @@ const main = async (): Promise<void> => {
     // 同身份的化身前一轮可能各写了一份身份级字段 (职责 / 记忆): 开机收敛一次, 幂等。
     const reconciled = reconcileKin(wizards);
     if (reconciled > 0) log.child({ mod: "wizard" }).info({ reconciled }, "identity kin reconciled");
+    // 存量名册补 tier / 修掉过期的 tier (聪明度只认它): 按此刻记下的模型 + effort 反查档位表。
+    // 只写反查得出的结果 —— 表外模型 (kimi 之类) 不覆盖原值, 原记录仍是唯一证据。幂等。
+    {
+      let fixed = 0;
+      for (const rec of wizards.all()) {
+        const info = m.sessionInfo(rec.target);
+        if (!info?.model.trim()) continue;
+        const probe = tierOfModel(cfg, info.cli, info.model, info.effort, rec.tier);
+        if (probe.tier && probe.tier !== rec.tier) { wizards.upsert(rec.target, { tier: probe.tier }); fixed += 1; }
+      }
+      if (fixed) log.child({ mod: "wizard" }).info({ fixed }, "tier backfilled from model + tiers table");
+    }
     // ── room 账本 (docs/room/wiring.md A): hub 实例化 + /room/* HTTP ──────
     // room 是唯一的沟通对象: 人话 (inbound) 与 wizard 工具都 append 进同一份账本
     // (daemon/room-hub.ts), 唤醒按 seen 游标重算, 镜像按 §3a 一条规则。旧的路由 /
