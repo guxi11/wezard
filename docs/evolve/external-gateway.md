@@ -134,10 +134,10 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 
 ### 第 2 步进度 (执行者自维护)
 
-- [ ] 禁用表 (路由层) + 单测
-- [ ] 审批收紧 + 单测
-- [ ] redactText + 出口接线
-- [ ] 逾期通知 owner
-- [ ] 额度告警 + ext status
-- [ ] 演练新增项 PASS, typecheck, room / approval 相关测试无新增红
+- [x] 禁用表 (路由层) + 单测
+- [x] 审批收紧 + 单测
+- [x] redactText + 出口接线
+- [x] 逾期通知 owner
+- [x] 额度告警 + ext status
+- [x] 演练新增项 PASS, typecheck, room / approval 相关测试无新增红
 
