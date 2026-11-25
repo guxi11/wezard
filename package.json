@@ -38,6 +38,8 @@
     "dist/cli/sync.js.map",
     "dist/cli/audit.js",
     "dist/cli/audit.js.map",
+    "dist/cli/ext.js",
+    "dist/cli/ext.js.map",
     "dist/cli/wx.js",
     "dist/cli/wx.js.map",
     "dist/cli/skills.js",

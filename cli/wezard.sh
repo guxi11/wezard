@@ -72,6 +72,7 @@ wezard <subcommand>
   skills [list|install|remove|pin|unpin|update] [name] [--force]
                          bundled skills (e.g. 企微文档套件): show / reinstall / opt out / take over
   audit [tag]            token/cost breakdown for current Claude session (main + subagents)
+  ext <ask|wait|inbox|ack|cancel|rotate>  outward-facing agent bridge (CoC): ask a wizard, collect answers
   update                 npm i -g wezard@latest + repoint/restart daemon + sync (one command, see /wezard:update)
   uninstall              full teardown: stop daemon + unsync + plugin uninstall + remove daemon (run before `npm uninstall -g`)
                          add `--purge` to also delete ~/.wezard state
@@ -402,6 +403,12 @@ case "$cmd" in
   audit)
     NODE_BIN="$(command -v node)"
     SCRIPT="$REPO_ROOT/dist/cli/audit.js"
+    [[ -f "$SCRIPT" ]] || { echo "build first: npm run build"; exit 1; }
+    exec "$NODE_BIN" "$SCRIPT" "$@"
+    ;;
+  ext)
+    NODE_BIN="$(command -v node)"
+    SCRIPT="$REPO_ROOT/dist/cli/ext.js"
     [[ -f "$SCRIPT" ]] || { echo "build first: npm run build"; exit 1; }
     exec "$NODE_BIN" "$SCRIPT" "$@"
     ;;
