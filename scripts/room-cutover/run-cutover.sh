@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 注意: 这是一次性脚本, 针对旧版 TCP 控制面 (127.0.0.1:17890); 控制面已迁到 unix socket, 不再改动、也不能原样复用。
 # room 切换 · 第 0-8 步一次执行 (docs/room/cutover.md)。daemon 停着时 wezard 工具与审批都不可用,
 # 所以整段由一次 Bash 调用跑完, 每步一行写进 $LOG; 任何一步红 → 按逆序回退到切换前并重启旧 daemon。
 # 用法: scripts/room-cutover/run-cutover.sh <room-model 期望 HEAD>

@@ -4,20 +4,24 @@
 # 权限流程接管; 只有「请求本身没读懂」才回 ask。
 set -uo pipefail
 
-# --noproxy '*' on every daemon curl below: the daemon is on 127.0.0.1, but an
-# http_proxy/all_proxy in env makes curl tunnel localhost through the proxy,
-# which answers a down daemon with an empty 200 — a false "up" that makes
-# wait_for_daemon re-post approvals into a dead process. Never proxy loopback.
+# 控制面是 daemon 的 unix socket (0600, 目录 0700 —— 别的 uid 连不上, 也冒充不了它);
+# 不再有 loopback TCP 可抢。socket 路径与 shared/daemon-addr.ts 同一规则:
+# WEZARD_DAEMON_SOCK → ${WEZARD_STATE_DIR:-~/.wezard/state}/run/daemon.sock。
+# 旧 pane 的启动行里还带着 WEZARD_DAEMON_URL —— 故意不再读它: 脚本每次从盘上现读,
+# 升级后旧 pane 的审批也直接走 socket。
+# --noproxy '*' 保留: 与 --unix-socket 并用时 curl 本就不走代理, 这里只是不依赖那条细则。
 NOPROXY=(--noproxy '*')
-DAEMON_URL="${WEZARD_DAEMON_URL:-http://127.0.0.1:17890/approve}"
+STATE_DIR="${WEZARD_STATE_DIR:-$HOME/.wezard/state}"
+SOCK="${WEZARD_DAEMON_SOCK:-$STATE_DIR/run/daemon.sock}"
+UDS=(--unix-socket "$SOCK")
+DAEMON_URL="http://wezard/approve"
 # 必须严格大于 daemon 的 approval.longPollSec (默认 43200) 且小于 hooks.json
 # 的 timeout, 否则卡在 WeCom 里挂 >30min 后 curl 先死, 用户的点击写进死 socket。
 HOOK_TIMEOUT="${WEZARD_HOOK_TIMEOUT:-43210}"
-STATE_DIR="${WEZARD_STATE_DIR:-$HOME/.wezard/state}"
 # daemon 重启 (wezard reload / launchd 拉起) 时等它回来的最长秒数。等回来后带着
 # 上一轮的 req_id 续接同一张卡, 而不是 fallback 把权限框弹回本地 CLI。
 RESUME_WAIT="${WEZARD_RESUME_WAIT:-60}"
-HEALTH_URL="${DAEMON_URL%/approve}/healthz"
+HEALTH_URL="http://wezard/healthz"
 
 emit() {
   local decision="$1" reason="${2:-}" updated="${3:-}"
@@ -313,7 +317,7 @@ build_body() {
 wait_for_exit() {
   local waited=0
   while (( waited < 5 )); do
-    curl -sS "${NOPROXY[@]}" --max-time 1 "$HEALTH_URL" >/dev/null 2>&1 || return 0
+    curl -sS "${NOPROXY[@]}" "${UDS[@]}" --max-time 1 "$HEALTH_URL" >/dev/null 2>&1 || return 0
     sleep 1
     waited=$((waited + 1))
   done
@@ -325,7 +329,7 @@ wait_for_exit() {
 wait_for_daemon() {
   local waited=0
   while (( waited < RESUME_WAIT )); do
-    if curl -sS "${NOPROXY[@]}" --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then return 0; fi
+    if curl -sS "${NOPROXY[@]}" "${UDS[@]}" --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then return 0; fi
     sleep 1
     waited=$((waited + 1))
   done
@@ -355,7 +359,7 @@ while :; do
   REMAIN=$(( HOOK_TIMEOUT - SECONDS ))
   (( REMAIN > 5 )) || ask "hook budget exhausted"
 
-  RESP=$(curl -sS "${NOPROXY[@]}" --max-time "$REMAIN" \
+  RESP=$(curl -sS "${NOPROXY[@]}" "${UDS[@]}" --max-time "$REMAIN" \
     -H 'Content-Type: application/json' \
     -d "$(build_body)" \
     "$DAEMON_URL" 2>/dev/null) || RESP=""

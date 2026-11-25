@@ -173,11 +173,14 @@ export const trustCodexHookSet = async (
 
 export const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
-export const codexHookCommand = (configPath: string, base: string, entry: string): string =>
-  `env WEZARD_CONFIG=${shellQuote(configPath)} WEZARD_DAEMON_BASE=${shellQuote(base)} ${shellQuote(process.execPath)} ${shellQuote(entry)}`;
+export const codexHookCommand = (configPath: string, socketPath: string, entry: string): string =>
+  `env WEZARD_CONFIG=${shellQuote(configPath)} WEZARD_DAEMON_SOCK=${shellQuote(socketPath)} ${shellQuote(process.execPath)} ${shellQuote(entry)}`;
 
+/** 认出 wezard 自己写的 handler。除现行的 `WEZARD_DAEMON_SOCK=` 外也认旧的
+ *  `WEZARD_DAEMON_BASE=` 形态 (TCP 控制面时代写进 hooks.json / 启动行的): sync 清理与
+ *  「同一个 pane 里只留一份」的禁用逻辑都靠它识别旧条目。 */
 export const isWezardCodexHook = (command: string | undefined): boolean =>
-  Boolean(command?.includes("WEZARD_CONFIG=") && command.includes("WEZARD_DAEMON_BASE=") && /\/cli\/codex-hook\.js'?$/.test(command));
+  Boolean(command?.includes("WEZARD_CONFIG=") && (command.includes("WEZARD_DAEMON_SOCK=") || command.includes("WEZARD_DAEMON_BASE=")) && /\/cli\/codex-hook\.js'?$/.test(command));
 
 export const codexHookGroups = (command: string, timeout: number, statusMessage = "等待企业微信审批"): string =>
   `[{matcher=".*",hooks=[{type="command",command=${JSON.stringify(command)},timeout=${timeout},statusMessage=${JSON.stringify(statusMessage)}}]}]`;

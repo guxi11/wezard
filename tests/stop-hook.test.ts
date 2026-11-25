@@ -3,7 +3,9 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 const script = resolve(import.meta.dirname, "..", "hooks", "stop.sh");
 let reply = "{}";
@@ -13,8 +15,9 @@ const server = createServer((req, res) => {
   req.on("data", (c) => (b += c));
   req.on("end", () => { seen = { url: req.url, body: JSON.parse(b) }; res.setHeader("content-type", "application/json"); res.end(reply); });
 });
-await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-const port = (server.address() as { port: number }).port;
+const dir = mkdtempSync(join(tmpdir(), "wz-stop-"));
+const sock = join(dir, "d.sock");
+await new Promise<void>((r) => server.listen(sock, r));
 const run = (env: Record<string, string>, input = JSON.stringify({ session_id: "s1", stop_hook_active: false })) =>
   new Promise<{ out: string; code: number | null }>((done) => {
     // 异步跑: 同进程的 server 要能应答
@@ -24,7 +27,8 @@ const run = (env: Record<string, string>, input = JSON.stringify({ session_id: "
     p.on("close", (code) => done({ out, code }));
     p.stdin.end(input);
   });
-const env = { WEZARD_MANAGED: "1", WEZARD_DAEMON_URL: `http://127.0.0.1:${port}/approve` };
+// WEZARD_DAEMON_URL 是旧 pane 启动行里残留的 TCP 地址: hook 不再读它, 一律走 socket。
+const env = { WEZARD_MANAGED: "1", WEZARD_DAEMON_SOCK: sock, WEZARD_DAEMON_URL: "http://127.0.0.1:9/approve" };
 
 assert.equal(spawnSync("bash", ["-n", script]).status, 0, "语法");
 reply = JSON.stringify({ decision: "block", reason: "[wezard] 先 chat_reply x.1" });
@@ -39,10 +43,14 @@ reply = "<html>proxy</html>";
 r = await run(env);
 assert.equal(r.out, "", "回包坏 → 零输出");
 reply = JSON.stringify({ decision: "block", reason: "x" });
-r = await run({ WEZARD_DAEMON_URL: env.WEZARD_DAEMON_URL });
+r = await run({ WEZARD_DAEMON_SOCK: sock });
 assert.equal(r.out, "", "非 wezard 会话 → 零输出, 不碰 daemon");
 server.close();
 r = await run(env);
 assert.equal(r.out, "", "daemon 连不上 → 零输出 (照常结束)");
 assert.equal(r.code, 0);
+r = await run({ ...env, WEZARD_DAEMON_SOCK: join(dir, "missing.sock") });
+assert.equal(r.out, "", "socket 缺失 → 零输出");
+assert.equal(r.code, 0);
+rmSync(dir, { recursive: true, force: true });
 console.log("stop-hook ok");

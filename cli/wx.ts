@@ -4,16 +4,17 @@
 import QRCode from "qrcode";
 import { createInterface } from "node:readline/promises";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
+import { cliSocketPath } from "../shared/cli-socket.js";
+import { daemonRequest } from "../shared/daemon-client.js";
 
-const DAEMON = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 type Json = Record<string, unknown>;
 const call = async (method: "GET" | "POST", p: string, body?: unknown): Promise<Json> => {
-  const r = await fetch(`${DAEMON}${p}`, {
-    method,
-    headers: { "content-type": "application/json", [DAEMON_TOKEN_HEADER]: readDaemonToken() },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  const r = await daemonRequest(method, p, {
+    socketPath: cliSocketPath(),
+    headers: { [DAEMON_TOKEN_HEADER]: readDaemonToken() },
+    ...(body === undefined ? {} : { body }),
   });
-  return (await r.json().catch(() => ({ ok: false, reason: `HTTP ${r.status}` }))) as Json;
+  return (r.json ?? { ok: false, reason: `HTTP ${r.status}` }) as Json;
 };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const ago = (t: number): string => (t ? `${Math.round((Date.now() - t) / 60_000)} 分钟前` : "—");

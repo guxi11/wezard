@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 注意: 这是已执行过的一次性脚本, 针对旧版 TCP 控制面 (127.0.0.1:<port>); 控制面已迁到 unix socket, 不再改动。
 # O2 账实闸 (cutover 第 8 步 / O2 演练共用): daemon /status.openDuties (内存) 对 observe.mjs
 # duties 重放盘上账本 (第 6 步迁移写入并报告的那个目录)。不等 = daemon 起来时账本没接上 → 红,
 # 打印两个数, 调用方 (run-cutover.sh) 据此逆序回退。

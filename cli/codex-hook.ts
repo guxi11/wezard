@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Codex's supported hook protocol → wezard's shared approval engine.
 import { loadConfig } from "../shared/config.js";
+import { clientSocketPath } from "../shared/daemon-addr.js";
+import { daemonRequest } from "../shared/daemon-client.js";
 import { codexApprovalRequest, codexHookOutput, codexSelfCallBypass, type CodexApprovalInput, type CodexHookEvent, type ApprovalReply } from "../shared/codex-approval.js";
 import { sleep } from "../shared/std.js";
 import { recordCodexPaneSession } from "../shared/codex.js";
@@ -11,22 +13,21 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
   if (!cfg.approval.enabled) return { decision: "ask", reason: "approval_disabled" };
   // `wezard use cli`: 审批权在本地 CLI, 回 ask 让 codex 弹它自己的原生框。
   if (readHookMode(cfg.daemon.stateDir) === "cli") return { decision: "ask", reason: "hook_mode_cli" };
-  const base = process.env.WEZARD_DAEMON_BASE ?? `http://127.0.0.1:${cfg.daemon.port}`;
-  // Loopback fetch does not use HTTP_PROXY; do not send hook inputs off-machine.
-  const url = new URL("/approve", base);
-  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) throw new Error("Codex approval bridge must use loopback");
+  // The control plane is the daemon's unix socket: it cannot leave the machine or reach another
+  // uid, so there is no URL to vet. env WEZARD_DAEMON_SOCK (set by the spawn line) wins over config.
+  const socketPath = clientSocketPath(cfg);
   const deadline = Date.now() + cfg.approval.hookTimeoutSec * 1000;
   let resumeId: string | undefined;
   let outageSince: number | undefined;
   while (Date.now() < deadline) {
     try {
-      const resp = await fetch(url, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...codexApprovalRequest(input), ...(resumeId ? { resume_req_id: resumeId } : {}) }),
-        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      const resp = await daemonRequest("POST", "/approve", {
+        socketPath,
+        body: { ...codexApprovalRequest(input), ...(resumeId ? { resume_req_id: resumeId } : {}) },
+        timeoutMs: Math.max(1, deadline - Date.now()),
       });
-      if (!resp.ok) throw new Error(`approval HTTP ${resp.status}`);
-      const reply = await resp.json() as ApprovalReply;
+      if (resp.status < 200 || resp.status >= 300 || !resp.json) throw new Error(`approval HTTP ${resp.status}`);
+      const reply = resp.json as ApprovalReply;
       outageSince = undefined;
       if (reply.decision !== "retry") return reply;
       if (!reply.req_id) throw new Error("reload response has no request id");
@@ -38,9 +39,8 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
       outageSince ??= Date.now();
       const remaining = Math.min(deadline, outageSince + 60_000) - Date.now();
       if (remaining <= 0) {
-        const error = e as Error & { cause?: { code?: string; message?: string } };
-        const cause = error.cause?.code ?? error.cause?.message;
-        const why = `bridge unavailable (${url.origin}): ${error.message}${cause ? `: ${cause}` : ""}`;
+        const error = e as Error & { code?: string };
+        const why = `bridge unavailable (${socketPath}): ${error.message}${error.code ? `: ${error.code}` : ""}`;
         // Daemon down: let ordinary tools through; sandbox escalations fall back to Codex's native prompt.
         return input.hook_event_name === "PermissionRequest"
           ? { decision: "ask", reason: why }

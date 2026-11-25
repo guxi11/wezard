@@ -67,14 +67,17 @@ const client = new Client();
 installApprovalEventListener(client as unknown as WSClient, log, cfg);
 const handler = makeApproveHandler({ cfg, log, client: client as unknown as WSClient, getMirrorTarget: () => "user:tester#codex-test" });
 const server = createServer((req, res) => { void handler(req, res, new URL(req.url ?? "/", "http://localhost"), {} as never); });
-await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-const addr = server.address() as { port: number };
 const root = mkdtempSync(join(tmpdir(), "wezard-codex-approval-"));
+// 控制面是 unix socket; hook 经 env WEZARD_DAEMON_SOCK 找到它 (启动行里就是这么带的)。
+const sock = join(root, "d.sock");
+const missingSock = join(root, "missing.sock");
+await new Promise<void>((resolve) => server.listen(sock, resolve));
 const config = join(root, "config.jsonc");
-writeFileSync(config, JSON.stringify({ bot: { botId: "test", secret: "test" }, daemon: { port: addr.port }, approval: { hookTimeoutSec: 5 } }));
+writeFileSync(config, JSON.stringify({ bot: { botId: "test", secret: "test" }, daemon: { socket: sock }, approval: { hookTimeoutSec: 5 } }));
 const input = { session_id: "codex-session", hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "printf hello", description: "test sandbox permission" } };
-const runHook = (payload: unknown, url = `http://127.0.0.1:${addr.port}`): Promise<any> => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, ["dist/cli/codex-hook.js"], { env: { ...process.env, WEZARD_CONFIG: config, WEZARD_DAEMON_BASE: url }, stdio: ["pipe", "pipe", "pipe"] });
+// 跑源码 (tsx) 而不是 dist: 不依赖有没有 build 过。
+const runHook = (payload: unknown, socketPath = sock): Promise<any> => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, ["--import", "tsx", "cli/codex-hook.ts"], { env: { ...process.env, WEZARD_MANAGED: "1", WEZARD_CONFIG: config, WEZARD_DAEMON_SOCK: socketPath }, stdio: ["pipe", "pipe", "pipe"] });
   let out = "", err = "";
   child.stdout.on("data", (b) => { out += b; }); child.stderr.on("data", (b) => { err += b; });
   child.on("error", reject); child.on("exit", (code) => { try { assert.equal(code, 0, err); resolve(JSON.parse(out)); } catch (e) { reject(e); } });
@@ -82,7 +85,7 @@ const runHook = (payload: unknown, url = `http://127.0.0.1:${addr.port}`): Promi
 });
 try {
   for (const hook_event_name of ["PreToolUse", "PermissionRequest"]) {
-    const self = await runHook({ ...input, hook_event_name, tool_name: "mcp__wezard__dispatch", tool_input: { name: "cli-enter-delay" } }, "http://127.0.0.1:1");
+    const self = await runHook({ ...input, hook_event_name, tool_name: "mcp__wezard__dispatch", tool_input: { name: "cli-enter-delay" } }, missingSock);
     if (hook_event_name === "PreToolUse") assert.deepEqual(self, {});
     else assert.equal(self.hookSpecificOutput.decision.behavior, "allow", "wezard self-calls bypass native approval");
     assert.equal(client.sent.length, 0, "unavailable bridge sends no cards");
@@ -103,8 +106,8 @@ try {
   const pre = await runHook({ ...input, hook_event_name: "PreToolUse" });
   assert.deepEqual(pre, {}, "ordinary approval emits a successful no-op");
   assert.equal(client.sent.length, before, "ordinary tools retain configured policy");
-  assert.equal((await runHook({ ...input, hook_event_name: "PreToolUse" }, "http://127.0.0.1:1")).hookSpecificOutput.permissionDecision, "deny", "bridge failure cannot fail open at PreToolUse");
-  assert.equal((await runHook(input, "https://untrusted.example")).hookSpecificOutput, undefined, "no hook inputs are sent outside loopback");
+  assert.equal((await runHook({ ...input, hook_event_name: "PreToolUse" }, missingSock)).hookSpecificOutput.permissionDecision, "deny", "socket missing: bridge failure cannot fail open at PreToolUse");
+  assert.equal((await runHook(input, missingSock)).hookSpecificOutput, undefined, "socket missing: native permission falls back to Codex's own prompt, never granted");
   client.isConnected = true;
   client.failSend = true;
   const failedSend = await runHook(input);

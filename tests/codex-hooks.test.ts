@@ -3,14 +3,21 @@ import { mkdtempSync, writeFileSync, appendFileSync, readFileSync, rmSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "jsonc-parser";
-import { inspectCodexHooks, codexHookLaunchArgs, codexHookCommand } from "../shared/codex-hooks.js";
+import { inspectCodexHooks, codexHookLaunchArgs, codexHookCommand, isWezardCodexHook, shellQuote } from "../shared/codex-hooks.js";
 import { syncCodexHooks } from "../cli/codex-sync.js";
 
 const root = mkdtempSync(join(tmpdir(), "wezard-codex-hooks-"));
 const path = join(root, "hooks.json");
 const bin = process.env.WEZARD_TEST_CODEX_BIN ?? "codex";
 const cwd = process.cwd();
-const command = codexHookCommand(join(root, "wezard.jsonc"), "http://127.0.0.1:17890", join(cwd, "dist/cli/codex-hook.js"));
+const command = codexHookCommand(join(root, "wezard.jsonc"), join(root, "run", "daemon.sock"), join(cwd, "dist/cli/codex-hook.js"));
+// 命令带 socket 路径而不是 TCP 地址; 所有权识别同时认现行与旧 (TCP 时代) 的形态, sync 才清得掉老条目。
+assert.ok(command.includes("WEZARD_DAEMON_SOCK=") && !command.includes("WEZARD_DAEMON_BASE=") && !command.includes("17890"));
+assert.ok(isWezardCodexHook(command), "现行形态认得");
+const legacy = `env WEZARD_CONFIG='/x/wezard.jsonc' WEZARD_DAEMON_BASE='http://127.0.0.1:17890' ${shellQuote(process.execPath)} '${join(cwd, "dist/cli/codex-hook.js")}'`;
+assert.ok(isWezardCodexHook(legacy), "旧 WEZARD_DAEMON_BASE 形态也认得 (sync 清理 / 替换)");
+assert.ok(!isWezardCodexHook("/bin/echo third-party"), "第三方不认");
+assert.ok(!isWezardCodexHook(`env WEZARD_DAEMON_SOCK='/s' /bin/other.js`), "必须是 codex-hook.js");
 writeFileSync(join(root, "config.toml"), "");
 writeFileSync(path, JSON.stringify({ description: "third-party hook stays untouched", hooks: { PreToolUse: [{ matcher: "Read", hooks: [{ type: "command", command: "/bin/echo third-party", timeout: 10 }, { type: "command", command: "/bin/echo trusted-third-party", timeout: 10 }] }] } }));
 try {

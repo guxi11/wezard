@@ -45,6 +45,7 @@ import { memAvailableMb, memShortfall } from "../shared/mem-guard.js";
 import { codebuddyTrustPrompt, startupConfirmation, startupDialog, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 import { isModalPane } from "../shared/modal-pane.js";
 import { prepareSessionHooks, sessionHookArgs, type SessionHookSpec } from "../shared/session-hooks.js";
+import { daemonSocketPath } from "../shared/daemon-addr.js";
 import { prepareSessionMcp, sessionMcpArgs, type SessionMcpSpec } from "../shared/session-mcp.js";
 import { prepareSessionSkills, sessionSkillArgs, type SessionSkillSpec } from "../shared/session-skills.js";
 
@@ -228,7 +229,7 @@ const sessionHooksFor = (cfg: Config, log: Logger): SessionHookSpec | undefined 
 const sessionMcpFor = (cfg: Config, log: Logger): SessionMcpSpec | undefined => {
   try {
     return prepareSessionMcp(expandHome(cfg.daemon.stateDir), {
-      port: cfg.daemon.port, transport: cfg.daemon.mcpTransport === "stdio" ? "stdio" : "http", // P2 换成 relay
+      socketPath: daemonSocketPath(cfg), transport: cfg.daemon.mcpTransport,
     });
   } catch (e) {
     log.warn({ err: (e as Error).message }, "spawn-tmux: session MCP injection failed — pane starts without wezard tools");
@@ -541,7 +542,7 @@ const buildSpare = async (
     const argv = [
       "--session-id", sessionId,
       ...(hooks ? sessionHookArgs(spec.backend.name, hooks) : []),
-      ...(mcp ? sessionMcpArgs(spec.backend.name, mcp) : []),
+      ...(mcp ? sessionMcpArgs(mcp) : []),
       ...(skills ? sessionSkillArgs(spec.backend.name, skills) : []),
       ...(spec.model && spec.backend.modelFlag ? [spec.backend.modelFlag, spec.model] : []),
       ...(spec.effort && spec.backend.effortFlag ? [spec.backend.effortFlag, spec.effort] : []),
@@ -1229,7 +1230,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
       ] : []),
       ...codexApprovalArgs,
       ...(sessionHooks && backend.name !== "codex" ? sessionHookArgs(backend.name, sessionHooks) : []),
-      ...(sessionMcp && backend.name !== "codex" ? sessionMcpArgs(backend.name, sessionMcp) : []),
+      ...(sessionMcp && backend.name !== "codex" ? sessionMcpArgs(sessionMcp) : []),
       ...(sessionSkills && backend.name !== "codex" ? sessionSkillArgs(backend.name, sessionSkills) : []),
       ...(backend.name === "codex" && effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
       ...(backend.name === "codex" && systemPrompt ? ["-c", `developer_instructions=${JSON.stringify(systemPrompt)}`] : []),

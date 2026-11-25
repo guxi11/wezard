@@ -1,23 +1,26 @@
 // MCP server `wezard`: the tool surface, as a factory.
 //
 // `createWezardServer()` builds one McpServer with every tool registered; each tool
-// just POSTs to the resident daemon over loopback — nothing here holds WeCom state.
-// Two transports mount the same surface:
-//   - stdio — mcp/server.ts, the per-pane child of the agent CLI (dist path is load-bearing);
-//   - http  — daemon/mcp-http.ts, the daemon's own stateless StreamableHTTP endpoint.
+// just POSTs to the resident daemon over its unix socket — nothing here holds WeCom state.
+// Two hosts mount the same surface:
+//   - stdio — mcp/server.ts, the full per-pane child (`daemon.mcpTransport:"stdio"`; dist path
+//     is load-bearing);
+//   - daemon/mcp-http.ts — the daemon's own stateless StreamableHTTP endpoint on the socket,
+//     which mcp/relay.ts (the default, node-builtins-only per-pane child) forwards to.
 // The caller's identity arrives differently on each (env for stdio, a request header for
-// http), so it lives in `mcpIdentity` and `selfRef()` reads it there.
+// the daemon endpoint), so it lives in `mcpIdentity` and `selfRef()` reads it there.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { daemonRequest } from "../shared/daemon-client.js";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { EFFORTS } from "../shared/effort.js";
 import { TIERS } from "../shared/config.js";
 import { PlanInputSchema, PlanUpdateSchema } from "../shared/plan.js";
 import { present, recovery } from "./output.js";
 
-// daemon 内 loopback 调自己与 pane 里的 stdio 走同一条路径: resolveSelf 复用, 不改。
-const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
+// daemon 内回打自己与 pane 里的 stdio 走同一条路径: resolveSelf 复用, 不改。
+// 地址是 unix socket (env WEZARD_DAEMON_SOCK, daemon 启动时自己设), 每次调用现读。
 
 const ok = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data) }],
@@ -79,20 +82,19 @@ interface DaemonReply {
   status: number;
 }
 
-const daemonPost = async (path: string, body: Record<string, unknown>): Promise<DaemonReply> => {
-  const resp = await fetch(`${DAEMON_BASE}${path}`, {
-    method: "POST",
-    // 口令每次现读: daemon 可能在本进程起来之后才生成它。
-    headers: { "content-type": "application/json", [DAEMON_TOKEN_HEADER]: readDaemonToken() },
-    body: JSON.stringify({ ...selfRef(), ...body }),
-  });
-  return { j: (await resp.json().catch(() => ({}))) as Record<string, unknown>, status: resp.status };
-};
+const asReply = (r: { json: unknown; status: number }): DaemonReply => ({
+  j: (r.json && typeof r.json === "object" ? r.json : {}) as Record<string, unknown>,
+  status: r.status,
+});
 
-const daemonGet = async (path: string): Promise<DaemonReply> => {
-  const resp = await fetch(`${DAEMON_BASE}${path}`);
-  return { j: (await resp.json().catch(() => ({}))) as Record<string, unknown>, status: resp.status };
-};
+const daemonPost = async (path: string, body: Record<string, unknown>): Promise<DaemonReply> =>
+  asReply(await daemonRequest("POST", path, {
+    // 口令每次现读: daemon 可能在本进程起来之后才生成它。
+    headers: { [DAEMON_TOKEN_HEADER]: readDaemonToken() },
+    body: { ...selfRef(), ...body },
+  }));
+
+const daemonGet = async (path: string): Promise<DaemonReply> => asReply(await daemonRequest("GET", path));
 
 // Routes answer with either `reason` or `error`; `pick` narrows a payload that
 // is nested rather than spread at the top level.

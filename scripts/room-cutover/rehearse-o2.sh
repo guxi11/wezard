@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 注意: 这是已执行过的一次性脚本, 针对旧版 TCP 控制面 (127.0.0.1:<port>); 控制面已迁到 unix socket, 不再改动。
 # O2 演练 (2026-11-19 切换失败复盘): 真跑 cutover 第 6-8 步 (迁移 → 起 daemon → 读账本)。
 # 起的是真的新 daemon —— 临时 HOME + 临时端口 + 假 bot 凭据 + 隔离 tmux (TMUX_TMPDIR),
 # 全程不碰真实 ~/.wezard; 凭据是假的, WS 认证失败不影响 HTTP 面与 room 账本 (healthz 在

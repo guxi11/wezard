@@ -13,8 +13,10 @@ import { readdirSync, statSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { computeAuditReport } from "../daemon/audit.js";
+import { cliSocketPath } from "../shared/cli-socket.js";
+import { daemonRequest } from "../shared/daemon-client.js";
 
-const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE || "http://127.0.0.1:17890";
+// daemon 控制面 = unix socket; 连不上 (daemon 没起) 一律当「没有镜像」。
 
 const PROJECT_BASES = [
   join(homedir(), ".claude-internal", "projects"),
@@ -71,9 +73,9 @@ interface MirrorRef { sessionId: string; jsonlPath: string; target: string; }
 const findMirrorByTag = async (tag: string): Promise<MirrorRef | null> => {
   const wanted = tag.replace(/^#/, "");
   try {
-    const res = await fetch(`${DAEMON_BASE}/mirror/status`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return null;
-    const status = (await res.json()) as { mirrors?: MirrorRef[] };
+    const res = await daemonRequest("GET", "/mirror/status", { socketPath: cliSocketPath(), timeoutMs: 2000 });
+    if (res.status !== 200) return null;
+    const status = (res.json ?? {}) as { mirrors?: MirrorRef[] };
     const matches = (status.mirrors ?? []).filter((m) => (m.target.split("#")[1] ?? "") === wanted);
     if (matches.length === 0) return null;
     const ranked = matches
@@ -93,17 +95,13 @@ const findMirrorByTag = async (tag: string): Promise<MirrorRef | null> => {
 // when the daemon is down or no mirror is bound — local stdout is enough.
 const pushToWeCom = async (sid: string, markdown: string): Promise<void> => {
   try {
-    const statusRes = await fetch(`${DAEMON_BASE}/mirror/status`, { signal: AbortSignal.timeout(2000) });
-    if (!statusRes.ok) return;
-    const status = (await statusRes.json()) as { mirrors?: MirrorRef[] };
+    const socketPath = cliSocketPath();
+    const statusRes = await daemonRequest("GET", "/mirror/status", { socketPath, timeoutMs: 2000 });
+    if (statusRes.status !== 200) return;
+    const status = (statusRes.json ?? {}) as { mirrors?: MirrorRef[] };
     const target = (status.mirrors ?? []).find((m) => m.sessionId === sid)?.target;
     if (!target) return;
-    await fetch(`${DAEMON_BASE}/message`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat: target, markdown }),
-      signal: AbortSignal.timeout(5000),
-    });
+    await daemonRequest("POST", "/message", { socketPath, body: { chat: target, markdown }, timeoutMs: 5000 });
   } catch { /* daemon unreachable — local stdout is enough */ }
 };
 

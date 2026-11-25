@@ -7,6 +7,7 @@ import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
 import { loadConfig } from "../shared/config.js";
+import { daemonSocketPath } from "../shared/daemon-addr.js";
 import { expandHome } from "../shared/paths.js";
 import { codexHookCommand } from "../shared/codex-hooks.js";
 import { syncCodexHooks } from "./codex-sync.js";
@@ -172,7 +173,7 @@ const main = async (): Promise<void> => {
     console.error("no sync.targets in config — nothing to do.");
     process.exit(0);
   }
-  const base = `http://${cfg.daemon.host}:${cfg.daemon.port}`;
+  const socketPath = daemonSocketPath(cfg);
 
   const lock = readLock();
   for (const t of targets) {
@@ -182,7 +183,7 @@ const main = async (): Promise<void> => {
     if (dryRun) continue;
     if (t.kind === "codex") {
       await syncCodexHooks(expandHome(t.settingsPath), "codex", process.cwd(),
-        codexHookCommand(sourcePath, base, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
+        codexHookCommand(sourcePath, socketPath, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
       if (remove) delete lock.targets[targetKey(t.settingsPath)];
       else lock.targets[targetKey(t.settingsPath)] = { wroteHooks: cfg.approval.enabled, wroteMcp: false, wroteEnv: [] };
     } else syncOne(t.settingsPath, t.kind, { remove }, lock);

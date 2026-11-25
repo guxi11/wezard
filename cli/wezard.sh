@@ -1,11 +1,38 @@
 #!/usr/bin/env bash
-# wezard CLI — talks to local wezard daemon over HTTP and toggles launchd/systemd.
+# wezard CLI — talks to the local wezard daemon over its unix socket and toggles launchd/systemd.
 set -uo pipefail
 
-DAEMON_BASE="${WEZARD_DAEMON_BASE:-http://127.0.0.1:17890}"
 LABEL="com.wezard.daemon"
 HOME_DIR="$HOME"
 OS="$(uname -s)"
+
+# 控制面 = daemon 的 unix socket (别的 uid 连不上)。路径规则同 shared/daemon-addr.ts:
+# env WEZARD_DAEMON_SOCK → config daemon.socket → ${stateDir}/run/daemon.sock → ~/.wezard/state/run/daemon.sock。
+# 读不到 daemon 时没法问 /status, 所以配置在这里按文本粗读 (只看 "daemon": {…} 块里的键)。
+daemon_conf() {
+  local f
+  for f in "${WEZARD_CONFIG:-}" "$HOME_DIR/.wezard/config.jsonc" "$HOME_DIR/.wezard/config.json"; do
+    [[ -n "$f" && -f "$f" ]] || continue
+    sed -e 's|^[[:space:]]*//.*||' -e 's|[[:space:]]//.*$||' "$f" | awk -v k="$1" '
+      /"daemon"[[:space:]]*:[[:space:]]*\{/ { on = 1 }
+      on && match($0, "\"" k "\"[[:space:]]*:[[:space:]]*\"[^\"]*\"") {
+        v = substr($0, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"$/, "", v); print v; exit }
+      on && /\}/ { exit }'
+    return 0
+  done
+}
+resolve_sock() {
+  local v
+  if [[ -n "${WEZARD_DAEMON_SOCK:-}" ]]; then v="$WEZARD_DAEMON_SOCK"
+  else
+    v="$(daemon_conf socket)"
+    if [[ -z "$v" ]]; then
+      v="$(daemon_conf stateDir)"; v="${v:-$HOME_DIR/.wezard/state}"; v="${v%/}/run/daemon.sock"
+    fi
+  fi
+  printf '%s' "${v/#\~/$HOME_DIR}"
+}
+SOCK="$(resolve_sock)"
 
 # Resolve symlinks so REPO_ROOT points at the real package dir even when this
 # script is invoked via the npm-installed bin symlink (e.g. ~/.npm-global/bin/wezard).
@@ -31,7 +58,7 @@ wezard <subcommand>
   start                load resident daemon (launchd/systemd)
   stop                 unload resident daemon
   restart              stop + start
-  reload               quick: shutdown via HTTP + kickstart
+  reload               quick: shutdown via the control socket (if up) + kickstart
   mirror-status        show current mirror attachment
   send <chat> <text>   proactive markdown message
   pending              list outstanding approval req_ids
@@ -53,12 +80,10 @@ wezard <subcommand>
 EOF
 }
 
-# --noproxy '*' is mandatory: the daemon is on 127.0.0.1, but an http_proxy /
-# all_proxy in the environment makes curl tunnel even localhost through the
-# proxy, which answers refused upstreams with an empty 200 — a false "up" that
-# poisons every readiness probe. Never let a proxy sit between CLI and daemon.
-http_get() { curl -sS --noproxy '*' --max-time 5 "$DAEMON_BASE$1"; }
-http_post() { curl -sS --noproxy '*' --max-time 5 -X POST -H 'content-type: application/json' -d "${2:-{\}}" "$DAEMON_BASE$1"; }
+# 一律 --unix-socket: 控制面不再有 TCP 端口, 也就没有代理能插进 CLI 与 daemon 之间
+# (--noproxy 保留, 不依赖 curl 对 unix socket 忽略代理这条细则)。
+http_get() { curl -sS --noproxy '*' --unix-socket "$SOCK" --max-time 5 "http://wezard$1"; }
+http_post() { curl -sS --noproxy '*' --unix-socket "$SOCK" --max-time 5 -X POST -H 'content-type: application/json' -d "${2:-{\}}" "http://wezard$1"; }
 
 # Run a dist/ entry script, building first when we're sitting in a dev checkout.
 # npm installs ship dist/ in the tarball, so a missing script there means a
@@ -87,16 +112,16 @@ pkg_version() {
 # One launchctl vocabulary, one readiness judge. Every lifecycle command
 # (start/restart/reload) funnels through ensure_up so none can leave the job in
 # a state another can't recover from. Success is judged by the invariant that
-# matters — /status responds on :17890 — never by a launchctl exit code, which
+# matters — /status answers on the control socket — never by a launchctl exit code, which
 # lies (un-bootstrapped domains, throttle, load/bootstrap semantics clash).
 PLIST="$HOME_DIR/Library/LaunchAgents/${LABEL}.plist"
 
 # Fast readiness probe — short per-call timeout so a bound-but-wedged /status
 # (e.g. daemon blocked on WS init) fails the poll in ~1s, not the 5s http_get
 # budget.
-probe()     { curl -sS --noproxy '*' --connect-timeout 1 --max-time 1 "$DAEMON_BASE/status" >/dev/null 2>&1; }
-# 按墙钟收口, 不按次数: 端口没 bind 时 curl 立刻 connection-refused 返回, 30 次
-# 循环其实只等了 ~9s —— 而恢复几百个镜像绑定的 boot 要几十秒才 listen, 于是
+probe()     { curl -sS --noproxy '*' --unix-socket "$SOCK" --connect-timeout 1 --max-time 1 "http://wezard/status" >/dev/null 2>&1; }
+# 按墙钟收口, 不按次数: socket 还没 bind 时 curl 立刻 connection-refused / ENOENT 返回,
+# 30 次循环其实只等了 ~9s —— 而恢复几百个镜像绑定的 boot 要几十秒才 listen, 于是
 # reload 明明成功却报 "not responding"。
 wait_up()   { local end=$((SECONDS + 90)); while (( SECONDS < end )); do probe && return 0; sleep 0.3; done; return 1; }
 wait_down() { local end=$((SECONDS + 30)); while (( SECONDS < end )); do probe || return 0; sleep 0.3; done; return 1; }
@@ -151,11 +176,15 @@ ensure_up() {
   esac
   wait_up
 }
-# Guaranteed teardown: drive shutdown through the HTTP /shutdown path, which
-# hard-exits (setTimeout process.exit) regardless of in-flight connections.
+# Guaranteed teardown: drive shutdown through POST /shutdown on the control socket,
+# which hard-exits (setTimeout process.exit) regardless of in-flight connections.
 # NEVER SIGTERM a live daemon via bootout — its SIGTERM handler awaits
 # http.close(), which blocks forever on a hung long-poll, wedging launchctl.
-graceful_stop() { http_post /shutdown >/dev/null 2>&1 || true; wait_down; }
+# socket 不在 = 没有新版 daemon 在听 (已停了, 或还是升级前听 TCP 的旧版): 这里**什么也不发** ——
+# 尤其绝不向 TCP 17890 发 /shutdown, 那可能是同机别的用户的旧 daemon; 旧版由
+# ensure_up 里的 systemctl restart / launchctl kickstart -k 换掉 (那一次不 drain,
+# 挂着的审批 hook 会等新 daemon 回来重新推卡)。
+graceful_stop() { [[ -S "$SOCK" ]] || return 0; http_post /shutdown >/dev/null 2>&1 || true; wait_down; }
 # Remove the job from the domain (so RunAtLoad won't respawn it). Process is
 # already dead from graceful_stop, so bootout is instant — nothing to kill.
 svc_unregister() {
@@ -180,7 +209,7 @@ case "$cmd" in
     # /status unreachable — distinguish "not loaded" from the silent-death case:
     # launchd shows the job loaded but it never bound the port (crash-loop /
     # bad config). Surface that instead of a flat "down".
-    echo "daemon: down ($DAEMON_BASE)"
+    echo "daemon: down (socket $SOCK)"
     if [[ "$OS" == "Darwin" ]] && ex=$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | sed -n 's/.*last exit code = \([0-9-]*\).*/\1/p'); then
       [[ -n "$ex" && "$ex" != "0" ]] \
         && echo "  ↳ launchd job loaded but last exit code = $ex — crash-looping. 'wezard logs' to see why." >&2
@@ -196,8 +225,8 @@ case "$cmd" in
   restart) graceful_stop >/dev/null 2>&1 || true; svc_unregister; ensure_up && echo "daemon: restarted" || { echo "daemon: restart failed — 'wezard logs'" >&2; exit 1; } ;;
   reload)
     # KeepAlive.SuccessfulExit=false, so /shutdown alone won't respawn. Graceful
-    # stop WAITS for :17890 to free (else the respawn loses the bind and
-    # crash-loops on ThrottleInterval), then converge via the shared primitive.
+    # stop WAITS for the control socket to go away (else the respawn finds a live
+    # listener and exits 1 into ThrottleInterval), then converge via the shared primitive.
     graceful_stop >/dev/null 2>&1 || true
     ensure_up && echo "daemon: reloaded" || { echo "daemon: reload issued but /status not responding — 'wezard logs'" >&2; exit 1; }
     ;;
@@ -335,7 +364,7 @@ case "$cmd" in
     # preserved unless `--purge` is given.
     purge=0
     [[ "${1:-}" == "--purge" ]] && purge=1
-    http_post /shutdown >/dev/null 2>&1 || true
+    graceful_stop >/dev/null 2>&1 || true
     NODE_BIN="$(command -v node)"
     SYNC_SCRIPT="$REPO_ROOT/dist/cli/sync.js"
     [[ -f "$SYNC_SCRIPT" ]] && "$NODE_BIN" "$SYNC_SCRIPT" --remove || true

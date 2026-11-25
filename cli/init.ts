@@ -23,6 +23,8 @@ import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { sleep } from "../shared/std.js";
+import { cliSocketPath } from "../shared/cli-socket.js";
+import { daemonRequest } from "../shared/daemon-client.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = pathResolve(here, "..", "..");
@@ -77,19 +79,14 @@ const syncKindFor = (kind: AgentKind): "claude" | "codebuddy" | "codex" =>
 const backendNameFor = (kind: AgentKind): "claude" | "claude-internal" | "codebuddy" | "codex" => kind;
 
 // ── HTTP helpers (talk to local daemon) ──────────────────────────────
-const DAEMON = "http://127.0.0.1:17890";
-const get = async (p: string): Promise<unknown> => {
-  const r = await fetch(`${DAEMON}${p}`);
-  return r.json().catch(() => ({}));
-};
-const post = async (p: string, body: unknown): Promise<unknown> => {
-  const r = await fetch(`${DAEMON}${p}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", [DAEMON_TOKEN_HEADER]: readDaemonToken() },
-    body: JSON.stringify(body),
-  });
-  return r.json().catch(() => ({}));
-};
+// 控制面是 daemon 的 unix socket (env WEZARD_DAEMON_SOCK → daemon.socket → 缺省)。
+const get = async (p: string): Promise<unknown> => (await daemonRequest("GET", p, { socketPath: cliSocketPath() })).json ?? {};
+const post = async (p: string, body: unknown): Promise<unknown> =>
+  (await daemonRequest("POST", p, {
+    socketPath: cliSocketPath(),
+    headers: { [DAEMON_TOKEN_HEADER]: readDaemonToken() },
+    body,
+  })).json ?? {};
 
 // ── Existing credentials ─────────────────────────────────────────────
 // secrets.json 是 botId/secret 的唯一落盘点 (config.jsonc 只留非敏感字段)。

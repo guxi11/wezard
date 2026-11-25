@@ -117,4 +117,16 @@ case "$OS" in
     echo "unsupported OS: $OS"; exit 1 ;;
 esac
 
+# 健康检查: daemon 的控制面是 unix socket, 交给 wezard.sh status 去解析路径并探测
+# (路径规则只在它那一处)。不致命: 首次安装还没配 bot 凭证时 daemon 起不来是预期的。
+if [[ "$COMPONENT" == "daemon" ]]; then
+  up=0
+  for _ in $(seq 1 30); do
+    bash "$REPO/cli/wezard.sh" status >/dev/null 2>&1 && { up=1; break; }
+    sleep 1
+  done
+  if (( up )); then echo "[install] daemon answering on its control socket"
+  else echo "[install] WARNING: daemon not answering on its control socket yet — 'wezard status' / 'wezard logs'" >&2; fi
+fi
+
 echo "[install] $COMPONENT done. Logs at $HOME_DIR/.wezard/"

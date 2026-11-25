@@ -56,9 +56,10 @@ try {
   assert.equal(envOff.status, 0);
   assert.equal(envOff.stdout.trim(), "");
 
-  // daemon 不可达 (端口没人听): 不给 decision。这是本次改动的核心 ——
+  // daemon 不可达 (socket 不在): 不给 decision。这是本次改动的核心 ——
   // 从前这里回 allow, pane 里的东西会静默拿到任何权限。
-  const down = run({ WEZARD_DAEMON_URL: "http://127.0.0.1:9/approve" });
+  const sock = join(root, "d.sock");
+  const down = run({ WEZARD_DAEMON_SOCK: sock });
   assert.equal(down.status, 0);
   assert.equal(down.stdout.trim(), "", `daemon down must not answer, got: ${down.stdout}`);
 
@@ -68,24 +69,24 @@ try {
     'const http = require("node:http");',
     'let n = 0;',
     'const s = http.createServer((req, res) => { n++; console.log("REQ " + n); req.resume(); req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ decision: "allow", reason: "test" })); }); });',
-    's.listen(0, "127.0.0.1", () => console.log("PORT " + s.address().port));',
+    `s.listen(${JSON.stringify(sock)}, () => console.log("PORT up"));`,
   ].join("\n")], { stdio: ["ignore", "pipe", "inherit"] });
   try {
     let fakeOut = "";
-    const port = await new Promise<string>((ok) => fake.stdout!.on("data", (d) => {
+    await new Promise<void>((ok) => fake.stdout!.on("data", (d) => {
       fakeOut += String(d);
-      const m = /PORT (\d+)/.exec(fakeOut);
-      if (m) ok(m[1]!);
+      if (/PORT up/.test(fakeOut)) ok();
     }));
-    const url = `http://127.0.0.1:${port}/approve`;
-    const up = run({ WEZARD_DAEMON_URL: url });
+    // 旧 pane 的启动行还带着指向 TCP 的 WEZARD_DAEMON_URL: hook 不再读它, 照样走 socket。
+    const staleUrl = "http://127.0.0.1:9/approve";
+    const up = run({ WEZARD_DAEMON_SOCK: sock, WEZARD_DAEMON_URL: staleUrl });
     assert.equal(up.status, 0, up.stderr);
     assert.match(up.stdout, /"permissionDecision":"allow"/);
     assert.match(up.stdout, /wezard: test/);
 
     // 没有归属标记 = 人自己开的会话: 同一台「会回 allow」的假 daemon 在听, 但
     // hook 必须一个请求都不发、零输出 (回了 allow 就等于替别人的会话放权)。
-    const foreign = run({ WEZARD_DAEMON_URL: url, WEZARD_MANAGED: "" });
+    const foreign = run({ WEZARD_DAEMON_SOCK: sock, WEZARD_MANAGED: "" });
     assert.equal(foreign.status, 0, foreign.stderr);
     assert.equal(foreign.stdout.trim(), "", `unmanaged session must stay silent, got: ${foreign.stdout}`);
     // 子进程的 stdout 是异步到的: 给它一拍再数。
