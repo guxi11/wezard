@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { loadConfig, type Config } from "../shared/config.js";
 import { clientSocketPath } from "../shared/daemon-addr.js";
 import { daemonRequest } from "../shared/daemon-client.js";
+import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { externalTokenOf, EXT_WAIT_MAX } from "../shared/external.js";
 
 const RETRY_MS = 15_000;
@@ -115,7 +116,9 @@ const main = async (): Promise<void> => {
   if (cmd === "rotate") {
     const name = p.rest[0] ?? flagStr(p, "as") ?? "";
     if (!name) die("rotate 要 <名字>", 2);
-    report(await withRetry(() => once("POST", "/external/rotate", { name }, {}, 10_000)));
+    // rotate 要 daemon 口令 (重写口令是一条能力, socket 本身不算凭据); 口令文件按生产路径现读。
+    const headers = { [DAEMON_TOKEN_HEADER]: readDaemonToken() };
+    report(await withRetry(() => once("POST", "/external/rotate", { name }, headers, 10_000)));
     return;
   }
 

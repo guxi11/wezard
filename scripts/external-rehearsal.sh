@@ -252,12 +252,36 @@ const arr = JSON.parse(process.argv[1]); const hit = (Array.isArray(arr) ? arr :
 process.stdout.write(hit ? hit.state : "absent");' "$i5" "$req5" >"$T/i5.txt"
 check "$(cat "$T/i5.txt")" "canceled" "⑤ --all 里它是 canceled"
 
+# ⑤b cancel 的 system 行要真的叫醒接待 wizard (wake 含它的 uid, 不是直写空 wake)
+node -e '
+const fs = require("fs"), path = require("path");
+const [stateDir, req, uid] = process.argv.slice(1);
+const ops = fs.readFileSync(path.join(stateDir, "external", "requests.jsonl"), "utf8")
+  .split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } });
+const ask = ops.filter((o) => o && o.op === "ask" && o.req === req).pop();
+if (!ask) { process.stdout.write("no-ask"); process.exit(0); }
+const rows = fs.readFileSync(path.join(stateDir, "rooms", encodeURIComponent(ask.room) + ".jsonl"), "utf8")
+  .split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } });
+const sys = rows.filter((r) => r && r.op === "msg" && r.sys === "ext-cancel" && (r.re || []).includes(req)).pop();
+process.stdout.write(!sys ? "no-row" : (sys.wake || []).includes(uid) ? "woke" : "nowake:" + JSON.stringify(sys.wake));
+' "$STATE" "$req5" "$UID_W" >"$T/cancel-wake.txt"
+check "$(cat "$T/cancel-wake.txt")" "woke" "⑤ cancel 的 system 行 wake 含接待 wizard 的 uid"
+
 # ── ⑥ 三种额度超限都是 429 ──────────────────────────────────────────────────
 t1=$(ext ask --as Tiny "tiny 第一句")
 check "$(printf '%s' "$t1" | jget state)" "open" "⑥ Tiny 第一句放行"
 ext ask --as Tiny "tiny 第二句" >"$T/tiny.out" 2>"$T/tiny.err"
 check "$?" "1" "⑥ 每分钟额度超了退非 0"
 if grep -q "429" "$T/tiny.err"; then pass "⑥ 每分钟额度: stderr 写明 429"; else bad "⑥ 每分钟额度没有 429: $(cat "$T/tiny.err")"; fi
+
+# 额度先于开房: 被 429 的那次不该替它多开一间接待 room (索引里 Tiny 只有一条 room op)
+tiny_rooms=$(node -e '
+const fs = require("fs");
+const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+const n = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .filter((o) => o && o.op === "room" && o.principal === process.argv[2]).length;
+process.stdout.write(String(n));' "$STATE/external/requests.jsonl" "Tiny")
+check "$tiny_rooms" "1" "⑥ 额度超限那次没有先开房 (Tiny 仍只有 1 间)"
 
 f1=$(ext ask --as Few "few 第一件")
 check "$(printf '%s' "$f1" | jget state)" "open" "⑥ Few 第一件放行"
@@ -282,6 +306,27 @@ if [ -n "$VPORT" ]; then
 else
   bad "⑦ 读不到视图口 (ports.json), 没法验 410"
 fi
+
+# ── ⑧ 口令轮换: rotate 要 daemon 口令, 旧口令立即失效 ──────────────────────────
+rot_none=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --unix-socket "$SOCK" -m 5 -X POST \
+  -H 'content-type: application/json' -d '{"name":"CoC"}' "http://wezard/external/rotate")
+check "$rot_none" "403" "⑧ 不带 daemon 口令的 rotate 被拒 (403)"
+
+OLD_TOKEN=$(cat "$H/.wezard/external/CoC.token")
+rot_ext=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --unix-socket "$SOCK" -m 5 -X POST \
+  -H 'content-type: application/json' -H 'x-wezard-ext: CoC' -H "x-wezard-ext-token: $OLD_TOKEN" \
+  -d '{"name":"CoC"}' "http://wezard/external/rotate")
+check "$rot_ext" "403" "⑧ 只有调用方口令 (没有 daemon 口令) 也不能 rotate (403)"
+
+rot_ok=$(ext rotate CoC)
+check "$(printf '%s' "$rot_ok" | jget ok)" "true" "⑧ CLI rotate 带 daemon 口令可用"
+check "$(printf '%s' "$(ext inbox --all)" | jget 0.req)" "$req1" "⑧ 轮换后 CLI 读新口令照常可用"
+
+NEW_TOKEN=$(cat "$H/.wezard/external/CoC.token")
+[ "$NEW_TOKEN" != "$OLD_TOKEN" ] && pass "⑧ 口令文件确实换了一串" || bad "⑧ 口令文件没变"
+old_code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --unix-socket "$SOCK" -m 5 \
+  -H 'x-wezard-ext: CoC' -H "x-wezard-ext-token: $OLD_TOKEN" "http://wezard/external/inbox")
+check "$old_code" "403" "⑧ 旧口令立即失效 (403)"
 
 echo "-----"
 if [ "$FAIL" -eq 0 ]; then

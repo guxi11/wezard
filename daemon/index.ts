@@ -1470,6 +1470,8 @@ const main = async (): Promise<void> => {
       findWizard: (name) => { const rec = wizards.byName(name); return rec?.uid ? { uid: rec.uid, name: rec.name || name } : undefined; },
     });
     for (const [key, handler] of Object.entries(external.routes())) http.register(key, handler);
+    // 重写口令是一条能力: 单独过 daemon 口令闸 (同 /config/set), 不让 socket 上任何进程替调用方换口令。
+    http.register("POST /external/rotate", guarded(external.rotateRoute()));
     external.syncTokens();
     // boot 摘 lead: leadOf 全关了的, 以及没有 leadOf 的老 lead 名下已无同伴的活 (2026-11-22 admin 选 B)。
     try { settleLeads(true); } catch (e) { log.warn({ mod: "lead", err: errText(e) }, "lead: boot 清扫失败 (不影响启动)"); }

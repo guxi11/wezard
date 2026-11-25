@@ -16,7 +16,7 @@ import {
   foldExtIndex, isWaiting, judgeAck, judgeCancel, judgeExtAuth, parseExtIndex, roomTitle, EXT_TEXT_MAX, EXT_WAIT_DEFAULT, EXT_WAIT_MAX,
   type ExtIndex, type ExtIndexOp, type ExtOutcome, type ExtPrincipal, type ExtRequest,
 } from "../shared/external.js";
-import { adhocRoomId, DAEMON, idList, msgIdOf, whoKey, type Draft, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who } from "../shared/room.js";
+import { adhocRoomId, DAEMON, idList, whoKey, type Draft, type RoomOp, type RoomState, type Verdict, type Who } from "../shared/room.js";
 import type { RoomStore } from "./rooms.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
@@ -210,14 +210,15 @@ export const createExternal = (p: ExternalPorts) => {
     }
     const ws = p.findWizard(pr.reception);
     if (!ws) { reply(409, { ok: false, reason: "接待 wizard " + pr.reception + " 不在名册" }); return; }
-    const room = ensureRoom(pr, ws);
-    if (re && !tryState(room)?.byId.has(re)) {
-      reply(409, { ok: false, reason: "re 那条不在当前 room (" + room + "): 接待 wizard 换人后要从新的请求续" });
-      return;
-    }
+    // 额度先判: 超了就不该替它开一间房 (开房是副作用, 且会留下空的接待 room)。
     const q = checkQuota(asksOf(pr.name), (r) => outcomeOf(r).state, pr, now());
     if (!q.ok) {
       reply(429, { ok: false, reason: q.reason, ...(q.retryAt ? { retryAt: isoOf(q.retryAt) } : {}) });
+      return;
+    }
+    const room = ensureRoom(pr, ws);
+    if (re && !tryState(room)?.byId.has(re)) {
+      reply(409, { ok: false, reason: "re 那条不在当前 room (" + room + "): 接待 wizard 换人后要从新的请求续" });
       return;
     }
     const thread = typeof b.thread === "string" ? b.thread.trim() : "";
@@ -290,14 +291,14 @@ export const createExternal = (p: ExternalPorts) => {
     const j = judgeCancel(rec, pr.name, out.state);
     if (!j.ok) { reply(409, { ok: false, reason: j.reason }); return; }
     const holder: Who | undefined = out.holderUid ? { kind: "wizard", id: out.holderUid } : undefined;
-    const seq = (st?.seq ?? 0) + 1;
-    const row: MsgRow = {
-      op: "msg", at: now(), room: rec.room, id: msgIdOf(rec.room, seq), seq, author: DAEMON, ord: 0, speak: "daemon",
-      kind: "system", text: cancelText(pr.name, rec.req), ...(holder ? { to: [holder] } : {}), re: [rec.req], wake: [], origin: "daemon", sys: "ext-cancel",
-    };
-    p.write(rec.room, [row]);
+    // 走 hub.append 让 judge 算 seq / wake: 这一行要真的把接待 wizard 叫醒去停手 (to 是它, re 是那条请求)。
+    const v = p.append(rec.room, {
+      author: DAEMON, kind: "system", text: cancelText(pr.name, rec.req), origin: "daemon",
+      ...(holder ? { to: [holder] } : {}), re: [rec.req], sys: "ext-cancel",
+    });
+    if (!v.ok) { reply(v.status, { ok: false, reason: v.reason }); return; }
     record({ op: "cancel", at: now(), req: rec.req });
-    reply(200, { ok: true, req: rec.req, state: "canceled" });
+    reply(200, { ok: true, req: rec.req, state: "canceled", woke: v.row.wake });
   });
 
   const rotate = guard("POST /external/rotate", async (req, res, _url, a, reply) => {
@@ -311,14 +312,15 @@ export const createExternal = (p: ExternalPorts) => {
   });
 
   return {
+    // rotate 重写的是调用方的凭据 = 一条能力, 不能只靠 socket 认人: 由 index.ts 套 daemon 口令闸后单独注册。
     routes: (): Record<string, Handler> => ({
       "POST /external/ask": ask,
       "POST /external/wait": wait,
       "GET /external/inbox": inbox,
       "POST /external/ack": ack,
       "POST /external/cancel": cancel,
-      "POST /external/rotate": rotate,
     }),
+    rotateRoute: (): Handler => rotate,
     syncTokens,
     /** 诊断 / 测试: 当前索引快照。 */
     index: (): ExtIndex => index,
