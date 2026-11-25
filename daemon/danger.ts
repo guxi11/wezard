@@ -9,13 +9,15 @@
 // 纯函数, 只做匹配; 所有副作用留在 approval.ts。
 import type { Config } from "../shared/config.js";
 import { COMMAND_KEYS, replBashCommands, replFallbackCommands } from "../shared/repl-script.js";
+import { WRAPPER_NAMES, scrubCommand, shellWords } from "./danger-scrub.js";
 
 export interface DangerHit {
   /** 人类可读的规则名, 直接渲染到卡片上 — 用户要知道「哪一条」判定它危险。 */
   rule: string;
 }
 
-type Rule = readonly [label: string, re: RegExp];
+// 多数规则是正则; 要「看清参数是哪几个词」的 (pkill 的目标宽不宽、凭据文件是被读还是只被 ls) 用谓词。
+type Rule = readonly [label: string, test: RegExp | ((text: string) => boolean)];
 
 // 「命令词位置」前缀: 行首 / 换行 / `;` `&&` `||` `(` 之后 / 引号紧邻处 /
 // 包装器命令之后 / `do` `then` `else` 之后 / `--` 参数分隔符之后。
@@ -32,7 +34,7 @@ type Rule = readonly [label: string, re: RegExp];
 // `nice rm` / `env FOO=1 rm` / `watch reboot` 全部漏报 —— 这里尽量收全, 并允许
 // 包装器与命令之间隔一串参数 token。token 只认 `-` 开头的选项 / 纯数字时长 /
 // `K=V` 赋值: 普通单词会打断链条, `timeout 5 rg -n sudo` 里的检索词钓不出命中。
-const WRAPPERS = String.raw`sudo|doas|nohup|exec|xargs|env|time|command|builtin|timeout|nice|ionice|stdbuf|setsid|watch|caffeinate|do|then|else`;
+const WRAPPERS = WRAPPER_NAMES;
 const WRAP_ARG = String.raw`(?:-[^\s;|&]*|\d+(?:\.\d+)?[smhd]?|\w+=[^\s;|&]*)\s+`;
 const CMD_HEAD = String.raw`(?:^|[\n;&|(]\s*|["'\`]\s*|\b(?:${WRAPPERS})\s+(?:${WRAP_ARG})*|--\s+)`;
 
@@ -47,10 +49,10 @@ const REMOTE_CTX = String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[\s\S]*\b`;
  *
  * 只用于纯单词触发的规则 —— `kubectl delete`、`dd if=` 这类自带结构约束的
  * 不需要, 它们的第二个 token 已经把误伤面挡住了。
- */const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
+ */const cmdWord = (label: string, words: string, flags = "", tail = ""): Rule[] => [
   // `\\?`: `\rm` 这种反斜杠转义 (绕开 alias 的惯用写法) 仍处于命令词位置。
-  [label, new RegExp(`${CMD_HEAD}\\\\?(?:${words})\\b`, flags)],
-  [`远程${label}`, new RegExp(`${REMOTE_CTX}(?:${words})\\b`, flags)],
+  [label, new RegExp(`${CMD_HEAD}\\\\?(?:${words})\\b${tail}`, flags)],
+  [`远程${label}`, new RegExp(`${REMOTE_CTX}(?:${words})\\b${tail}`, flags)],
 ];
 
 // rm / git 丢弃改动 (2026-11-03 人口径「不要再判 danger」): 整类移出名单 ——
@@ -60,6 +62,32 @@ const REMOTE_CTX = String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[\s\S]*\b`;
 // rmOutsideTargets / GIT_WILDTREE) 随判据一并删除 —— 分类不存在了, 留着是死代码。
 // 边界: 批量删除 find -delete 是独立的批量删除规则 (find 扫全树删, 不只是 rm),
 // 不属这两类, 保持原样。
+// `git [全局选项] push` 与「到本子句末尾」: 子句以 `;` `&` `|` `)` 换行收尾 (反斜杠续行不算)。
+const GIT_PUSH = String.raw`\bgit\b(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+push\b`;
+const PUSH_CLAUSE = String.raw`(?:[^\n;&|)]|\\\n)*?`;
+
+// pkill 的参数里是否有「宽」的目标 (见 CMD_RULES 里的说明)。纯函数, 可单测。
+const PKILL_ARGS = new RegExp(`(?:${CMD_HEAD})\\\\?pkill\\b([^\\n;&|)]*)`, "g");
+const PKILL_ANY = /\bpkill\b([^\n;&|)]*)/g;
+const REMOTE_START = /\b(?:ssh|(?:kubectl|docker)\s+exec)\b/;
+const pkillArgsRisky = (args: string): boolean => {
+  const words = shellWords(args);
+  const skip = new Set<number>();
+  const forced = words.some((w, i) => /^-(?:9|KILL|SIGKILL)$/.test(w) || (w === "--signal" && /^(?:9|KILL|SIGKILL)$/.test(words[i + 1] ?? "")));
+  const widening = words.some((w) => /^--(?:euid|uid|group|pgroup|session|terminal|inverse)\b/.test(w) || /^-[a-z]*[ugstv][a-z]*$/.test(w) || w === "-U" || w === "-G");
+  words.forEach((w, i) => { if (w === "-P" || w === "-F") skip.add(i + 1); });
+  const pattern = words.filter((w, i) => !skip.has(i) && !w.startsWith("-")).pop();
+  // 没有模式 pkill 自己会报错; 有模式但太短 (< 8 字符) / 含变量 (看不见实际杀谁) → 当宽杀。
+  const wide = pattern !== undefined && (/[$`]/.test(pattern) || pattern.length < 8);
+  return forced || widening || wide;
+};
+export const pkillRisky = (text: string): boolean => {
+  const local = [...text.matchAll(PKILL_ARGS)].map((m) => m[1] ?? "");
+  const at = REMOTE_START.exec(text)?.index;
+  const remote = at === undefined ? [] : [...text.slice(at).matchAll(PKILL_ANY)].map((m) => m[1] ?? "");
+  return [...local, ...remote].some(pkillArgsRisky);
+};
+
 // ── 内置命令名单 (Bash / 任何带 command 的工具) ────────────────────────
 const CMD_RULES: readonly Rule[] = [
   // rmdir 2026-10-28 移出: 只能删空目录, 没有数据可丢 (mkdir 即恢复), 不够「不可逆」。
@@ -75,15 +103,25 @@ const CMD_RULES: readonly Rule[] = [
   // 777 写在同一分支里, 拆出来立成独立一条: 全局可写是「别人能改我的文件」的洞,
   // 被改过的内容不留底 (git 只认得已提交的那版), 与递归改权限不是一件事。
   ["全局可写 chmod 777", /\bch(mod|own)\b[\s\S]*\b777\b/],
-  ["强制杀进程", /\bkill\s+-9\b/],
-  ...cmdWord("强制杀进程", "killall|pkill"),
+  // 强制杀进程 (人 2026-11-25 D): 只留 SIGKILL (kill -9 / pkill -9 / killall) 与「宽杀」。
+  //  · kill -9 / -KILL 要在命令词位置 (原先无位置约束, echo / 提交信息里的字样也中);
+  //  · killall 按名字杀光同名进程, 本身就是宽杀;
+  //  · pkill 看目标: 带具体模式的 `pkill -f "next dev -p 3100"` (SIGTERM) 是正常收尾 → 普通档;
+  //    -9 / 按用户·组·会话·终端选 / 反选 / 模式太短 (`pkill -f node`) 或看不见 (`$X`) → 仍 danger。
+  ...cmdWord("强制杀进程", "kill", "", String.raw`\s+(?:-9|-KILL|-SIGKILL|-s\s+(?:9|KILL|SIGKILL))\b`),
+  ...cmdWord("强制杀进程", "killall"),
+  ["强制杀进程", pkillRisky],
   ...cmdWord("关机/重启", "shutdown|reboot|halt|poweroff"),
   ["服务停用", /\blaunchctl\s+(unload|bootout|remove)\b|\bsystemctl\s+(stop|disable|mask)\b/],
-  ["git 强推", /\bgit\b[\s\S]*\bpush\b[\s\S]*(--force|-f\b)/],
+  // 强推 / 删远程分支 (人 2026-11-25 B): 旗标必须落在**同一条 push 子句**里。原正则
+  // `git … push … --force` 跨分隔符匹配, `git push origin x:main && git worktree remove --force`
+  // 的 --force 属于 worktree, 却被判强推。口径不变: --force 前缀照旧算 (含
+  // --force-with-lease / --force-if-includes), 另补 +refspec 强推 (`git push origin +main`)。
+  ["git 强推", new RegExp(`${GIT_PUSH}${PUSH_CLAUSE}(?:\\s--force\\b|\\s-[a-zA-Z]*f[a-zA-Z]*(?=\\s|$)|\\s["']?\\+\\S)`)],
   // git 删分支 2026-10-28 拆分: 本地 branch -D 移出 —— 提交仍在 reflog 里
   // (默认 90 天), git 里拿得回来; 远程 push --delete 保留 —— 动的是共享远端,
   // 别人的克隆不一定有副本, 拿不回来。
-  ["git 删远程分支", /\bgit\s+push\b[\s\S]*--delete\b/],
+  ["git 删远程分支", new RegExp(`${GIT_PUSH}${PUSH_CLAUSE}\\s(?:--delete\\b|-d\\b)`)],
   ["发布包", /\bnpm\s+(publish|unpublish)\b|\byarn\s+publish\b|\bpnpm\s+publish\b/],
   // 容器 2026-10-28 按「数据在哪」拆分: 容器/镜像/无 -v 的 compose down 是牲口
   // (compose up / 重新 pull 即恢复) → 移出; volume 和 prune 动的是数据卷 ——
@@ -112,12 +150,66 @@ const TOOL_RULES: readonly Rule[] = [
   ["删除类工具", /(^|_|__|\b)(delete|remove|destroy|drop|purge|revoke|uninstall)/i],
 ];
 
-// ── 内置敏感路径名单 (任何工具的任意字符串入参) ────────────────────────
+// ── 内置敏感路径名单 ────────────────────────────────────────────────────
+// 两个战场, 判据不同:
+//   · 文件路径入参 (Read / Edit / Write 的 file_path 等): 路径本身就是目标, 正则直接判;
+//   · 命令文本 (Bash.command): 路径只是命令的一个词 —— `ls -l .env`、`ln -s … .env`、
+//     `cat ~/.ssh/config` 都不泄露什么 (人 2026-11-25 C / E: 近 24h 82 张卡的大头), 凭据文件
+//     按「动词 + 路径」判 (见 credentialAccess), SSH 目录只拦私钥与授权文件。
+// SSH: 私钥 / 授权文件 / `.ssh/` 下除 config·known_hosts·cm/·*.pub 之外的一切 (反向排除:
+// 私钥文件名可以随便起, 白名单私钥名会漏 `deploy_key` 这类)。
+const SSH_BENIGN = String.raw`config\b|known_hosts[\w.]*|cm\/|[^\s/"']*\.pub(?![\w.])|environment\b|rc\b|sockets?\/|control[\w-]*\/`;
+const SSH_KEY = new RegExp(
+  String.raw`(?:^|[\/\s"'=:])\.ssh\/(?!(?:${SSH_BENIGN}))|(?<![\w-])id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?\b(?!\.pub)|(?<![\w-])authorized_keys\b`,
+);
+const CRED_FILE = /(^|\/)\.(env\b(?!\.(?:example|sample|template|dist|defaults?)\b)|npmrc|netrc|aws|gnupg)\b|credentials\b|secrets?\.(json|ya?ml|env)\b/;
 const PATH_RULES: readonly Rule[] = [
-  ["SSH 密钥", /(^|\/)\.ssh\/|id_(rsa|ed25519|ecdsa)\b|authorized_keys\b/],
-  ["凭据文件", /(^|\/)\.(env|npmrc|netrc|aws|gnupg)\b|credentials\b|secrets?\.(json|ya?ml|env)\b/],
+  ["SSH 密钥", SSH_KEY],
+  ["凭据文件", CRED_FILE],
   ["系统目录", /^\/(etc|System|Library\/LaunchDaemons|usr\/bin|bin|sbin)\//],
   ["家目录根/根目录", /^\s*(~|\/|\$HOME)\/?\s*$/],
+];
+
+// ── 凭据文件: 只拦会泄露内容的读法 / 拷出 / 写入 (人 2026-11-25 E「在使用侧限制」) ─────────
+// 放行: ls / stat / md5 / ln -s / file / wc / test / chmod / rm / `source .env && psql` /
+//   `docker run --env-file .env` / `grep -c KEY .env` (只数不露) / `cat .env | cut -d= -f1` (打码)。
+// 拦: cat·head·tail·less·无打码 grep·sed·awk 等把内容读出来; cp·mv·scp·rsync·tar·curl -d @ 等拷出;
+//   重定向 / tee / sed -i / cp 写入; python·node 等脚本里直接 open 它; ssh 远端的同类读法。
+const CRED_NAME = String.raw`(?:\.env(?!\.(?:example|sample|template|dist|defaults?)(?![\w-]))(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|\.aws(?:\/\S*)?|\.gnupg(?:\/\S*)?|credentials(?:\.\w+)?|secrets?\.(?:json|ya?ml|env))`;
+const CRED_ARG = String.raw`(?<![\w.-])(?:[^\s"'|;&<>()=]*\/)?${CRED_NAME}(?![\w-])`;
+const PRINTERS = String.raw`cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|hexdump|strings|base64|sed|awk|gawk|cut|sort|uniq|paste|column|diff|cmp|comm|grep|egrep|fgrep|zgrep|rg|ag|ack|jq|yq`;
+const MOVERS = String.raw`cp|mv|scp|rsync|tar|zip|7z|gzip|bzip2|xz|dd|install|tee|curl|wget|nc|ncat|socat|pbcopy|xclip|xsel|python[\d.]*|node|nodejs|ruby|perl|php|tsx|deno|bun`;
+const VERB = String.raw`(?:[^\s"'|;&<>()]*\/)?(${PRINTERS}|${MOVERS})\b`;
+const CRED_READ = new RegExp(`${CMD_HEAD}\\\\?${VERB}[^\\n;&|)]*?${CRED_ARG}`, "dg");
+// 脚本解释器的参数是引号里的一整段代码 (`python -c "import os; open('.env')"`), 里面的 `;` `)`
+// 不是命令分隔符 —— 一律扫到行尾 (代价: `node build.js && ls .env` 这种并列句也会中, 可接受)。
+const CRED_INTERP = new RegExp(`${CMD_HEAD}\\\\?(?:[^\\s"'|;&<>()]*\\/)?(?:python[\\d.]*|node|nodejs|ruby|perl|php|tsx|deno|bun)\\b[^\\n]*?${CRED_ARG}`);
+const CRED_REMOTE = new RegExp(String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[^\n;&|]*?\b(?:${PRINTERS}|${MOVERS})\b[^\n;&|)]*?${CRED_ARG}`);
+const CRED_WRITE = new RegExp(String.raw`\d*>>?\|?[ \t]*["']?(?:[^\s"'|;&<>()]*\/)?${CRED_NAME}(?![\w-])`);
+const CRED_FIND = new RegExp(String.raw`\bfind\b[^\n;&|]*${CRED_ARG}[^\n;&|]*-exec(?:dir)?\s+(?:${PRINTERS}|${MOVERS})\b`);
+const CRED_XARGS = new RegExp(String.raw`${CRED_ARG}[^\n;&|]*\|\s*xargs\s+(?:-\S+\s+)*(?:${PRINTERS}|${MOVERS})\b`);
+const COUNT_ONLY = /(?:^|\s)-[a-zA-Z]*[clLq][a-zA-Z]*(?=\s|$)|--(?:count|files-with-matches|files-without-match|quiet|silent)\b/;
+const MASKED_PIPE = /^\|\s*(?:cut\b[^|]*(?:-d\s*['"]?=|-f\s*1\b)|sed\b[^|]*\bs(.)[^\n|]*=|awk\b[^|]*-F\s*['"]?=|wc\b)/;
+const PRINT_ONLY = new RegExp(`^(?:${PRINTERS})$`);
+const IN_PLACE = /(?:^|\s)(?:-[a-zA-Z]*i|--in-place)\b/;
+
+export const credentialAccess = (text: string): boolean => {
+  const read = [...text.matchAll(CRED_READ)].some((m) => {
+    const verb = m[1] ?? "";
+    if (!PRINT_ONLY.test(verb)) return true; // 拷出 / 写入 / 脚本读: 没有「打码」一说
+    const at = m.indices?.[1]?.[0] ?? m.index ?? 0; // 动词自己的位置 (m.index 还带着命令词前缀)
+    const seg = text.slice(at).split(/[\n;&|)]/, 1)[0] ?? "";
+    if (verb === "sed" && IN_PLACE.test(seg)) return true;
+    if (/^(?:e?grep|fgrep|zgrep|rg|ag|ack)$/.test(verb) && COUNT_ONLY.test(seg)) return false;
+    return !MASKED_PIPE.test(text.slice(at + seg.length));
+  });
+  return read || CRED_INTERP.test(text) || CRED_WRITE.test(text) || CRED_REMOTE.test(text) || CRED_FIND.test(text) || CRED_XARGS.test(text);
+};
+
+// 命令文本上的路径类规则 (已 scrub): SSH 与凭据按上面的口径, 其余沿用路径正则。
+const CMD_PATH_RULES: readonly Rule[] = [
+  ["SSH 密钥", SSH_KEY],
+  ["凭据文件", credentialAccess],
 ];
 
 const compile = (sources: readonly string[]): Rule[] =>
@@ -130,7 +222,7 @@ const compile = (sources: readonly string[]): Rule[] =>
   });
 
 const firstHit = (rules: readonly Rule[], text: string): DangerHit | undefined => {
-  const hit = rules.find(([, re]) => re.test(text));
+  const hit = rules.find(([, t]) => (typeof t === "function" ? t(text) : t.test(text)));
   return hit ? { rule: hit[0] } : undefined;
 };
 
@@ -169,6 +261,31 @@ const commandsOf = (input: unknown): string[] => {
 // 路径类入参: 只看看起来像路径的字符串, 避免拿正文去撞路径规则。
 const pathish = (s: string): boolean => s.length < 512 && /^[~$/.]|\//.test(s);
 
+// 路径规则读哪些入参 (人 2026-11-25 A「Edit / Write 只对 file_path 跑路径规则, 不扫 new_string /
+// content」): 内置文件类工具只看它们的路径键; Bash 的路径在命令里, 由命令级规则判, 它的
+// description / timeout 之类不是路径。其余 (MCP / REPL 的 code …) 仍扫全部字符串叶子, 但
+// 跳过明显是「正文」的键 —— 写进文件的内容不是被访问的路径。
+const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep", "Bash"]);
+const PATH_KEYS = ["file_path", "notebook_path", "path"] as const;
+const BODY_KEYS = new Set(["new_string", "old_string", "content", "new_source"]);
+
+const leaves = (v: unknown, depth = 0, acc: string[] = []): string[] => {
+  if (acc.length >= MAX_NODES || depth > 4) return acc;
+  if (typeof v === "string") { acc.push(v); return acc; }
+  if (Array.isArray(v)) { v.forEach((x) => leaves(x, depth + 1, acc)); return acc; }
+  if (v && typeof v === "object") {
+    Object.entries(v as Record<string, unknown>).forEach(([k, x]) => { if (!BODY_KEYS.has(k)) leaves(x, depth + 1, acc); });
+  }
+  return acc;
+};
+
+/** 路径规则要扫的字符串叶子。 */
+export const pathLeaves = (toolName: string, toolInput: unknown): string[] => {
+  if (!FILE_TOOLS.has(toolName)) return leaves(toolInput);
+  const o = toolInput && typeof toolInput === "object" ? (toolInput as Record<string, unknown>) : {};
+  return PATH_KEYS.flatMap((k) => (typeof o[k] === "string" ? [o[k] as string] : []));
+};
+
 /**
  * danger 模式下这次调用是否可以免卡直接放行 (mode=danger 是默认档: 普通卡
  * 不再发, 见 config.ts 的 mode 枚举; "off" 档的放行不在这里 —— 它有专用分支,
@@ -206,15 +323,31 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
   // 白名单优先: 任一命令被豁免则整条调用豁免 (显式覆盖内置的宽规则)。
   if (allow.length > 0 && [toolName, ...cmds].some((t) => firstHit(allow, t))) return undefined;
 
-  const cmdRules = [...(d.builtin ? CMD_RULES : []), ...compile(d.commandPatterns)];
+  // 内置命令规则读预处理后的文本 (heredoc 数据体 / grep·echo 的引号参数已抹掉, 见
+  // danger-scrub.ts); 用户自配的 commandPatterns 读原文 —— 那是人明确要拦的字样, 不替它放宽。
+  const scrubbed = cmds.map(scrubCommand);
+  const builtinCmd = d.builtin ? CMD_RULES : [];
   const toolRules = [...(d.builtin ? TOOL_RULES : []), ...compile(d.toolPatterns)];
-  const pathRules = [...(d.builtin ? PATH_RULES : []), ...compile(d.pathPatterns)];
+  const builtinPath = d.builtin ? PATH_RULES : [];
+  const customPath = compile(d.pathPatterns);
+
+  const cmdHit = (c: string, raw: string): DangerHit | undefined =>
+    firstHit(builtinCmd, c) ??
+    firstHit(compile(d.commandPatterns), raw) ??
+    (d.builtin ? firstHit(CMD_PATH_RULES, c) : undefined) ??
+    // 命令里的路径类规则只留「命令即路径」的两条 (系统目录 / 家目录根, 锚定整串开头)。
+    (d.builtin && pathish(c) ? firstHit(PATH_RULES.slice(2), c) : undefined);
 
   return (
     firstHit(toolRules, toolName) ??
-    cmds.reduce<DangerHit | undefined>((acc, c) => acc ?? firstHit(cmdRules, c), undefined) ??
+    scrubbed.reduce<DangerHit | undefined>((acc, c, i) => acc ?? cmdHit(c, cmds[i] ?? c), undefined) ??
+    pathLeaves(toolName, toolInput).filter(pathish).reduce<DangerHit | undefined>(
+      (acc, s) => acc ?? firstHit(builtinPath, s),
+      undefined,
+    ) ??
+    // 自配 pathPatterns 沿用老口径: 扫全部字符串叶子 (含命令文本)。
     strings(toolInput).filter(pathish).reduce<DangerHit | undefined>(
-      (acc, s) => acc ?? firstHit(pathRules, s),
+      (acc, s) => acc ?? firstHit(customPath, s),
       undefined,
     )
   );
