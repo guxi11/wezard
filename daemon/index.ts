@@ -59,7 +59,7 @@ import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import { createExternal, type ExternalGateway } from "./external.js";
-import { extLabel, extNameOf } from "../shared/external.js";
+import { extLabel, extNameOf, receptionDenial } from "../shared/external.js";
 import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf, meWorkspaceOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
@@ -593,6 +593,7 @@ const main = async (): Promise<void> => {
       const cwd = (body.cwd ?? "").toString();
       const target = resolveSelf(body);
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
+      if (refuseReception(res, "POST /mirror/workspace", target)) return;
       const caller = resolveSelf({ sessionId: body.sessionId, tmuxPane: body.tmuxPane });
       if (refuseGuide(res, caller, "set_workspace") || refuseGuide(res, target, "set_workspace", false)) return;
       if (!cwd) { json(res, 400, { ok: false, reason: "cwd required" }); return; }
@@ -1662,6 +1663,27 @@ const main = async (): Promise<void> => {
       return true;
     };
 
+    // ── 外部接待 wizard 的禁用表 (第 2 步 §1) ────────────────────────────
+    // 判据是身份: 调用方解析到的 wizard 名 ∈ 启用中的 external.principals[].reception, 现查配置。
+    // 拦在路由层 —— CodeBuddy 的调用都包在 REPL 脚本里, 只看外层工具名拦不住。
+    /** 这个名字; 不是接待 wizard = undefined。 */
+    const receptionNameOf = (self: string): string | undefined => {
+      if (!self) return undefined;
+      const name = wizards.get(self)?.name || "";
+      if (!name) return undefined;
+      return (cfg.external?.principals ?? []).some((x) => x.enabled && x.reception === name) ? name : undefined;
+    };
+    /** true = 已回 403 (调用方该 return)。 */
+    const refuseReception = (res: import("node:http").ServerResponse, route: string, self: string,
+      extra: { rooms?: readonly string[]; targetName?: string; scope?: string; inherit?: boolean } = {}): boolean => {
+      const name = receptionNameOf(self);
+      if (!name) return false;
+      const why = receptionDenial({ route, selfName: name, ...extra }, (r) => hub.isBoundRoom(r));
+      if (!why) return false;
+      json(res, 403, { ok: false, reason: why });
+      return true;
+    };
+
     // ── /room/*: 发言与交付 ───────────────────────────────────────────────
     http.register("POST /room/say", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -1676,6 +1698,7 @@ const main = async (): Promise<void> => {
       const target = roomTargetOf(me, to?.who, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       if (guideOutsideRoom(res, self, target.room)) return;
+      if (refuseReception(res, "POST /room/say", self, { rooms: [target.room] })) return;
       roomReply(res, hub.append(target.room, { author: me, kind: "say", text, origin: "tool",
         ...(to?.who?.length ? { to: to.who } : {}), ...(b.interrupt ? { interrupt: true } : {}) }));
     });
@@ -1692,6 +1715,7 @@ const main = async (): Promise<void> => {
       if (!to.who?.length) { json(res, 400, { ok: false, reason: "to required: 至少点名一个 wizard (或本 room 的人 human:<userid>)" }); return; }
       const target = roomTargetOf(me, to.who, b.room, { autoAdhoc: { interrupt: !!b.interrupt } });
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      if (refuseReception(res, "POST /room/ask", self, { rooms: [target.room] })) return;
       const after = idList(b.after);
       // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。显式给的已关账 → 同样回落。
       const forOf = hub.resolveFor(me.id, b.for);
@@ -1718,6 +1742,7 @@ const main = async (): Promise<void> => {
       if (rooms.some((x) => !x)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re.filter((id) => !roomStore.roomOfMsg(id)).join(", ") }); return; }
       if (rooms.length > 1) { json(res, 400, { ok: false, reason: "re 跨了多个 room (" + rooms.join(", ") + ") — 分开答" }); return; }
       if (guideOutsideRoom(res, self, rooms[0]!)) return;
+      if (refuseReception(res, "POST /room/reply", self, { rooms: rooms.filter((x): x is string => !!x) })) return;
       const status = (b.status ?? "").toString().trim() as ReplyStatus | "";
       if (status && !["done", "need", "progress", "passed", "canceled", "error"].includes(status)) {
         json(res, 400, { ok: false, reason: "status 只认 done / need / progress / passed / canceled (error 只有 daemon 能写)" });
@@ -1746,6 +1771,7 @@ const main = async (): Promise<void> => {
         if (!d.room) { json(res, 400, { ok: false, reason: d.many.length > 1 ? "本轮被多个 room 唤醒 — 显式给 room" : "没有缺省 room — 显式给 room" }); return; }
         rooms.push(d.room);
       }
+      if (refuseReception(res, "POST /room/notify", self, { rooms })) return;
       const out: Array<Record<string, unknown>> = [];
       for (const room of rooms) {
         const v = hub.append(room, { author: me, kind: "say", text: markdown, origin: "tool" });
@@ -1767,6 +1793,7 @@ const main = async (): Promise<void> => {
       if (!["image", "file", "voice", "video"].includes(kind)) { json(res, 400, { ok: false, reason: "kind 只认 image / file / voice / video" }); return; }
       const target = roomTargetOf(me, undefined, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      if (refuseReception(res, "POST /room/file", self, { rooms: [target.room] })) return;
       const re = idList(b.re);
       const text = [b.title, b.caption, b.description].map((x) => (x ?? "").toString().trim()).filter(Boolean).join(" — ");
       roomReply(res, hub.append(target.room, { author: me, kind: "file", text, origin: "tool",
@@ -1814,6 +1841,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       if (refuseMonitor(res, self, "room_name")) return;
+      if (refuseReception(res, "POST /room/name", self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; name?: string; notice?: string };
@@ -1836,6 +1864,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       if (refuseMonitor(res, self, "room_invite")) return;
+      if (refuseReception(res, "POST /room/invite", self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; who?: string; history?: unknown };
@@ -1913,6 +1942,7 @@ const main = async (): Promise<void> => {
       const ref = (b.who ?? "").toString();
       const who = ref.trim() ? whoRefOf(ref) ?? memberRefOf(s, ref) : me;
       if (!who) { json(res, 400, { ok: false, reason: "认不出这个地址: " + b.who }); return; }
+      if (refuseReception(res, "POST /room/leave", self, { targetName: who ? stripSigil(roomNameOf(who)) : undefined })) return;
       if (!sameWho(who, me) && !sameWho(roomHost(s), me)) { json(res, 403, { ok: false, reason: "只有 host 能移出别人" }); return; }
       if (!s.members.has(whoKey(who))) { json(res, 409, { ok: false, reason: roomNameOf(who) + " 不是这个 room 的成员" }); return; }
       hub.write(r.room, leaveOps(s, who, me, Date.now(), (b.why ?? "").toString().trim() || undefined));
@@ -2070,6 +2100,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       if (refuseMonitor(res, self, "room_bind")) return;
+      if (refuseReception(res, "POST /room/bind", self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { source?: string; room?: string; why?: string; dryRun?: boolean };
@@ -2114,6 +2145,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       if (refuseMonitor(res, self, "room_unbind")) return;
+      if (refuseReception(res, "POST /room/unbind", self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { source?: string; room?: string; why?: string };
@@ -2138,6 +2170,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;
       if (refuseMonitor(res, self, "room_fork")) return;
+      if (refuseReception(res, "POST /room/fork", self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { source?: string; room?: string };
@@ -3334,6 +3367,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       if (refuseMonitor(res, self, "wizard_identity")) return;
+      if (refuseReception(res, "POST /wizard/identity", self, { targetName: stripSigil(String((body as { to?: unknown }).to ?? "")) })) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { name?: string; description?: string; expertise?: string; to?: string };
@@ -3705,6 +3739,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       if (refuseMonitor(res, self, "wizard_remember")) return;
+      if (refuseReception(res, "POST /wizard/remember", self, { scope: String((body as { scope?: unknown }).scope ?? "self") })) return;
       const b = body as { note?: string; forget?: string; scope?: string };
       const note = (b.note ?? "").toString().trim();
       const forget = (b.forget ?? "").toString().trim();
@@ -3926,6 +3961,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       if (refuseMonitor(res, self, "spawn_wizard")) return;
+      if (refuseReception(res, "POST /wizard/clone", self, { inherit: !!(body as { inherit?: boolean }).inherit })) return;
       if (refuseGuide(res, self, (body as { inherit?: boolean }).inherit ? "clone_wizard" : "spawn_wizard")) return;
       const r = await bearAs(self, body);
       // room? 参数 (契约 §3): 出生落地即入座 (via spawn, 免审)。
@@ -3949,6 +3985,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       if (refuseMonitor(res, self, "stop_wizard")) return;
+      if (refuseReception(res, "POST /wizard/stop", self, { targetName: stripSigil(String((body as { name?: unknown }).name ?? "")) })) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { name?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
@@ -4137,6 +4174,7 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       if (refuseMonitor(res, self, "schedule_task")) return;
+      if (refuseReception(res, "POST /tasks/schedule", self)) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; quiet?: boolean; id?: string };
@@ -4203,6 +4241,7 @@ const main = async (): Promise<void> => {
     http.register("POST /tasks/cancel", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseReception(res, "POST /tasks/cancel", self)) return;
       const id = ((body as { id?: string }).id ?? "").toString().trim();
       if (!id) { json(res, 400, { ok: false, reason: "id required (list_tasks 里那个 id)" }); return; }
       // 别的机器人的日程与不存在同形。
@@ -4343,6 +4382,7 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: "key/action are unsupported; use path/op" }); return;
       }
       const body = raw as SetReq & { sessionId?: string; tmuxPane?: string; target?: string };
+      if (refuseReception(res, "POST /config/set", resolveSelf(body))) return;
       const ask = pinChatKeys(cfg, body, configCaller(body));
       if ("ok" in ask) { json(res, 400, ask); return; }
       const reply = (pl: Plan, text: string, extra: Record<string, unknown> = {}): void =>
