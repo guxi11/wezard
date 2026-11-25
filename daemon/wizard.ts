@@ -113,7 +113,8 @@ export interface WizardRecord {
    *  归谁管 (预算、回收); forkOf 是上下文从哪来。克隆自己时两者是同一个, 不重复记。 */
   forkOf?: string;
   bornAt: number;
-  /** spawn / clone 时落地的档位 (models.backends.<backend>.tiers 的键)。只记出生那一刻: 之后 set_model 换了模型它不跟。 */
+  /** 当前档位 (models.backends.<backend>.tiers 的键, 聪明度只认它): spawn / clone 时按落地的档位记,
+   *  之后 set_model 换模型 / effort 时 daemon 按同一张表反查更新; 反查不出就清掉 (不认识这个模型, 不猜)。 */
   tier?: string;
   /** 被派来领一件复杂活的 lead: 宪章多一节层级规矩 (renderLeadRules), 组队打法随派活信封带 (renderLeadPlaybook)。 */
   lead?: boolean;

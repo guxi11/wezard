@@ -828,7 +828,7 @@ try {
   assert.equal(cold.workCold.fill, "rgb(45, 164, 78)", "工作中不受冷影响 (仍是绿): " + JSON.stringify(cold.workCold));
 
   // 聪明程度 = 多边形边数: 1 级三角 · 2 级四边 · 3 级五边 · 4 级六边 · 5 级圆; 没有 smarts = 五边形; 大小统一。
-  const polyNodes = [1, 2, 3, 4, 5, 0].map((lv, i) => mk(10 + i, "poly" + lv, lv ? { smarts: { level: lv, basis: "model", label: "x" } } : {}));
+  const polyNodes = [1, 2, 3, 4, 5, 0].map((lv, i) => mk(10 + i, "poly" + lv, lv ? { smarts: { level: lv, tier: "x" } } : {}));
   const polyRoom = roomFact("adhoc:poly1", "adhoc", polyNodes.map((n, i) => ({ who: who("wizard", n.uid), name: n.name, via: "invite", since: 50 + i, ord: i + 1, host: i === 0 })), who("wizard", polyNodes[0].uid));
   globalThis.__extraRooms = [polyRoom]; globalThis.__extraNodes = polyNodes;
   const polyPg = await browser.newPage({ viewport: { width: 1100, height: 800 } });

@@ -257,7 +257,7 @@ export const patchedTop = (cfg: Config, pl: Plan): unknown => {
 
 // ── config_get 的依据: 各档的实际用量 ───────────────────────────────────
 // 口径是「按模型」: transcript 里只记了模型, 没记它是哪一档生的 —— 管家用的 sonnet 也会算进
-// standard。各档在用的 wizard 数取名册里出生时记下的 tier。
+// standard。各档在用的 wizard 数取名册里的 tier (出生时记的, set_model 换模型后按档位表反查更新)。
 export interface UsageTotals { tokens: number; cost: number }
 export interface TierUsage { today: Map<string, UsageTotals>; week: Map<string, UsageTotals> }
 

@@ -34,12 +34,6 @@ const canonical = (model: string): string => spellings(unwrap(model)).at(-1)!.re
 
 const FAMILY = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?$/;
 
-/** Claude 家族名 (opus / sonnet / haiku / fable / mythos); 别家或认不出 → ""。裸别名 (`opus`) 也认。 */
-export const claudeFamily = (model: string): string => {
-  const bare = unwrap(model);
-  return /^(opus|sonnet|haiku|fable|mythos)$/.test(bare) ? bare : FAMILY.exec(canonical(model))?.[1] ?? "";
-};
-
 /** 给人看的模型名: claude-opus-5-5[1m] → Opus 5.5; 不是 Claude 家族的就是去了壳的规范名。 */
 export const modelLabel = (model: string): string => {
   const c = canonical(model);

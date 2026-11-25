@@ -323,8 +323,8 @@
   // 节点统一大小 (外接圆半径 NODE_R), 聪明程度不再靠大小, 改用多边形边数 (见 polySides / polyPts): 半径进力模拟 (rOf) 与帽子的落点。
   var NODE_R = 10;
   var nodeR = function (p) { return NODE_R; };
-  // 聪明程度 (服务端 shared/smarts.ts 折好的 1~5 级) → 边数: 1 级三角形 · 2 级四边形 · 3 级五边形 · 4 级六边形 · 5 级 (ultra) 圆 = 边数的极限 (0 = 画圆)。
-  // 不知道 (老快照 / 别家模型又没档位) = 五边形 (中号, 与以前「都没有 = 中号」同口径)。
+  // 聪明程度 (服务端 shared/smarts.ts 按档位 tier 折好的 1~5 级) → 边数: 1 级三角形 · 2 级四边形 · 3 级五边形 · 4 级六边形 · 5 级 (ultra) 圆 = 边数的极限 (0 = 画圆)。
+  // 没有档位 (老快照 / 模型不在档位表里) = 五边形 (中号, 与以前「都没有 = 中号」同口径); 聪明度不看模型家族。
   var polySides = function (p) {
     var lv = p.smarts && p.smarts.level;
     return lv >= 1 && lv <= 4 ? lv + 2 : lv === 5 ? 0 : 5;
@@ -344,18 +344,20 @@
     var c = cls ? ' class="' + cls + '"' : '';
     return sides ? '<polygon' + c + ' points="' + polyPts(sides, r) + '"/>' : '<circle' + c + ' r="' + r + '"/>';
   };
-  // 行内小图标: 聪明程度 = 边数, 无 smarts 同图规则画五边形; 学历文字 (+ 状态文字) 进 title。
+  // 行内小图标: 聪明程度 = 边数, 无 smarts 同图规则画五边形; 档位文字 (+ 状态文字) 进 title。
   // 与关系图节点同一几何 (半径 NODE_R 的 .sh 多边形, viewBox 按节点坐标系, 20px ≈ 节点原尺寸) 且同一份 CSS 规则 (.rv-person.wizard.st-* .sh 与 .smi.st-* .sh 共用选择器): 休眠虚线 / 填充 / 描边随比例一致。st / cold 给了就着色: 成员栏用它取代原来的状态点; 不给 (profile facts 行) 就是中性灰。
   var smartsIcon = function (sm, st, cold, extra) {
     var t = [extra, smartsWord(sm)].filter(Boolean).join(' · ');
     var cls = 'smi' + (st ? ' st-' + st : '') + (cold ? ' cold' : '') + (st === 'working' ? ' go' : '');
     return '<svg class="' + cls + '" viewBox="-11.5 -11.5 23 23" width="20" height="20" role="img"' + (t ? ' aria-label="' + esc(t) + '"' : '') + '>' + (t ? '<title>' + esc(t) + '</title>' : '') + polyEl(polySides({ smarts: sm }), NODE_R, 'sh') + '</svg>';
   };
-  var SMART_BASIS = { model: '实际模型', tier: '出生档位 (认不出实际模型)' };
   // 聪明程度 1~5 用学历梯度表达 (小学生 … 专家教授), 不再露 `3/5`; 档位定义仍在 shared/smarts.ts, 这里只管展示。
   var EDU = { 1: ['🧒', '小学生'], 2: ['🎒', '初中生'], 3: ['🎓', '大学生'], 4: ['🔬', '研究生'], 5: ['👨‍🏫', '专家教授'] };
   var eduOf = function (sm) { return sm && EDU[sm.level] ? EDU[sm.level] : null; };
-  var smartsWord = function (sm) { var e = eduOf(sm); return e ? e[0] + ' ' + e[1] + ' · ' + sm.label + ' (依据: ' + (SMART_BASIS[sm.basis] || sm.basis) + ')' : ''; };
+  // 聪明度只认档位 tier; 实际模型 (sm.note, 服务端附上) 只作附注, 不参与定级。
+  var smartsWord = function (sm) { var e = eduOf(sm); return e ? e[0] + ' ' + e[1] + ' · 档位 ' + sm.tier + (sm.note ? ' · 模型 ' + sm.note : '') : ''; };
+  // 没有档位就说「档位未知」并带上实际模型 —— 不猜档位。
+  var smartsTip = function (nd) { return smartsWord(nd && nd.smarts) || (nd && nd.model ? '档位未知 · 模型 ' + nd.model : '档位未知'); };
   // 这一轮想画的图 (纯数据, 不碰坐标): 节点 + 边, 边按身份去重。
   var graphModel = function (rooms, people, directs) {
     var nodes = [], links = [], seen = {}, have = {};
@@ -724,7 +726,7 @@
     if (human) return '<title>' + esc(p.name + ' · 用户') + '</title>' +
       '<g class="rv-body"><text class="rv-emo" y="5.5" text-anchor="middle">👤</text></g>' +
       '<text class="rv-nm" y="' + (rr + 13) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>';
-    var tip = [p.name, ST_WORD[st], coldOfNode(p) ? COLD_WORD : '', n.host ? '🎩 host' : '', n.mon ? 'perceptron (感知判决)' : '', p.lead ? '👑 lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
+    var tip = [p.name, ST_WORD[st], coldOfNode(p) ? COLD_WORD : '', n.host ? '🎩 host' : '', n.mon ? 'perceptron (感知判决)' : '', p.lead ? '👑 lead' : '', smartsTip(p)].filter(Boolean).join(' · ');
     return '<title>' + esc(tip) + '</title>' +
       '<g class="rv-body">' + shape('sh', 0) + '</g>' + headGear(topR(sides, rr), n.host, p.lead) +
       '<text class="rv-nm" y="' + (rr + 13) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>';
@@ -909,7 +911,7 @@
     '<span title="叠加属性: 提示缓存已超 TTL, 下一句要重写缓存。空闲 / 休眠的节点都会变白 (休眠的服务端不报缓存, 按最近动静超过 5 分钟估); 工作中 / 等审批不受影响"><i class="lg wz cold"></i>缓存冷</span>' +
     '<span><span class="lgemo">👤</span>用户</span><span title="room 图标: 多人群聊 (企微群 / 多人 room, 有人参与)"><span class="lgemo">👥</span>群聊</span><span title="room 图标: 人与 wizard 的单聊 (绑定的企微单聊)"><span class="lgemo">💬</span>单聊</span><span title="room 图标: 频道 (企微 topic 频道)"><span class="lgemo">#️⃣</span>频道</span><span title="room 图标: 帖子 (频道下某个 topic 帖的评论区)"><span class="lgemo">📌</span>帖子</span><span title="room 图标: 只有 wizard 的 room (dm / 临时多人)"><span class="lgemo">🧙</span>wizard room</span><span title="room 的 host: 本 room 里加入序最小的 wizard"><svg class="lghost" viewBox="-6 -5 12 10" width="13" height="11" aria-hidden="true"><path d="M-3.3 2L-3.3 -3.9L3.3 -3.9L3.3 2Z"/><path class="hb" d="M-3.3 .4L3.3 .4L3.3 2L-3.3 2Z"/><path d="M-5.2 3.6L-5.2 2L5.2 2L5.2 3.6Z"/></svg>host</span>' +
     '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M-4.6 3.6L-4.6 -2.4L-2.3 0L0 -3.9L2.3 0L4.6 -2.4L4.6 3.6Z"/></svg>lead</span>' +
-    '<span title="聪明程度 = 实际在跑的模型 + effort: 三角形 🧒小学生 (haiku) · 四边形 🎒初中生 (sonnet) · 五边形 🎓大学生 (sonnet high 起) · 六边形 🔬研究生 (opus) · 圆 👨‍🏫专家教授 (opus xhigh/max); 认不出模型时按出生档位 mini..ultra; 都没有 = 五边形"><svg class="lgpoly" viewBox="-6 -6 12 12" width="12" height="12" aria-hidden="true">'+polyEl(3,5.2)+'</svg><svg class="lgpoly" viewBox="-6 -6 12 12" width="12" height="12" aria-hidden="true">'+polyEl(0,5.2)+'</svg>边数 = 聪明程度</span>' +
+    '<span title="聪明程度 = 档位 (tier): 三角形 🧒小学生 mini · 四边形 🎒初中生 light · 五边形 🎓大学生 standard · 六边形 🔬研究生 hard · 圆 👨‍🏫专家教授 ultra; 档位记在名册里 (出生时按 spawn 的档位, set_model 换模型后按档位表反查更新), 实际模型只作附注; 没有档位 = 五边形"><svg class="lgpoly" viewBox="-6 -6 12 12" width="12" height="12" aria-hidden="true">'+polyEl(3,5.2)+'</svg><svg class="lgpoly" viewBox="-6 -6 12 12" width="12" height="12" aria-hidden="true">'+polyEl(0,5.2)+'</svg>边数 = 聪明程度</span>' +
     '</div>';
   // 选中的 role 不在任何可见 room 里 (时间范围把它所有 room 都筛掉了, 或点进了一个只在隐藏 room 里的人 / 只剩一间过期两人 dm 的 wizard) 时,
   // 图里仍要有它 —— 视角总得在图上看得见 (👁 标记照常按 isRoleId 画): 作为没有任何边的孤立节点补进 people。
@@ -1211,7 +1213,7 @@
       // 最左边的图标: 人 = 👤; wizard = 按状态着色的聪明程度多边形 (与关系图节点同一套 fill / 虚线), 状态文字进 hover。
       var stWord = st ? (ST_WORD[st] || '') + (cold ? ' · ' + COLD_WORD : '') : '';
       var lead = m.kind === 'human' ? '<span class="gs-role" title="人">👤</span>' : smartsIcon(nd.smarts, st, cold, stWord) + (st === 'blocked' ? '<b class="gs-blk">等审批</b>' : '');
-      var tip = [(ST_WORD[st] || '') + (cold ? ' · ' + COLD_WORD : ''), smartsWord(nd.smarts)].filter(Boolean).join(' · ');
+      var tip = [(ST_WORD[st] || '') + (cold ? ' · ' + COLD_WORD : ''), smartsTip(nd)].filter(Boolean).join(' · ');
       var tipAll = viaText(m) + (tip ? '\n' + tip : '') + (me ? '\n当前视角' : '');
       var ago = m.lastAt ? '<span class="gs-ago" data-node="' + esc(nid) + '" title="本 room 最近一条发言: ' + esc(fmtDay(m.lastAt)) + '">' + esc(fmtAgo(m.lastAt).replace(' ', '')) + '</span>' : '<span class="gs-ago none" data-node="' + esc(nid) + '" title="还没发言">—</span>';
       var due = mine.length
@@ -1955,7 +1957,7 @@
       homeFact(w),
       w.parent && w.parent.name ? fact('👤', '创建者 ' + w.parent.name, '创建者: ' + w.parent.name + ' (spawn / clone 出它的 wizard, 管理上的 parent)') : '',
       born ? fact('🐣', fmtAgo(born), '出生于 ' + fmtDay(born)) : '',
-      nd.kind !== 'human' ? '<span class="fx-smi" title="' + esc(smartsWord(nd.smarts)) + '">' + smartsIcon(nd.smarts) + '</span>' : '',
+      nd.kind !== 'human' ? '<span class="fx-smi" title="' + esc(smartsTip(nd)) + '">' + smartsIcon(nd.smarts) + '</span>' : '',
       cb ? fact('📜', '≈' + fmtTok(cb.tokens), '宪章 ≈' + fmtTok(cb.tokens) + ' token · ' + fmtClock(cb.at) + ' 压进系统提示 · 点开看全文', 'charter') : '',
       w.cwd ? fact('🗂️', shortCwd(w.cwd), w.cwd) : '',
       pf ? fact(pf[0], pf[1], pf[2], pf[3], pf[4]) : '',

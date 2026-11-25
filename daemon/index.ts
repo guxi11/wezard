@@ -25,7 +25,7 @@ import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
 import { registerMcpHttp } from "./mcp-http.js";
 import { parsePath } from "../shared/config-meta.js";
-import { pickTier } from "../shared/model-tiers.js";
+import { pickTier, tierOfModel, type TierProbe } from "../shared/model-tiers.js";
 import { applyHot, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
@@ -4064,6 +4064,18 @@ const main = async (): Promise<void> => {
       } finally { if (end) retiringWizardTargets.delete(target); }
     });
 
+    /** 名册里的 tier 跟着实际模型走 (shared/model-tiers): 换过模型 / effort 之后按该后端档位表反查,
+     *  变了才写盘。反查不出 = 这张表里没有这个模型, tier 清掉 —— 聪明度宁可不画, 也不拿别的档位猜。 */
+    const retierOf = (target: string): TierProbe | undefined => {
+      const info = m.sessionInfo(target);
+      const rec = wizards.get(target);
+      // 模型没记下来 (冷记录 / 只改了 effort): 没有可比的那一项, 不动档位 —— 不拿 effort 猜。
+      if (!info || !rec || !info.model.trim()) return undefined;
+      const probe = tierOfModel(cfg, info.cli, info.model, info.effort, rec.tier);
+      if ((rec.tier ?? "") !== (probe.tier ?? "")) wizards.upsert(target, { tier: probe.tier });
+      return probe;
+    };
+
     // 换模型 / effort: 省略名字 = 换自己 (选择器盖在正在跑的这一轮上面照样能开), 点名 =
     // 换那个 wizard。与 spawn 时的 `model` 是同一条路 (model-select.ts); effort 走
     // `/effort` 档位条的「只本会话」键, 不碰全机默认。两样都给就先模型后档位。
@@ -4088,6 +4100,8 @@ const main = async (): Promise<void> => {
       const done = model ? await m.setModel(r.target, model, scope) : undefined;
       const eff = effort && (done?.ok ?? true) ? await m.setEffort(r.target, effort) : undefined;
       const ok = (done?.ok ?? true) && (eff?.ok ?? true);
+      // 聪明度只认 tier: 换过之后按该后端同一张档位表反查, 名册跟着改 (反查不出就清掉, 不猜)。
+      const probe = ok ? retierOf(r.target) : undefined;
       json(res, ok ? 200 : 502, {
         ...done,
         ok,
@@ -4095,6 +4109,7 @@ const main = async (): Promise<void> => {
         name: briefOf(self, r.target).name,
         ...(done?.ok ? { model: done.applied } : {}),
         ...(eff?.ok ? { effort: eff.applied } : {}),
+        ...(probe ? (probe.tier ? { tier: probe.tier } : { tierUnknown: true }) : {}),
         ...(eff && !eff.ok ? { reason: [done?.reason, `effort: ${eff.reason}`].filter(Boolean).join("; ") } : {}),
       });
     });

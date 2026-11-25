@@ -58,7 +58,7 @@ export interface WorldFactWizard {
   ordinal?: number;
   /** 它是所在聊天此刻的管家实例 (daemon/steward.ts isStewardTarget)。老 daemon 快照没有。 */
   steward?: boolean;
-  /** 出生档位 (WizardRecord.tier, mini..ultra): 只记出生那一刻, 聪明程度在认不出实际模型时才回落到它。老 daemon 快照没有。 */
+  /** 当前档位 (WizardRecord.tier, mini..ultra): 出生时记, set_model 换模型 / effort 后由 daemon 反查档位表更新。老 daemon 快照没有。 */
   tier?: string;
   /** 被派来领一件复杂活的 lead (WizardRecord.lead: 只由 daemon 在 lead:true 派成 / spawn 时写, 不能自封)。老 daemon 快照没有。 */
   lead?: boolean;
@@ -159,7 +159,7 @@ export interface WorldNode {
   effort?: string;
   /** 同 WorldFactWizard.lead。 */
   lead?: boolean;
-  /** 聪明程度 1~5 (shared/smarts.ts): 实际模型 + effort, 认不出时回落出生档位; 都没有 = 不带。 */
+  /** 聪明程度 1~5 (shared/smarts.ts): 只由档位 tier 决定 (没有档位 = 不带); note 是实际模型的附注。 */
   smarts?: Smarts;
   /** 此刻的上下文占用量, 口径同用量条的 ctx。0 = 没有带 usage 的轮次记录。 */
   ctx: number;
@@ -359,7 +359,7 @@ export const buildWorld = (
     const until = rs.reduce((mx, r) => Math.max(mx, staleAt(r)), 0);
     const name = (f?.name ?? "").trim() || tag || chat || target;
     const model = f?.model || [...rs].reverse().find((r) => r.model)?.model || "";
-    const smarts = smartsOf({ model, effort: f?.effort, tier: f?.tier });
+    const smarts = smartsOf({ tier: f?.tier, model, effort: f?.effort });
     return {
       target, kind: "wizard",
       ...(f?.uid ? { uid: f.uid } : {}),
