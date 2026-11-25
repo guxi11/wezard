@@ -108,10 +108,10 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 
 ## 进度 (执行者自维护)
 
-- [ ] shared/external.ts + 单测
-- [ ] 配置节 + 口令文件
-- [ ] daemon/external.ts 路由 + 索引 + 审计 + index.ts 接线
-- [ ] 渲染标签 (nameOf / role-view / inject-view)
-- [ ] cli/ext.ts + wezard.sh
-- [ ] 演练脚本七项 PASS
-- [ ] typecheck + room 测试无新增红
+- [x] shared/external.ts + 单测
+- [x] 配置节 + 口令文件
+- [x] daemon/external.ts 路由 + 索引 + 审计 + index.ts 接线
+- [x] 渲染标签 (nameOf / role-view / inject-view)
+- [x] cli/ext.ts + wezard.sh
+- [x] 演练脚本七项 PASS
+- [x] typecheck + room 测试无新增红
