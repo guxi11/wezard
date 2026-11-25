@@ -9,6 +9,7 @@ import { timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
 import { expandHome } from "./paths.js";
 import { dutyKey, whoKey, type RoomState, type Who } from "./room.js";
+import { keyOf, normalizeTag } from "./session-label.js";
 
 /** 正文上限 (字)。 */
 export const EXT_TEXT_MAX = 8000;
@@ -52,6 +53,125 @@ export const externalHomeOf = (stateDir: string): string => join(dirname(expandH
 export const externalTokenOf = (stateDir: string, name: string): string => join(externalHomeOf(stateDir), name + ".token");
 /** 请求索引 = <stateDir>/external/requests.jsonl (只追加)。 */
 export const extIndexFileOf = (stateDir: string): string => join(expandHome(stateDir), "external", "requests.jsonl");
+/** 登记表 = <stateDir>/external/principals.json (首连审批批准后落, 0600 原子写)。 */
+export const extRegistryFileOf = (stateDir: string): string => join(expandHome(stateDir), "external", "principals.json");
+
+// ── 登记表 (第 3 步: 首连审批登记) ───────────────────────────────────────
+// 人 2026-11-26 改口径: 不预先写配置, 外部 agent 第一次连上来时发一张审批卡, 点了才登记。
+// 生效名单 = 配置 external.principals ∪ 登记表, 同名以配置为准 (人仍可手写覆盖)。
+// 所以「登记表里的项」与「配置项」是同一个类型, 只多两个审批落款字段。
+
+export interface ExtRegistryEntry extends ExtPrincipal {
+  /** 批准时刻 (ms)。 */
+  approvedAt?: number;
+  /** 批准人 (审批人私聊 user:<id>)。 */
+  approvedBy?: string;
+}
+
+/** 额度缺省 (与 config schema 的 default 一致): 登记表新条目用这三个数。 */
+export const EXT_DEFAULT_PER_MINUTE = 10;
+export const EXT_DEFAULT_PER_DAY = 50;
+export const EXT_DEFAULT_MAX_OPEN = 5;
+/** 登记卡: 全机同时待决上限、拒绝后的冷却 (内存记, 重启清零)、卡有效期。 */
+export const EXT_ENROLL_MAX_PENDING = 3;
+export const EXT_ENROLL_COOLDOWN_MS = 60 * 60 * 1000;
+export const EXT_ENROLL_CARD_MS = 180_000;
+
+/** 调用方名字形状 (与 schema 的 regex 同一条); 没问题 → undefined。 */
+export const extNameProblem = (name: string): string | undefined => {
+  const n = (name ?? "").trim();
+  if (!n) return "name required (调用方名字)";
+  if (n.length > 32) return "名字太长 (最多 32 字符): " + n;
+  if (!/^[\w.-]+$/.test(n)) return "名字只许字母数字 _ - . : " + n;
+  return undefined;
+};
+
+const principalOk = (v: unknown): v is ExtPrincipal => {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.name === "string" && !!o.name && typeof o.reception === "string" && !!o.reception;
+};
+const intOr = (v: unknown, def: number): number => (typeof v === "number" && Number.isFinite(v) && v >= 1 ? Math.floor(v) : def);
+
+/** 解析登记表文本: 坏行 / 坏项跳过 (返回行号给调用方 warn), 不中止 —— 与索引同一个口径。 */
+export const parseExtRegistry = (raw: string): { entries: ExtRegistryEntry[]; badLines: number[] } => {
+  const entries: ExtRegistryEntry[] = [];
+  const badLines: number[] = [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return { entries, badLines: [1] }; }
+  const list = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? (parsed as { principals?: unknown }).principals : undefined);
+  if (!Array.isArray(list)) return { entries, badLines: [1] };
+  list.forEach((v, i) => {
+    if (!principalOk(v)) { badLines.push(i + 1); return; }
+    const o = v as unknown as Record<string, unknown>;
+    entries.push({
+      name: String(o.name),
+      reception: String(o.reception),
+      owner: typeof o.owner === "string" ? o.owner : "",
+      enabled: o.enabled !== false,
+      perMinute: intOr(o.perMinute, EXT_DEFAULT_PER_MINUTE),
+      perDay: intOr(o.perDay, EXT_DEFAULT_PER_DAY),
+      maxOpen: intOr(o.maxOpen, EXT_DEFAULT_MAX_OPEN),
+      ...(typeof o.approvedAt === "number" ? { approvedAt: o.approvedAt } : {}),
+      ...(typeof o.approvedBy === "string" ? { approvedBy: o.approvedBy } : {}),
+    });
+  });
+  return { entries, badLines };
+};
+
+export const serializeExtRegistry = (entries: readonly ExtRegistryEntry[]): string =>
+  JSON.stringify({ version: 1, principals: entries }, null, 2) + "\n";
+
+/** 生效名单 = 配置 ∪ 登记表, 同名以配置为准 (配置里那条整个替换登记表里的)。 */
+export const mergePrincipals = (
+  configured: readonly ExtPrincipal[], registered: readonly ExtPrincipal[],
+): ExtPrincipal[] => {
+  const out = [...configured];
+  const seen = new Set(configured.map((x) => x.name));
+  for (const r of registered) if (!seen.has(r.name)) { out.push(r); seen.add(r.name); }
+  return out;
+};
+
+/** 合并后的 external 节 (鉴权 / 口令 / 脱敏 / status / rotate / 逾期 / 审批都读它)。 */
+export const mergedSection = (s: ExtSection, registered: readonly ExtPrincipal[]): ExtSection => ({
+  enabled: s.enabled, principals: mergePrincipals(s.principals, registered),
+});
+
+/** 登记后自动建的接待 wizard: 名字 = ext-<名字小写> (撞名由 wizard 名册退 -N)。 */
+export const extReceptionTagOf = (name: string): string => normalizeTag("ext-" + (name ?? "").toLowerCase()) || "ext-agent";
+/** 会话 target 的 base: 去掉可能带的 #tag。 */
+export const baseOfPrincipal = (p: string): string => {
+  const h = (p ?? "").indexOf("#");
+  return h >= 0 ? p.slice(0, h) : (p ?? "");
+};
+/** 接待 wizard 的会话 target = 审批人私聊 base 上的那个槽 (它的审批卡也落私聊, 不撞 93006)。 */
+export const extReceptionTargetOf = (ownerPrincipal: string, name: string): string =>
+  keyOf(baseOfPrincipal(ownerPrincipal), extReceptionTagOf(name));
+
+/** 登记的判定 (纯): 已登记 / 被禁用 / 已有待决卡 / 冷却中 / 待决满 / 该发卡。 */
+export type ExtEnrollVerdict =
+  | { state: "enrolled" }
+  | { state: "disabled"; reason: string }
+  | { state: "pending" }
+  | { state: "cooldown"; retryAt: number }
+  | { state: "cap" }
+  | { state: "card" };
+
+export const judgeEnroll = (a: {
+  name: string;
+  principals: readonly ExtPrincipal[];
+  pending: readonly string[];
+  cooldownUntil: number;
+  now: number;
+  maxPending: number;
+}): ExtEnrollVerdict => {
+  const have = a.principals.find((x) => x.name === a.name);
+  if (have) return have.enabled ? { state: "enrolled" } : { state: "disabled", reason: "调用方 " + a.name + " 已被禁用 (external.principals 里那条 enabled 是 false)" };
+  if (a.pending.includes(a.name)) return { state: "pending" };
+  if (a.cooldownUntil > a.now) return { state: "cooldown", retryAt: a.cooldownUntil };
+  if (a.pending.length >= a.maxPending) return { state: "cap" };
+  return { state: "card" };
+};
 
 // ── 索引 (只追加; boot 重放) ─────────────────────────────────────────────
 
@@ -244,7 +364,7 @@ export const judgeExtAuth = (s: ExtSection, name: string, got: string, expected:
   const n = (name ?? "").trim();
   if (!n) return { ok: false, reason: "缺少 x-wezard-ext 头 (调用方名字)" };
   const p = s.principals.find((x) => x.name === n);
-  if (!p) return { ok: false, reason: "没有这个调用方: " + n };
+  if (!p) return { ok: false, reason: "还没登记: " + n + " (先跑 wezard ext enroll — 直接 ask 时 CLI 会自动发登记卡给本机主人)" };
   if (!p.enabled) return { ok: false, reason: "调用方 " + n + " 已禁用 (external.principals[].enabled)" };
   if (!expected) return { ok: false, reason: "调用方 " + n + " 还没有口令文件 (等 daemon 生成, 或 wezard ext rotate " + n + ")" };
   if (!secureEqual(expected, (got ?? "").trim())) return { ok: false, reason: "口令不对 (x-wezard-ext-token)" };
@@ -375,3 +495,17 @@ export const cancelText = (name: string, req: string): string =>
   "[wezard] 外部调用方 " + name + " 已撤回 " + req + ", 不用再做; 用 chat_reply status canceled 关掉它";
 
 export const roomTitle = (name: string, reception: string): string => "外部 · " + name + " → " + reception;
+/** 登记卡正文 (发到审批人私聊): 名字 / 首次连接时间 / 来源 / 批准后的接待与额度 / 边界说明。 */
+export const enrollCardText = (a: {
+  name: string; at: number; reception: string; quota: ExtQuota; owner: string;
+}): string => [
+  "外部调用方 " + a.name + " 第一次连本机 (wezard ext, 经本机控制面 socket), 要你批准才登记。",
+  "首次连接: " + dayTextOf(a.at) + " " + clockOf(a.at),
+  "批准后: 它能向接待 wizard ." + a.reception + " 提请求; 额度 " + a.quota.perMinute + "/分, " + a.quota.perDay + "/天, 同时未结 " + a.quota.maxOpen + " 件; 告警落 " + a.owner + "。",
+  "边界: 批准 = 它能提请求。接待 wizard 的非 wezard 工具仍逐次发卡给你, 它不能改配置 / 往绑定 room 发话。",
+].join("\n");
+
+/** 批准后写给 owner 私聊的一行 system。 */
+export const enrolledSysText = (name: string, reception: string): string =>
+  "[wezard] 已登记外部调用方 " + name + ", 接待 ." + reception + " (它的请求都落它自己的 adhoc room)";
+

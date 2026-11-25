@@ -2,7 +2,9 @@
 import assert from "node:assert/strict";
 import {
   applyExtOp, checkQuota, deriveOutcome, emptyExtIndex, extAuthor, foldExtIndex, judgeAck, judgeCancel, judgeExtAuth,
-  localDayStart, nextLocalDayStart, parseExtIndex, overdueOwnerRoom, quotaAlertSys, receptionDenial, redactText, secretsInJson,
+  enrollCardText, enrolledSysText, extNameProblem, extReceptionTagOf, extReceptionTargetOf, judgeEnroll,
+  localDayStart, mergePrincipals, mergedSection, nextLocalDayStart, parseExtIndex, parseExtRegistry, overdueOwnerRoom,
+  quotaAlertSys, receptionDenial, redactText, secretsInJson, serializeExtRegistry,
   type ExtPrincipal, type ExtRequest, type ExtSection, type ReceptionAction,
 } from "../shared/external.js";
 import { DAEMON, dutyKey, foldRoom, whoKey, type MsgRow, type RoomOp, type Who } from "../shared/room.js";
@@ -184,4 +186,60 @@ const rec = (over: Partial<ExtRequest> = {}): ExtRequest =>
   assert.equal(quotaAlertSys("CoC", "day", "2026-11-25"), "ext-quota:CoC:day:2026-11-25");
 }
 
+// ⑦ 第 3 步: 登记表合并 / 解析 / 首连登记判定 / 接待 wizard 命名
+{
+  const p = (over: Partial<ExtPrincipal> & { name: string }): ExtPrincipal =>
+    ({ reception: "recv", owner: "", enabled: true, perMinute: 10, perDay: 50, maxOpen: 5, ...over });
+  const fromCfg = p({ name: "CoC", reception: "recv", owner: "chat:wrMain" });
+  const fromReg = p({ name: "Neo", reception: "ext-neo", owner: "user:T1" });
+  const shadow = p({ name: "CoC", reception: "ext-coc", owner: "user:T1" });
+  assert.deepEqual(mergePrincipals([fromCfg], [fromReg]), [fromCfg, fromReg], "登记表里新名字并进来");
+  assert.deepEqual(mergePrincipals([fromCfg], [shadow]), [fromCfg], "同名以配置为准");
+  assert.deepEqual(mergedSection({ enabled: true, principals: [fromCfg] }, [fromReg]).principals, [fromCfg, fromReg]);
+  assert.equal(mergedSection({ enabled: false, principals: [] }, [fromReg]).enabled, false, "总开关仍取配置");
+
+  assert.equal(extNameProblem("CoC"), undefined);
+  assert.equal(extNameProblem("a.b-c_1"), undefined);
+  assert.ok(extNameProblem(""), "空名字");
+  assert.ok(extNameProblem("a b"), "空格不行");
+  assert.ok(extNameProblem("名字"), "非 ASCII 不行 (与 schema 同一条 regex)");
+  assert.ok(extNameProblem("x".repeat(33)), "超 32 字符不行");
+
+  const raw = JSON.stringify({ version: 1, principals: [
+    { name: "Neo", reception: "ext-neo", owner: "user:T1", approvedAt: 5, approvedBy: "user:T1" },
+    { reception: "缺名字" },
+    { name: "Old", reception: "ext-old", enabled: false, perMinute: 3 },
+  ] });
+  const reg = parseExtRegistry(raw);
+  assert.equal(reg.entries.length, 2);
+  assert.deepEqual(reg.badLines, [2]);
+  assert.deepEqual(reg.entries[0], {
+    name: "Neo", reception: "ext-neo", owner: "user:T1", enabled: true, perMinute: 10, perDay: 50, maxOpen: 5,
+    approvedAt: 5, approvedBy: "user:T1",
+  }, "缺省额度补齐 + 审批落款保留");
+  assert.equal(reg.entries[1]!.enabled, false, "显式关掉的保留关");
+  assert.equal(reg.entries[1]!.perMinute, 3);
+  assert.deepEqual(parseExtRegistry("不是 json").badLines, [1], "整体坏掉不中止");
+  assert.equal(parseExtRegistry("[{\"name\":\"A\",\"reception\":\"r\"}]").entries.length, 1, "也认裸数组");
+  assert.deepEqual(parseExtRegistry(serializeExtRegistry(reg.entries)).entries, reg.entries, "序列化往返一致");
+
+  const j = (over: Partial<Parameters<typeof judgeEnroll>[0]>): ReturnType<typeof judgeEnroll> => judgeEnroll({
+    name: "Neo", principals: [], pending: [], cooldownUntil: 0, now: 1000, maxPending: 3, ...over,
+  });
+  assert.deepEqual(j({}), { state: "card" }, "没有登记、没卡、没冷却 → 发卡");
+  assert.deepEqual(j({ principals: [fromReg] }), { state: "enrolled" }, "已登记 (幂等)");
+  assert.equal(j({ principals: [p({ name: "Neo", reception: "ext-neo", enabled: false })] }).state, "disabled");
+  assert.deepEqual(j({ pending: ["Neo"] }), { state: "pending" }, "已有待决卡 → 不再发");
+  assert.deepEqual(j({ cooldownUntil: 2000 }), { state: "cooldown", retryAt: 2000 }, "冷却中要 retryAt");
+  assert.deepEqual(j({ cooldownUntil: 999 }), { state: "card" }, "冷却过了可以再发");
+  assert.deepEqual(j({ pending: ["A", "B", "C"] }), { state: "cap" }, "全机待决上限");
+  assert.deepEqual(j({ pending: ["A", "B", "C"], name: "A" }), { state: "pending" }, "自己已经有卡就更该回 pending");
+
+  assert.equal(extReceptionTagOf("CoC"), "ext-coc");
+  assert.equal(extReceptionTagOf("Neo-2"), "ext-neo-2");
+  assert.equal(extReceptionTargetOf("user:T1", "Neo"), "user:T1#ext-neo");
+  assert.equal(extReceptionTargetOf("user:T1#me", "Neo"), "user:T1#ext-neo", "owner 带 tag 时按 base 拼");
+  assert.match(enrollCardText({ name: "Neo", at: Date.now(), reception: "ext-neo", owner: "user:T1", quota: { perMinute: 10, perDay: 50, maxOpen: 5 } }), /Neo/);
+  assert.match(enrolledSysText("Neo", "ext-neo"), /已登记外部调用方 Neo/);
+}
 process.stdout.write("external: ok\n");
