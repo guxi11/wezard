@@ -128,7 +128,9 @@ const main = async (): Promise<void> => {
     if (!text.trim()) die("ask 要正文 (或 - 读 stdin)", 2);
     const waitSec = Math.min(Number(flagStr(p, "wait") || 0) || 0, EXT_WAIT_MAX);
     const re = flagStr(p, "re");
-    const thread = flagStr(p, "thread") || process.env.WEZARD_EXT_THREAD?.trim() || "";
+    // thread 缺省 = 本次会话 id (第 0 步实测: codebuddy 给 Bash 子进程注入 CODEBUDDY_SESSION_ID,
+    // 等于 ACP sessionId, session/load 续接后不变); 再回落 Claude 的。只记录, v1 不按它过滤。
+    const thread = flagStr(p, "thread") || process.env.CODEBUDDY_SESSION_ID?.trim() || process.env.CLAUDE_SESSION_ID?.trim() || "";
     const body = {
       text, ...(re ? { re } : {}), ...(thread ? { thread } : {}), ...(waitSec > 0 ? { wait: waitSec } : {}),
     };

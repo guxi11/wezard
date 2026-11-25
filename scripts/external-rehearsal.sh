@@ -219,6 +219,26 @@ d2=$(ext ask "重复的那一句")
 check "$(printf '%s' "$d2" | jget req)" "$(printf '%s' "$d1" | jget req)" "④ 同一正文 10 分钟内返回同一个 req"
 reply "$(printf '%s' "$d1" | jget req)" done "重复的那句也做完了" >/dev/null
 
+# ④b thread 缺省取 env CODEBUDDY_SESSION_ID, --thread 压过它 (只记录, 不按它过滤)
+th1=$(CODEBUDDY_SESSION_ID='sess-env-123' ext ask "带会话 id 的那句")
+req_th=$(printf '%s' "$th1" | jget req)
+thv=$(node -e '
+const fs = require("fs");
+const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+const hit = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .filter((o) => o && o.op === "ask" && o.req === process.argv[2]).pop();
+process.stdout.write(hit && hit.thread ? hit.thread : "");' "$STATE/external/requests.jsonl" "$req_th")
+check "$thv" "sess-env-123" "④ thread 缺省取 env CODEBUDDY_SESSION_ID"
+th2=$(ext ask --thread 'explicit-9' "再带一个显式 thread")
+req_th2=$(printf '%s' "$th2" | jget req)
+thv2=$(node -e '
+const fs = require("fs");
+const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+const hit = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .filter((o) => o && o.op === "ask" && o.req === process.argv[2]).pop();
+process.stdout.write(hit && hit.thread ? hit.thread : "");' "$STATE/external/requests.jsonl" "$req_th2")
+check "$thv2" "explicit-9" "④ --thread 压过 env"
+
 # ── ⑤ cancel 后迟到的交代: 仍 canceled, 不进 inbox ────────────────────────────
 r5=$(ext ask "第五件: 会撤回的那件")
 req5=$(printf '%s' "$r5" | jget req)
