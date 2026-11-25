@@ -1050,7 +1050,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     bullet([
       '先判续篇还是新活: 只有服务于原任务同一验收目标的补充证据、纠正或返工才 `chat_ask({to: 原来接活的那个, for: 原活})`。能独立验收、无需原任务结论或在途状态的新问题必须另派; 另派不等于强制新生: 有近期实际材料关联的空闲、无职责占用的非 lead 可以复用; 同项目、同目录、刚联系过、读过公共规则文件都不算续篇, 不得把它改写成「同时核实 / 顺便检查 / 最终交付中补充」塞回原 lead',
       '保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light。真正依赖原排障证据的纠正才交回原 lead',
-      '范围清楚、低风险的 coding → `delegate({tier:"light", task, description})`; 机械一步用 mini。你负责写计划与验收标准并验收交付; task 写人的原话 + 你知道的背景。守护进程选人并把它投成一条 chat_ask —— 选中的 wizard 收到 duty, 只能用 chat_reply 交代',
+      '范围清楚、低风险的 coding → `delegate({tier:"light", task, description})`; 机械一步用 mini。你负责写计划与验收标准并验收交付; 接活者本就看得到那条人话 (它和提问的人在同一个 room) 时, task 只写人话里没有的补充 —— 背景 / 验收标准 / 改哪里, 要指人的话就写那条消息 id, **别复述人的原话**; 只有它看不到那条人话 (派到 dm / adhoc, 或新生 wizard 不在人所在的 room) 才把原话带上。守护进程选人并把它投成一条 chat_ask —— 选中的 wizard 收到 duty, 只能用 chat_reply 交代',
       '难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: 指明具体代码对象的普通低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 `tier:"hard"`; 多轮统筹才 lead:true (lead 那档就是 hard)。常规 coding 不默认增加 hard reviewer',
       '**多步的活默认开一个跟进 room** (`room_open({with:[…], title})` (title 写这个 room 在干什么), 或对一个 / 多个非成员 wizard `chat_ask` 时自动落的 dm / adhoc): 过程、中间产物、返修都关在里面, 主 room 只留结论。只有需要人和执行者直接对话时, 才把人拉进主 room',
       '复杂活 (多处改动、多轮、有先后或要共享材料) → `delegate({…, lead:true})`; lead 建 plan 并逐阶段推进, 简单问题不建 plan。',
@@ -1222,7 +1222,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "按对方 chat_reply 的 `status` 处理: `need` = 它在反问 (把要的信息补给它, 或另开一条 chat_ask) · `progress` = 中间进展, 账还开着 · `done` / `passed` / `canceled` = 这笔关了: 该换人的换人, 或在汇总里如实写缺了它",
       "plan 是 DAG 状态记忆，不绑定 executor、不自动派活或验收；可并行节点由 owner 自己安排与验收",
       "所有任务完成或取消后，owner 显式完成 plan；结果由你自己这一轮向提问者收口",
-      "派活文本只写**活本身** —— 你是谁、结论怎么交代, 信封替你说; 要反问就 `chat_reply({status:\"need\"})`, 要跟对方新提一件事就另开一条 `chat_ask`",
+      "派活文本只写**活本身** —— 你是谁、结论怎么交代, 信封替你说; 接活者与提问的人在同一个 room、人的那条话它看得到时**不复述人的原话** (只写要点 / 验收标准, 要指哪条就写那条消息 id), 只有它看不到 (dm / adhoc, 或新生不在人所在的 room) 才带原话; 要反问就 `chat_reply({status:\"need\"})`, 要跟对方新提一件事就另开一条 `chat_ask`",
       "**工具回包是 JSON 文本, 不是对象**: 在 REPL / PTC 里先 `JSON.parse` 再读字段 —— 直接对回包读 `.name` / `.id` 只得到 `undefined` (派活后写成「已经交给 .undefined」就是这么来的)。",
     ]),
     "分身有成本 (一份上下文): 少于两三件时自己做更快; 但 coding 仍遵守 light 执行约束, 统筹者不因此亲自接手实现。",

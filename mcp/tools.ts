@@ -156,13 +156,14 @@ const handoffSelf = (tool: string, brief: string) =>
 const DELEGATE_DESC =
       "派活一步到位: 给 task 或 taskFile+params。产出是一条 chat_ask —— 选中的 wizard 收到一条 duty, 只能用 chat_reply 交代, 没有别的回执通道; 返回实际决定、目标、room 与档位, dryRun 只返回决定与简短理由。lead 只在复杂任务使用。planId 只记录 event 与 plan 的关联，daemon 不会代替 owner 推进 DAG。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活另派不等于强制新生, 允许复用近期实际材料相关、空闲且无职责占用的非 lead; 按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: 指明函数、接口、文件、按钮等具体对象且范围清楚的低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 hard。\n" +
+      "task 不复述提问者所在 room 里人已经说过的话: 接活者就在那个 room、人的原话它看得到时, 只写人话里没有的补充 (目标 / 验收标准 / 指哪条消息 id); 只有它看不到那条话 (dm / adhoc, 或新生不在那个 room) 才带原话。\n" +
       "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性。复杂任务用 `lead:true`: lead 建 plan，按阶段创建执行者并验收；简单任务直接派活、不建 plan。回包里的 `name` 是落定的执行者名字 —— " + RESULT_IS_JSON_TEXT;
 
 const DELEGATE_SCHEMA = {
       // task 与 taskFile 二选一 (§8): 不存在「task 作摘要」的用法 —— 旧 daemon 会把
       // task 当正文投出去, 摘要进 pane 就等于静默丢卡。选人/选档/description 由
       // daemon 用展开文本或 params.header 派生 (阶段 2)。
-      task: z.string().optional().describe("这件活的正文, 与 `taskFile` 二选一。给了 `taskFile` 就别再给 task —— 守护进程用展开后的全文派生选人与默认 description。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
+      task: z.string().optional().describe("这件活的正文, 与 `taskFile` 二选一。给了 `taskFile` 就别再给 task —— 守护进程用展开后的全文派生选人与默认 description。写清目标与交付, 带文件名 / 模块名帮助找上下文。接活者就在提问者所在的 room、人的原话它看得到时, 别复述原话 —— 只写补充与验收标准, 要指就写那条消息 id。公共规则文件或同目录不构成复用理由; 不要把独立核查改写成原 lead 的附加交付。"),
       taskFile: z.string().optional().describe("模板文件路径, **相对你的工作区**的相对路径 (绝对路径与 `~` 开头一律 400)。给了它, 投递正文由 daemon 用模板 + `params` 展开; 与 `task` 至少给一个。"),
       params: z.record(z.string()).optional().describe("`taskFile` 模板里 `{{name}}` 占位符的参数值 (全为字符串)。缺参数 / 多余参数都会被 400 拒绝。"),
       for: z.string().optional().describe(FOR_DOC),
@@ -376,7 +377,7 @@ export const createWezardServer = (): McpServer => {
       inputSchema: currentAddressSchema({
         room: z.string().optional().describe(ROOM_DOC),
         to: z.union([z.string(), z.array(z.string())]).describe(TO_DOC),
-        text: z.string().describe("这件活 / 这一问的正文。写清目标、交付与验收; 对方看不到你这一轮的上下文。"),
+        text: z.string().describe("这件活 / 这一问的正文。写清目标、交付与验收; 对方看不到你这一轮的上下文 —— 但它和你在同一个 room 时人说过的原话它看得到, 别复述 (要指就写那条消息 id); 只有它看不到那条话 (dm / adhoc / 不在那个 room) 才带原话。"),
         kind: z.enum(["ask", "task"]).optional().describe(ASK_KIND_DOC),
         after: z.array(z.string()).describe("前置: 这些消息 id 的 duty 全部 done 之前不唤醒它 (跨 room 也行)。省略 = 无前置。").optional(),
         for: z.string().optional().describe(FOR_DOC),

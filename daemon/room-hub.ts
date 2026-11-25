@@ -265,7 +265,15 @@ export const createRoomHub = (p: HubPorts) => {
           ...owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")"),
           ...answered.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + " · 你反问过, 对方的答复可能就在上面)"),
         ].join("; ") + usage : "";
-      parts.push([head, ...lines, ...(humanHint ? [humanHint] : []), ...(oweLine ? [oweLine] : [])].join("\n"));
+      // 派活方用 `for` 指一条消息 id、人话本身在 task 里不复述时, 接活者得真读得到那条:
+      // 它不在本批未读里 (早已读过 / 被游标推过) 就补一行引用 —— 只补本 room 的, trigger 不算。
+      const refRows = [...new Map([...owe, ...answered].flatMap((d) => {
+        if (!d.for || u.rows.some((r) => r.id === d.for)) return [];
+        const r = s.byId.get(d.for);
+        return r && r.kind !== "trigger" && !sameWho(r.author, who) ? [[r.id, r] as [string, MsgRow]] : [];
+      })).values()];
+      const refLines = refRows.length ? ["派活指向的原话: " + refRows.map((r) => renderMsgLine(r, names, 300)).join(" / ")] : [];
+      parts.push([head, ...lines, ...refLines, ...(humanHint ? [humanHint] : []), ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
       msgs.push(...triggers.map((t) => t.id));
     }

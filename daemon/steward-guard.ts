@@ -76,7 +76,7 @@ const kindOf = (toolName: string, toolInput: unknown): Kind => {
   return shellReads(cmd) ? "free" : "look";
 };
 
-const DELEGATE = "`delegate({task, name, description})` 交出去 (task 写人的原话加你知道的背景)";
+const DELEGATE = "`delegate({task, name, description})` 交出去 (task 写目标加你知道的背景; 接活者在同一个 room 看得到人的话时别复述原话, 只写补充与验收标准)";
 const handsReason = (toolName: string): string =>
   toolName === "REPL"
     ? `你是这个群的管家, 这段 REPL 在亲手干活 (写文件 / 开子代理) —— 管家一律不做, 用 ${DELEGATE}。这是守护进程拦的, 重试结果一样。`
