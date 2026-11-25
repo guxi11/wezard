@@ -1849,6 +1849,8 @@ interface ApprovalDeps {
    *  for the per-attachment FIFO so `client.sendMessage(card)` can't overtake the
    *  "thinking" bubble. */
   flushBeforeCard?: (sessionId: string, expect?: { toolName: string; toolInput: unknown }) => Promise<void>;
+  /** 生效的外部调用方名单 (配置 ∪ 首连登记表)。缺省只读配置 —— 接待 wizard 判定必须用合并后的。 */
+  externalPrincipals?: () => readonly { name: string; reception: string; enabled: boolean }[];
 }
 
 const resolveApprover = (
@@ -1909,10 +1911,14 @@ const unwrapDeferredTool = (toolName: string, toolInput: unknown): { toolName: s
 };
 
 /** 会话归属是外部接待 wizard 时, 它是替哪个调用方干活 (第 2 步 §2)。缺省 = 不是接待 wizard。 */
-export const receptionCallerOf = (cfg: Config, target: string): { reception: string; principals: string[] } | undefined => {
+export const receptionCallerOf = (
+  cfg: Config, target: string,
+  principals?: readonly { name: string; reception: string; enabled: boolean }[],
+): { reception: string; principals: string[] } | undefined => {
   const name = wizardStore()?.get(target)?.name || "";
   if (!name) return undefined;
-  const callers = (cfg.external?.principals ?? []).filter((x) => x.enabled && x.reception === name).map((x) => x.name);
+  const list = principals ?? (cfg.external?.principals ?? []);
+  const callers = list.filter((x) => x.enabled && x.reception === name).map((x) => x.name);
   return callers.length ? { reception: name, principals: callers } : undefined;
 };
 
@@ -1931,7 +1937,7 @@ export const forceCardFor = (
   reception: { reception: string; principals: string[] } | undefined, toolName: string, toolInput: unknown,
 ): boolean => !!reception && !wezardOnlyCall(toolName, toolInput);
 
-export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }: ApprovalDeps): Handler => {
+export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal, externalPrincipals }: ApprovalDeps): Handler => {
   const stewardGuard = makeStewardGuard();
   setCardQuoteMax(cfg.approval.cardQuoteMaxChars);
   const detailUrlFor = (id: string, approver?: string): string =>
@@ -2154,7 +2160,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     const owner = getMirrorTarget?.(sessionId);
     // 外部轮 (第 2 步 §2): 接待 wizard 的会话, matcher 拦下的调用一律发卡 —— 不走 allowRules /
     // ⏱窗口 / 会话缓存 / skipAll。它手上一切不是 wezard 工具的动作都要人看一眼。
-    const reception = owner ? receptionCallerOf(cfg, owner) : undefined;
+    const reception = owner ? receptionCallerOf(cfg, owner, externalPrincipals?.()) : undefined;
     const forceCard = forceCardFor(reception, toolName, toolInput);
     // 受限会话的工具面 (daemon/tool-face.ts 的声明式注册表): 引导化身 / monitor 等一律在这里拒,
     // 排在手闸与一切放行之前 —— 它们只做一件受控的事, handoff / set_workspace 自己 / 发言正是
