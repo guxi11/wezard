@@ -38,7 +38,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, setRoomReader, setWorldFactsProvider, recordCharter, backfillCharter, lastChannelOf, setChannelRef } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, detailRoot, setViewPort, linksDead, setRoomReader, setWorldFactsProvider, recordCharter, backfillCharter, lastChannelOf, setChannelRef } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -318,7 +318,7 @@ const main = async (): Promise<void> => {
   // 名册在下面的 mirror 块里才绑 (bindWizardStore) —— 这里全走 wizardStore() 惰性取。
   bindTagLinker({
     targetOfUrl: (url) => footerTarget(url,
-      new URL(".", buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, "")).href,
+      detailRoot(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port),
       known),
     urlOf: (t) => chatUrlFor(cfg.daemon, t),
     resolve: (name, from) => {
@@ -432,7 +432,13 @@ const main = async (): Promise<void> => {
   };
   // room 模型的 /status 增量 (修复单 §4): startHttp 在 room 模块之前起, 用可改写的 holder 接。
   const roomStatusRef = { get: (): Record<string, unknown> => ({}) };
-  const http = startHttp({ cfg, ws, log, sourcePath, roomStatus: roomStatusRef });
+  // 视图口的结局定了才知道链接根: 实际口 (可能是配置口 +N) 给 detail.ts; 一个 base 都没有又没起来 = 链接全是死链,
+  // 那就不发链接 (裸头), 在这里说一次为什么。
+  const onView = (port: number | null): void => {
+    setViewPort(port);
+    if (linksDead(cfg.daemon.detailPublicBase)) log.warn({ port: cfg.daemon.port }, "no view listener and no detailPublicBase/detailRemoteBase: chat messages go out without rolepage / detail links");
+  };
+  const http = startHttp({ cfg, ws, log, sourcePath, roomStatus: roomStatusRef, onView });
   // 控制面 socket 绑不上 (活 daemon 在听 / 目录不是自己的 / 路径超长) = 起不来: 报原因后 exit 1,
   // systemd / launchd 重试, 对方退出后自然接手。视图 TCP 监听失败不走这里 (只告警)。
   await http.ready.catch((e: Error) => fatalExit(`control socket: ${e.message}`));

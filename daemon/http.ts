@@ -22,6 +22,7 @@ import { expandHome } from "../shared/paths.js";
 import type { BotMux } from "./bot-mux.js";
 import { bindControlSocket, unlinkIfOwned, stillOwns, type BoundSocket } from "./control-socket.js";
 import { drainForReload, listPending } from "./pending.js";
+import { listenWithFallback, portsFileOf, writePorts, type PortEntry } from "../shared/ports.js";
 
 interface Ctx {
   cfg: Config;
@@ -30,6 +31,8 @@ interface Ctx {
   sourcePath: string;
   /** room 切换后的增量状态 (openDuties / watchdog), index.ts 在 room 模块就绪后改写 get; /status 展开它。 */
   roomStatus?: { get: () => Record<string, unknown> };
+  /** 视图监听的结局: 实际口, 或 null (port=0 / 全被占 / 别的错)。链接根据它取口 (见 detail.ts setViewPort)。 */
+  onView?: (port: number | null) => void;
 }
 
 /** 外部调用方的能力判据 (/status): 按名字查有没有, 别靠盘上目录之类的副作用猜。 */
@@ -186,26 +189,35 @@ export const startHttp = (ctx: Ctx): HttpServer => {
   let viewUp = false;
 
   // 视图监听失败 (端口被别人占了 / 没权限) 不致命: 控制面照常, 第二个用户不再崩溃循环。
-  const startView = (): void => {
-    const { host, port } = ctx.cfg.daemon;
+  // 被占就 +1 再试 (daemon.portSpan); 实际口写进 ports.json —— 链接与本机工具都以它为准, 不再信配置口。
+  const portsFile = portsFileOf(ctx.cfg.daemon.stateDir);
+  const settleView = (entry: PortEntry | null): void => {
+    try { writePorts(portsFile, { view: entry }); }
+    catch (e) { ctx.log.warn({ file: portsFile, err: (e as Error).message }, "ports.json write failed"); }
+    ctx.onView?.(entry ? entry.port : null);
+  };
+  const startView = async (): Promise<void> => {
+    const { host, port, portSpan } = ctx.cfg.daemon;
     if (port === 0) {
       ctx.log.info("view listener disabled (daemon.port=0)");
+      settleView(null);
       return;
     }
-    view.once("error", (e: NodeJS.ErrnoException) => {
-      viewUp = false;
-      ctx.log.warn({ host, port, code: e.code, err: e.message }, "view listener disabled");
-    });
-    view.listen(port, host, () => {
-      viewUp = true;
-      ctx.log.info({ host, port }, "view listening (read-only)");
-    });
+    const r = await listenWithFallback(view, host, port, portSpan);
+    if (!r.ok) {
+      ctx.log.warn({ host, port, tried: r.tried, code: r.code, err: r.message }, "view listener disabled");
+      settleView(null);
+      return;
+    }
+    viewUp = true;
+    ctx.log.info({ host, port: r.port, ...(r.port !== port ? { preferred: port } : {}) }, "view listening (read-only)");
+    settleView({ host, port: r.port, pid: process.pid, at: Date.now() });
   };
 
   const ready = bindControlSocket(control, socketPath).then((b) => {
     bound = b;
     ctx.log.info({ socket: socketPath }, "HTTP listening (control socket)");
-    startView();
+    void startView();
   });
 
   const closeServer = (s: Server, listening: boolean): Promise<void> =>

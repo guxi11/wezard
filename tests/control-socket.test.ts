@@ -12,6 +12,7 @@ import { daemonSocketPath, clientSocketPath, socketFromEnv, sockPathProblem } fr
 import { daemonRequest } from "../shared/daemon-client.js";
 import { bindControlSocket, probeSocket, unlinkIfOwned, ControlSocketError } from "../daemon/control-socket.js";
 import { startHttp } from "../daemon/http.js";
+import { portsFileOf, readPorts } from "../shared/ports.js";
 
 const root = mkdtempSync(join(tmpdir(), "wz-ctl-"));
 const modeOf = (p: string): number => lstatSync(p).mode & 0o777;
@@ -136,8 +137,8 @@ const mkLog = (): any => {
   return l;
 };
 const ws: any = { client: { isConnected: true }, bots: () => [], status: () => ({}), reconnect: () => undefined, shutdown: async () => undefined };
-const mkCfg = (name: string, port: number) =>
-  ConfigSchema.parse({ bot: { botId: "t", secret: "t" }, daemon: { socket: join(root, name, "daemon.sock"), stateDir: join(root, name, "st"), host: "127.0.0.1", port } });
+const mkCfg = (name: string, port: number, extra: Record<string, unknown> = {}) =>
+  ConfigSchema.parse({ bot: { botId: "t", secret: "t" }, daemon: { socket: join(root, name, "daemon.sock"), stateDir: join(root, name, "st"), host: "127.0.0.1", port, ...extra } });
 
 {
   const port = await freePort();
@@ -184,20 +185,36 @@ const mkCfg = (name: string, port: number) =>
   await assert.rejects(fetch(`${tcp}/healthz`), "视图监听随之关闭");
 }
 
-// ── EADDRINUSE 不致命 / port 0 关闭 ─────────────────────────
+// ── EADDRINUSE: 递增到下一个空口 (portSpan) / portSpan 0 不致命只告警 / port 0 关闭 ─────
 {
   const squatter = createHttpServer((_q, r) => r.end("squatter"));
   await new Promise<void>((r) => squatter.listen(0, "127.0.0.1", r));
   const port = (squatter.address() as { port: number }).port;
   const cfg = mkCfg("busy", port);
   logs.length = 0;
-  const http = startHttp({ cfg, ws, log: mkLog(), sourcePath: "/x" });
+  const seen: (number | null)[] = [];
+  const http = startHttp({ cfg, ws, log: mkLog(), sourcePath: "/x", onView: (p) => seen.push(p) });
   await http.ready; // 不 reject
   await new Promise((r) => setTimeout(r, 200));
-  assert.ok(logs.some((l) => l.level === "warn" && /view listener disabled/.test(l.msg)), "warn 一行 view listener disabled");
+  const moved = seen[0];
+  assert.ok(typeof moved === "number" && moved > port && moved <= port + cfg.daemon.portSpan, `首选口被占 → 递增 (${port} → ${moved})`);
+  assert.equal(readPorts(portsFileOf(cfg.daemon.stateDir)).view?.port, moved, "实际口写进 ports.json");
+  assert.equal((await fetch(`http://127.0.0.1:${moved}/healthz`)).status, 200, "视图在实际口上");
   assert.equal((await daemonRequest("GET", "/healthz", { socketPath: http.socketPath })).status, 200, "控制面照常");
   assert.equal(await (await fetch(`http://127.0.0.1:${port}/healthz`)).text(), "squatter", "端口仍是占用者的");
   await http.close();
+
+  logs.length = 0;
+  const strict = mkCfg("busy0", port, { portSpan: 0 });
+  const none: (number | null)[] = [];
+  const h0 = startHttp({ cfg: strict, ws, log: mkLog(), sourcePath: "/x", onView: (p) => none.push(p) });
+  await h0.ready;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(logs.some((l) => l.level === "warn" && /view listener disabled/.test(l.msg)), "portSpan 0: warn 一行 view listener disabled");
+  assert.deepEqual(none, [null], "没起来报 null (链接据此不发死链)");
+  assert.equal(readPorts(portsFileOf(strict.daemon.stateDir)).view, null, "ports.json 记下没起来");
+  assert.equal((await daemonRequest("GET", "/healthz", { socketPath: h0.socketPath })).status, 200, "控制面照常");
+  await h0.close();
   squatter.close();
 
   logs.length = 0;

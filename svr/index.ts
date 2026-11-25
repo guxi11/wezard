@@ -32,10 +32,15 @@ import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadFacts, saveFacts } from "./facts-store.js";
 import { loadConfig } from "../shared/config.js";
 import { bindMultiBot } from "../shared/session-label.js";
+import { roomsDirOf } from "../shared/room.js";
+import { canonicalDir } from "../shared/instance-id.js";
+import { DEFAULT_PORT_SPAN, EXIT_CONFIG, listenWithFallback, portsFileOf, writePorts } from "../shared/ports.js";
 
 interface Args {
   host: string;
   port: number;
+  /** 首选口被占时往上再试几个 (见 shared/ports.ts)。 */
+  portSpan: number;
   stateDir: string;
   /** daemon 的 room 账本目录 (只读)。同机部署时 svr 直接读它, 远端浏览器才点得开 room 历史。 */
   roomsDir: string;
@@ -50,6 +55,7 @@ const buildDefaults = (): Args => {
   const fallback: Args = {
     host: "0.0.0.0",
     port: 17891,
+    portSpan: DEFAULT_PORT_SPAN,
     stateDir: "~/.wezard/svr",
     roomsDir: "~/.wezard/state/rooms",
     tokenFile: "~/.wezard/svr-token",
@@ -63,8 +69,10 @@ const buildDefaults = (): Args => {
     return {
       host: s.host || fallback.host,
       port: s.port || fallback.port,
+      portSpan: s.portSpan ?? fallback.portSpan,
       stateDir: s.stateDir || fallback.stateDir,
-      roomsDir: process.env.WEZARD_ROOMS_DIR || fallback.roomsDir,
+      // 账本目录跟着同一份配置里 daemon 的 stateDir 走 (以前写死 ~/.wezard/state/rooms, daemon 换了 stateDir 就读空)。
+      roomsDir: process.env.WEZARD_ROOMS_DIR || s.roomsDir || roomsDirOf(config.daemon.stateDir),
       tokenFile: s.tokenFile || fallback.tokenFile,
       token: s.token || undefined,
       logLevel: (s.logLevel as pino.Level) || fallback.logLevel,
@@ -82,6 +90,7 @@ const parseArgs = (argv: readonly string[]): Args => {
     switch (k) {
       case "--host": a.host = v!; i++; break;
       case "--port": a.port = Number(v!); i++; break;
+      case "--port-span": a.portSpan = Number(v!); i++; break;
       case "--state": a.stateDir = v!; i++; break;
       case "--rooms": a.roomsDir = v!; i++; break;
       case "--token": a.token = v!; i++; break;
@@ -103,8 +112,9 @@ Defaults come from ~/.wezard/config.jsonc (svr.*) when present; CLI overrides.
 
   --host <ip>        bind address (default 0.0.0.0)
   --port <n>         listen port  (default 17891)
+  --port-span <n>    port taken → try +1 … +n (default ${DEFAULT_PORT_SPAN}); all taken → exit ${EXIT_CONFIG}
   --state <dir>      state dir    (default ~/.wezard/svr)
-  --rooms <dir>      daemon 的 room 账本 (只读, default ~/.wezard/state/rooms)
+  --rooms <dir>      daemon 的 room 账本 (只读, default <daemon.stateDir>/rooms)
   --token <t>        bearer token (default: generate + persist to --token-file)
   --token-file <p>   token persist path (default ~/.wezard/svr-token)
   --log-level <lvl>  pino level   (default info)
@@ -127,7 +137,8 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
  *  多显示两分钟略陈的忙闲, 也好过一次网络抖动就把整张名册抹成「缺席」。 */
 const FACTS_TTL_MS = 150_000;
 
-interface FactsPush { source: string; facts: WorldFacts }
+/** roomsDir: 推送方 daemon 的账本目录 (规范路径) —— 与本 svr 读的那份对上, 才把本地账本给它的票据用。 */
+interface FactsPush { source: string; facts: WorldFacts; roomsDir?: string }
 
 const isFactsPush = (v: unknown): v is FactsPush => {
   if (!v || typeof v !== "object") return false;
@@ -166,8 +177,10 @@ const isDetailRecord = (v: unknown): v is DetailRecord => {
   return true;
 };
 
-/** 只读的 room 账本读者: 每次现读文件, 不吃缓存 —— daemon 那边一直在追加, 缓存会看到旧快照。 */
-const roomReaderAt = (dir: string): RoomReader => ({
+/** 只读的 room 账本读者: 每次现读文件, 不吃缓存 —— daemon 那边一直在追加, 缓存会看到旧快照。
+ *  serves: 多 daemon 共 svr 时这份账本只属于其中一个, 别的 daemon 的票据只看它们推来的 rooms 快照。 */
+const roomReaderAt = (dir: string, serves?: RoomReader["serves"]): RoomReader => ({
+  ...(serves ? { serves } : {}),
   ids: () => {
     try {
       return readdirSync(dir).filter((f) => f.endsWith(".jsonl"))
@@ -200,17 +213,25 @@ const main = async (): Promise<void> => {
   // 最多旧 30s, 与平时一样新; 停机久了的自然过期, 不会让陈旧名册冒充现状。
   const factsPath = join(stateDir, "facts.json");
   const factsBySource = loadFacts(factsPath, Date.now(), FACTS_TTL_MS);
-  const currentFacts = (): WorldFacts => {
+  // src = 票据的来源 daemon: 只给它自己那一份 (没推过 / 过期了 = 缺席, 不拿别的 daemon 的名册顶上 ——
+  // 同机多 daemon 的 target / room id / 名字可能相同, 合并会互相覆盖)。没有 src 的票据 (旧 daemon 签的) 看合并视图。
+  const currentFacts = (src?: string): WorldFacts => {
     const cut = Date.now() - FACTS_TTL_MS;
-    const fresh = [...factsBySource].filter(([, v]) => v.at > cut);
     for (const [k] of [...factsBySource].filter(([, v]) => v.at <= cut)) factsBySource.delete(k);
+    const fresh = [...factsBySource].filter(([k]) => !src || k === src);
     return fresh.length ? mergeFacts(fresh.map(([source, v]) => ({ source, facts: v.facts }))) : EMPTY_FACTS;
   };
   // Chat 视图 (SPA + JSON API + SSE) 与 daemon 完全同源 —— svr 侧的记录是 POST /d
   // 推过来的, store.subscribe 一样会触发, 所以远端浏览也是实时的。
   // 已读记录与消息同住 stateDir, 留到视界为止 (再早的话页面上已经看不到)。
   const roomsDir = expandHome(args.roomsDir);
-  const chat = chatRouteTable(createChatRoutes(store, currentFacts, openSeenLog(join(stateDir, "seen.json"), HORIZON_MS), roomReaderAt(roomsDir)));
+  // 本地账本归谁: 报来的 roomsDir 与它相同的那个来源。还没有任何来源报过 (旧 daemon / 刚重启) 时谁都给 —— 单 daemon 的老行为。
+  const ledgerHome = canonicalDir(roomsDir);
+  const ledgerServes = (src: string | undefined): boolean => {
+    const owners = [...factsBySource].filter(([, v]) => v.roomsDir).map(([k, v]) => [k, v.roomsDir === ledgerHome] as const);
+    return !src || !owners.length || owners.some(([k, mine]) => k === src && mine);
+  };
+  const chat = chatRouteTable(createChatRoutes(store, currentFacts, openSeenLog(join(stateDir, "seen.json"), HORIZON_MS), roomReaderAt(roomsDir, ledgerServes)));
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -253,7 +274,7 @@ const main = async (): Promise<void> => {
         try { parsed = JSON.parse(body.toString("utf8")); }
         catch { json(res, 400, { ok: false, error: "invalid json" }); return; }
         if (!isFactsPush(parsed)) { json(res, 400, { ok: false, error: "invalid world facts" }); return; }
-        factsBySource.set(parsed.source, { at: Date.now(), facts: parsed.facts });
+        factsBySource.set(parsed.source, { at: Date.now(), facts: parsed.facts, ...(typeof parsed.roomsDir === "string" && parsed.roomsDir ? { roomsDir: parsed.roomsDir } : {}) });
         try { saveFacts(factsPath, factsBySource); }
         catch (e) { log.warn({ err: (e as Error).message }, "persist world facts failed"); }
         log.debug({ source: parsed.source, wizards: parsed.facts.wizards.length }, "world facts stored");
@@ -287,11 +308,27 @@ const main = async (): Promise<void> => {
     }
   });
 
-  server.listen(args.port, args.host, () => {
-    const displayHost = resolvePublicHost(args.host);
-    const base = `http://${displayHost}:${args.port}`;
+  // 首选口被占就 +1 再试; 全被占 = 配置问题, 再重拉也一样: 一行原因 + 退出码 78, systemd 单元
+  // RestartPreventExitStatus=78 停止重拉 (以前是无 error 监听的 listen 崩掉, 每 5s 一次崩溃循环)。
+  // launchd 的 KeepAlive 不认退出码 (SuccessfulExit=false 时任何非 0 都重拉), 在它下面以 0 退出。
+  const r = await listenWithFallback(server, args.host, args.port, args.portSpan);
+  const portsFile = portsFileOf(stateDir);
+  if (!r.ok) {
+    const last = Math.min(65535, args.port + Math.max(0, args.portSpan));
     // eslint-disable-next-line no-console
-    console.log(`[wezard-svr] listening on ${args.host}:${args.port}`);
+    console.error(`[wezard-svr] cannot listen on ${args.host}:${args.port}${last > args.port ? `..${last}` : ""} (${r.code}: ${r.message}); free a port or change svr.port / svr.portSpan`);
+    try { writePorts(portsFile, { svr: null }); } catch { /* 起不来时写不了也无妨 */ }
+    process.exit(process.env.XPC_SERVICE_NAME && process.env.XPC_SERVICE_NAME !== "0" ? 0 : EXIT_CONFIG);
+  }
+  const port = r.port;
+  try { writePorts(portsFile, { svr: { host: args.host, port, pid: process.pid, at: Date.now() } }); }
+  catch (e) { log.warn({ file: portsFile, err: (e as Error).message }, "ports.json write failed"); }
+  {
+    const displayHost = resolvePublicHost(args.host);
+    const base = `http://${displayHost}:${port}`;
+    if (port !== args.port) log.warn({ preferred: args.port, port }, "preferred port taken, listening on the next free one");
+    // eslint-disable-next-line no-console
+    console.log(`[wezard-svr] listening on ${args.host}:${port}`);
     // eslint-disable-next-line no-console
     console.log(`[wezard-svr] base URL: ${base}`);
     // eslint-disable-next-line no-console
@@ -303,7 +340,7 @@ const main = async (): Promise<void> => {
     "detailRemoteToken": "${token}"
   }
 `);
-  });
+  }
 
   const shutdown = (sig: string): void => {
     log.info({ sig }, "shutdown");

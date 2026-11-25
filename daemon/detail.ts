@@ -4,7 +4,6 @@
 //   • buildDetailUrl 用 config.detailPublicBase / detailRemoteBase / LAN IP 兜底
 //   • makeDetailHandler 把 GET /detail?id=xxx 渲染成 HTML
 import { randomBytes } from "node:crypto";
-import { hostname } from "node:os";
 import type { Logger } from "pino";
 import type { Decision } from "./pending.js";
 import type { Handler } from "./http.js";
@@ -31,6 +30,8 @@ import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS, type RoomReader, type WorldFactsProvider } from "../shared/chat-http.js";
 import type { ChannelOf } from "../shared/room-view.js";
 import { EMPTY_FACTS } from "../shared/world.js";
+import { canonicalDir, daemonSourceOf } from "../shared/instance-id.js";
+import { roomsDirOf } from "../shared/room.js";
 
 export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnInject, TurnUsage, CtxCut, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
 
@@ -63,8 +64,11 @@ const FACTS_PUSH_MS = 30_000;
  *  它起来后到下一次推送之间, 名册是真的缺席。 */
 const FACTS_RETRY_MS = 5_000;
 let factsTimer: NodeJS.Timeout | undefined;
-/** 快照的来源署名 —— 一个 svr 可能接着好几台 daemon, 它按这个键分开存。 */
-const factsSource = (): string => hostname() || "daemon";
+/** 快照与转发记录的来源署名 —— 一个 svr 可能接着好几个 daemon (同机也可能), 它按这个键分区
+ *  (见 shared/instance-id.ts)。initDetailPersistence 按 stateDir 定下来。 */
+let source = "";
+/** 本 daemon 的 room 账本目录 (规范路径), 随快照报给 svr: 同机 svr 只把它本地读的那份账本给对得上的来源。 */
+let ledgerDir = "";
 
 /** 推一次, 答「推成没有」。占位快照 (absent) 不推: 那不是注册表的状态, 推过去只会覆盖掉一份好的。 */
 const pushFacts = async (): Promise<boolean> => {
@@ -76,7 +80,7 @@ const pushFacts = async (): Promise<boolean> => {
   return fetch(`${remoteBase.replace(/\/+$/, "")}/w`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ source: factsSource(), facts }),
+    body: JSON.stringify({ source, facts, ...(ledgerDir ? { roomsDir: ledgerDir } : {}) }),
   }).then((r) => r.ok, () => false); // 同 forwardToRemote: 远端挂了不该影响本机
 };
 
@@ -107,7 +111,8 @@ const startFactsForward = (): void => {
 const forwardToRemote = (rec: DetailRecord): void => {
   if (!remoteBase) return;
   const url = `${remoteBase.replace(/\/+$/, "")}/d`;
-  const body = JSON.stringify(rec);
+  // 只在过河时署名: 本地 store 不分来源, svr 上的票据按 src 只看自己 daemon 的记录。
+  const body = JSON.stringify(source ? { ...rec, src: source } : rec);
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (remoteToken) headers.authorization = `Bearer ${remoteToken}`;
   fetch(url, { method: "POST", headers, body }).catch(() => { /* ignore */ });
@@ -115,6 +120,8 @@ const forwardToRemote = (rec: DetailRecord): void => {
 
 export const initDetailPersistence = (stateDir: string, log?: Logger): void => {
   store = createDetailStore({ stateDir, log });
+  source = daemonSourceOf(stateDir);
+  ledgerDir = canonicalDir(roomsDirOf(stateDir));
 };
 
 export const configureRemoteForward = (base: string, token: string): void => {
@@ -335,15 +342,23 @@ const latestTurnId = (pick: (r: TurnDetailRecord) => boolean): string | undefine
     .reduce<TurnDetailRecord | undefined>((best, r) => (best && best.updatedAt >= r.updatedAt ? best : r), undefined)
     ?.id;
 
+// 视图监听的实际口 (http.ts 的 onView 报来, 同时写进 <stateDir>/run/ports.json):
+// undefined = 还没定 (boot 早期, 先用配置口), null = 没起来 (port=0 / 全被占)。
+let viewPort: number | null | undefined;
+export const setViewPort = (port: number | null): void => { viewPort = port; };
+/** 没有任何 base、视图口也没起来: 本机链接一定是死链。 */
+export const linksDead = (publicBase: string): boolean => !publicBase && !remoteBase && viewPort === null;
+
 // URL 优先级: publicBase (反代/自定义 host) > remoteBase (chat 端直连 svr)
-// > fallback host+port (回环 → LAN IP 替换)。
+// > fallback host + **实际监听口** (回环 → LAN IP 替换; 配置口被占时视图落在 +N 上)。
+// 都没有 (视图没起来 / port=0) = "": 调用方按无链接处理 (裸头 / 卡片不挂跳转), 不发死链。
 // forceInnerBrowser=1 / ww_vw / ww_vh: WeCom 桌面端识别参数, 让链接在内置浏览器打开。
-const detailRoot = (publicBase: string, fallbackHost: string, fallbackPort: number): string =>
-  publicBase && publicBase.length > 0
-    ? publicBase.replace(/\/+$/, "")
-    : remoteBase && remoteBase.length > 0
-      ? remoteBase.replace(/\/+$/, "")
-      : `http://${resolvePublicHost(fallbackHost)}:${fallbackPort}`;
+export const detailRoot = (publicBase: string, fallbackHost: string, fallbackPort: number): string => {
+  if (publicBase) return publicBase.replace(/\/+$/, "");
+  if (remoteBase) return remoteBase.replace(/\/+$/, "");
+  const port = viewPort === undefined ? fallbackPort : viewPort;
+  return port ? `http://${resolvePublicHost(fallbackHost)}:${port}` : "";
+};
 
 // ww_uniq 决定 WeCom 内置浏览器窗口复用: 同 chat 的所有 detail 链接共用一个窗口,
 // 而不是每条 id 各开一个。无 chatId 时退回 record id (保留旧行为)。
@@ -354,13 +369,16 @@ const detailParams = (id: string, uniq?: string, role?: string): string =>
     forceInnerBrowser: "1", ww_vw: "1000", ww_vh: "800", ww_uniq: uniq ?? id,
   }).toString();
 
+/** 没有根就没有链接 (""), 不拼出一个 `/detail?…` 相对路径。 */
+const under = (root: string, path: string): string => (root ? `${root}${path}` : "");
+
 export const buildDetailUrl = (
   publicBase: string,
   fallbackHost: string,
   fallbackPort: number,
   id: string,
   uniq?: string,
-): string => `${detailRoot(publicBase, fallbackHost, fallbackPort)}/detail?${detailParams(id, uniq)}`;
+): string => under(detailRoot(publicBase, fallbackHost, fallbackPort), `/detail?${detailParams(id, uniq)}`);
 
 // Rolepage 入口。id 是那条 turn 记录 —— 它是凭据, 也是没指定视角时的默认落点
 // (那一轮的 wizard, 以及它所在的那个群); `role` 显式指定从谁的视角看。role 用 target
@@ -372,7 +390,7 @@ export const buildChatUrl = (
   id: string,
   uniq?: string,
   role?: string,
-): string => `${detailRoot(publicBase, fallbackHost, fallbackPort)}/role?${detailParams(id, uniq, role)}`;
+): string => under(detailRoot(publicBase, fallbackHost, fallbackPort), `/role?${detailParams(id, uniq, role)}`);
 
 // 一个 wizard 的 rolepage URL —— 气泡头上的链接都走这里。票据优先取它自己最近
 // 那条 turn, 取不到退到它所在聊天的长期票据 (见 chatTicketFor): 任一有效票据都能看
@@ -383,7 +401,7 @@ export const chatUrlFor = (
   target: string,
 ): string | undefined => {
   const id = latestTurnIdFor(target) ?? chatTicketFor(baseOfKey(target));
-  return id ? buildChatUrl(d.detailPublicBase, d.host, d.port, id, roleUniq(target), target) : undefined;
+  return (id && buildChatUrl(d.detailPublicBase, d.host, d.port, id, roleUniq(target), target)) || undefined;
 };
 
 // rolepage 的 ww_uniq 取 wizard 名字: 同一个 wizard 的链接复用一个 WeCom 窗口, 不同

@@ -3,7 +3,8 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { WorldFacts } from "../shared/world.js";
 
-export type FactsEntry = { at: number; facts: WorldFacts };
+/** roomsDir: 推送方 daemon 的账本目录 —— svr 据此判本地账本归哪个来源 (见 svr/index.ts ledgerServes)。 */
+export type FactsEntry = { at: number; facts: WorldFacts; roomsDir?: string };
 
 const isEntry = (v: unknown): v is FactsEntry =>
   !!v && typeof v === "object"

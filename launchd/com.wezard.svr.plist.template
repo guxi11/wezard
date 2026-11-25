@@ -27,6 +27,8 @@
 
     <key>RunAtLoad</key>
     <true/>
+    <!-- KeepAlive 不认退出码: svr 端口全被占 (systemd 下是退出码 78) 时, 在 launchd 下
+         (XPC_SERVICE_NAME 有值) 以 0 退出, SuccessfulExit=false 于是不再重拉。 -->
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>

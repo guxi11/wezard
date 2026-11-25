@@ -49,6 +49,8 @@ export interface RoomReader {
   /** 账本此刻能不能读。daemon 的 reader 在 boot 早期先挂上、room store 之后才开
    *  (与 worldFacts 同一取舍), 所以「挂上了」不等于「读得到」。 */
   ready?: () => boolean;
+  /** 这份账本属于哪个来源的票据 (多 daemon 共 svr): 不给 = 谁的票据都用它 (daemon 自己 / 单 daemon 的 svr)。 */
+  serves?: (src: string | undefined) => boolean;
 }
 
 export interface ChatRoutes {
@@ -68,7 +70,8 @@ export interface ChatRoutes {
 /** 注册表侧的事实 (wizard 身份 / 家谱 / plans / 日程 / room 快照) —— 只有 daemon 给得出。
  *  async 是因为活体状态要问 tmux; 独立 svr 用 daemon 推来的快照。
  *  实现方自己做节流: 这条路由会被前端定时轮询。 */
-export type WorldFactsProvider = () => Promise<WorldFacts> | WorldFacts;
+/** src = 票据的来源 daemon (多 daemon 共 svr 时只给它那一份快照); daemon 自己的 provider 不看它。 */
+export type WorldFactsProvider = (src?: string) => Promise<WorldFacts> | WorldFacts;
 
 const DEFAULT_LIMIT = 60;
 /** rolepage 只看最近这么久: 更早的轮次、wizard 登记与家谱一律不进视图。
@@ -104,8 +107,6 @@ const recentFacts = (f: WorldFacts, records: readonly DetailRecord[], now: numbe
 
 // 多机器人隔离: 一张票据只看得见与它 (票据 selfTarget) sameBot 的记录与名册。
 const ofBot = (self: string) => (key: string | undefined): boolean => !key || sameBot(self, key);
-const botRecords = (records: readonly DetailRecord[], self: string): DetailRecord[] =>
-  records.filter((r) => ofBot(self)((r as { target?: string }).target));
 const botFacts = (f: WorldFacts, self: string): WorldFacts => {
   const mine = ofBot(self);
   const keep = <V>(o: Readonly<Record<string, V>>): Record<string, V> => Object.fromEntries(Object.entries(o).filter(([k]) => mine(k)));
@@ -124,6 +125,13 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
   };
 };
 const viewerOf = (t: Ticket): string => t.selfTarget;
+// 多 daemon 共 svr: 记录由转发它的 daemon 署名 (`src`), 票据只看同一来源的。没署名的 (daemon 本地
+// store、旧 daemon 推来的) 不分区, 维持原来的合并视图 —— 这是兼容, 不是放宽。
+const srcOf = (r: DetailRecord): string | undefined => (r as { src?: string }).src || undefined;
+const sameSrc = (src: string | undefined) => (r: DetailRecord): boolean => !src || !srcOf(r) || srcOf(r) === src;
+/** 这张票据看得见的那一条: 同机器人 + 同来源。 */
+const sees = (t: Ticket) => (r: DetailRecord): boolean => sameSrc(t.src)(r) && ofBot(viewerOf(t))((r as { target?: string }).target);
+const ticketRecords = (records: readonly DetailRecord[], t: Ticket): DetailRecord[] => records.filter(sees(t));
 
 /** 浏览器收 gzip 吗 (ServerResponse.req 就是这条请求)。远端 svr 的 room / world 回包 5~70KB, 资源 200KB+, 全文本, 压后 1/5 ~ 1/8。 */
 const wantsGzip = (res: ServerResponse): boolean => /\bgzip\b/i.test(String(res.req?.headers["accept-encoding"] ?? ""));
@@ -153,15 +161,17 @@ const ticketTarget = (store: DetailStore, rec: DetailRecord): string => {
   if (direct) return direct;
   const sid = (rec as { sessionId?: string }).sessionId;
   if (!sid) return "";
-  return store.list().filter(isTurn).filter((r) => r.sessionId === sid && r.target)
+  return store.list().filter(sameSrc(srcOf(rec))).filter(isTurn).filter((r) => r.sessionId === sid && r.target)
     .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.target ?? "";
 };
 
-interface Ticket { selfTarget: string; turn?: TurnDetailRecord }
+/** src: 签发这张票据的 daemon (svr 上才有); 没有 = 不分来源。 */
+interface Ticket { selfTarget: string; turn?: TurnDetailRecord; src?: string }
 
 const resolveTicket = (store: DetailStore, url: URL): Ticket | undefined => {
   const rec = store.get(url.searchParams.get("id") ?? "");
-  return rec ? { selfTarget: ticketTarget(store, rec), turn: isTurn(rec) && rec.target ? rec : undefined } : undefined;
+  const src = rec ? srcOf(rec) : undefined;
+  return rec ? { selfTarget: ticketTarget(store, rec), turn: isTurn(rec) && rec.target ? rec : undefined, ...(src ? { src } : {}) } : undefined;
 };
 
 const NOT_FOUND = "未找到该会话 (链接可能已过期)";
@@ -281,7 +291,8 @@ const ledgerIndex = (states: readonly RoomState[]): Ledger => {
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader, channelResolver?: ChannelOf): ChatRoutes => {
   // room 账本在手边 (daemon / 同机 svr) 就以账本为准重建 rooms —— 推送快照只补认表,
   // 不然 daemon 没重启时这里会一直是旧的一份 (比如人节点缺失)。
-  const liveRooms = (): RoomReader | undefined => (rooms && (!rooms.ready || rooms.ready()) ? rooms : undefined);
+  const liveRooms = (t: Ticket): RoomReader | undefined =>
+    (rooms && (!rooms.ready || rooms.ready()) && (!rooms.serves || rooms.serves(t.src)) ? rooms : undefined);
   // 没有 channel-posts 的进程 (独立 svr) 用快照里已有的指针 —— 端口/帖子的归属不会因重建而丢。
   const chFrom = (f: WorldFacts): ChannelOf => channelResolver ?? ((room) => {
     const r = (f.rooms ?? []).find((x) => x.id === room);
@@ -291,23 +302,23 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     // 独立 svr 没有 channel-posts, 只看账本会把频道当成企微群 (图标/类型全错)。
     return r.kind === "channel" ? { channel: room.replace(/^chat:/, ""), post: "" } : undefined;
   });
-  const roomsNow = (f: WorldFacts): WorldFacts => {
-    const rs = liveRooms();
+  const roomsNow = (f: WorldFacts, t: Ticket): WorldFacts => {
+    const rs = liveRooms(t);
     if (!rs) return f;
     const states = rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } });
     return states.length ? { ...f, rooms: buildRoomFacts(states, namesOf(f), chFrom(f)) } : f;
   };
   const getFacts = (t: Ticket): Promise<WorldFacts> =>
-    Promise.resolve(facts ? facts() : EMPTY_FACTS)
+    Promise.resolve(facts ? facts(t.src) : EMPTY_FACTS)
       .then((f) => {
         const now = Date.now();
         const records = listRecent(t);
-        return withData(recentFacts(botFacts(roomsNow(withChatNameFallback(f)), viewerOf(t)), records, now), records, now);
+        return withData(recentFacts(botFacts(roomsNow(withChatNameFallback(f), t), viewerOf(t)), records, now), records, now);
       })
       .catch(() => EMPTY_FACTS);
-  const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));
-  const statesNow = (): RoomState[] => {
-    const rs = liveRooms();
+  const listRecent = (t: Ticket): DetailRecord[] => ticketRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), t);
+  const statesNow = (t: Ticket): RoomState[] => {
+    const rs = liveRooms(t);
     return rs ? rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } }) : [];
   };
 
@@ -343,7 +354,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const room: SimpleHandler = withTicket((ticket, url, res) => {
     const id = roomOf(url);
     if (!id) { json(res, 400, { ok: false, error: "room required" }); return; }
-    const ledger = liveRooms();
+    const ledger = liveRooms(ticket);
     if (!ledger) { json(res, 503, { ok: false, error: "这个部署没有 room 账本 (只在 daemon 侧可读)" }); return; }
     let s: RoomState | undefined;
     try { s = ledger.get(id); } catch (e) { json(res, 409, { ok: false, error: String(e) }); return; }
@@ -396,7 +407,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const span = !sid || sid === "all" ? undefined : spans.find((s) => spanKey(s) === sid);
       const raw = url.searchParams.get("limit");
       const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
-      const states = statesNow();
+      const states = statesNow(ticket);
       // 票据的落点 room (detail link 进来「选中该 role + 该群聊」): turn 票据 = 这一轮说话的那个聊天, 其余 = 票据 wizard 的 home 群。
       // 只在它是现存 room 时给; 该 role 是不是它的成员留给前端判 (换 role 时不一定是)。
       const landing = ticket.turn ? channelOf(ticket.turn) : baseOfKey(ticket.selfTarget);
@@ -406,14 +417,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         ok: true, at: now,
         role: roleInfo(role, dir, f, roleStats(records, role, now, span), now),
         uid: uid || "",
-        ledger: !!liveRooms(),
+        ledger: !!liveRooms(ticket),
         sessions: spans.map(wireSpan),
         session: span ? spanKey(span) : "all",
         plans: f.plans.filter((p) => p.owner === role && (p.state === "active" || p.state === "paused" || p.state === "completed")).map(publicPlan),
         // 日程栏与 main 同形: gate 去向 / 出错理由 / 执行目标 / 任务文件都要, 前端按老卡片渲染。
         schedules,
         stats: roleStats(records, role, now, span),
-        charter: charterBrief(store.list(), role),
+        charter: charterBrief(ticketRecords(store.list(), ticket), role),
         ...(landingRoom ? { landingRoom } : {}),
       };
       // card=1: 只要名片 (room 视角下左上角仍是 role, 不必为它再算一遍消息与时间轴)。
@@ -468,7 +479,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const { at, ...w } = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
       // 未读 = 当前查看的 role 在每个 room 里游标之后别人说的行数 (room 账本的 member.seen); 只有 wizard 有游标。
       const uid = f.wizards.find((x) => x.target === self)?.uid ?? (self.startsWith("uid:") ? self.slice(4) : "");
-      const byRoom = new Map(statesNow().map((s) => [s.id, s] as const));
+      const byRoom = new Map(statesNow(ticket).map((s) => [s.id, s] as const));
       const withUnread = (r: RoomFact): RoomFact & { unread: number } => {
         const s = uid ? byRoom.get(r.id) : undefined;
         return { ...r, unread: s ? unreadCount(s, { kind: "wizard", id: uid }) : 0 };
@@ -483,7 +494,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
 
   const tool: SimpleHandler = withTicket((ticket, url, res) => {
     const r = store.get(url.searchParams.get("turn") ?? "");
-    const html = r && isTurn(r) && ofBot(viewerOf(ticket))(r.target) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
+    const html = r && isTurn(r) && sees(ticket)(r) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
     if (html === undefined) { json(res, 404, { ok: false, error: "未找到该工具调用" }); return; }
     json(res, 200, { ok: true, html });
   });
@@ -491,22 +502,22 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   /** 一条消息对应的那一轮的过程框。 */
   const turn: SimpleHandler = withTicket((ticket, url, res) => {
     const r = store.get(url.searchParams.get("turn") ?? "");
-    if (!r || !isTurn(r) || !ofBot(viewerOf(ticket))((r as { target?: string }).target)) {
+    if (!r || !isTurn(r) || !sees(ticket)(r)) {
       json(res, 404, { ok: false, error: "未找到这一轮" });
       return;
     }
     void getFacts(ticket).then((f) => {
-      const lx = ledgerIndex(statesNow());
+      const lx = ledgerIndex(statesNow(ticket));
       const deco = roomDeco(makeDirectory(listRecent(ticket), f), { chatLabel: roomShortOf(f), repliesOf: lx.repliesOf, lookup: lx.lookup });
       // room 视图点开的过程框: 气泡就是那一行账本本身, 框里的 CLI 原话 (账本时代) 一律是过程。
       const era = r.createdAt >= lx.roomFrom || isInjection(r);
-      json(res, 200, { ok: true, html: renderTurnBox(spokenTurn(r, [], era), store.list(), Date.now(), deco) });
+      json(res, 200, { ok: true, html: renderTurnBox(spokenTurn(r, [], era), ticketRecords(store.list(), ticket), Date.now(), deco) });
     });
   });
 
   const charter: SimpleHandler = withTicket((ticket, url, res) => {
     void getFacts(ticket).then((f) => {
-      const records = botRecords(store.list(), viewerOf(ticket));
+      const records = ticketRecords(store.list(), ticket);
       const r = pickRole(makeDirectory(listRecent(ticket), f), ticket, url);
       const v = r ? charterView(records, r) : undefined;
       json(res, 200, v ? { ok: true, role: r, ...v } : { ok: true, role: r, none: true });
@@ -519,7 +530,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     void getFacts(ticket).then((f) => {
       const facts = f.rooms ?? [];
       const ids = new Set(facts.map((r) => r.id));
-      json(res, 200, { ok: true, q, ...searchRooms(statesNow().filter((s) => ids.has(s.id)), facts, namesOf(f), roomShortOf(f), q) });
+      json(res, 200, { ok: true, q, ...searchRooms(statesNow(ticket).filter((s) => ids.has(s.id)), facts, namesOf(f), roomShortOf(f), q) });
     });
   });
 

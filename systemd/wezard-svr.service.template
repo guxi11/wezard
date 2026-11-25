@@ -9,6 +9,8 @@ WorkingDirectory=__REPO__
 ExecStart=__NODE__ __REPO__/dist/svr/index.js
 Restart=always
 RestartSec=5
+# 78 = EX_CONFIG: 首选口 .. 首选口+svr.portSpan 全被占, 再拉也起不来 —— 别 5s 一次崩溃循环。
+RestartPreventExitStatus=78
 StandardOutput=append:__HOME__/.wezard/svr.stdout.log
 StandardError=append:__HOME__/.wezard/svr.stderr.log
 Environment=NODE_ENV=production

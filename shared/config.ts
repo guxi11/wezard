@@ -51,6 +51,7 @@ const Daemon = z.object({
   socket: knob(z.string().default("").describe("守护进程控制面 unix socket 路径; 空 = <stateDir>/run/daemon.sock (路径须 ≤103 字节, 所在目录须是自己的)"), { gate: "card" }),
   host: knob(z.string().default("127.0.0.1").describe("浏览器视图 (rolepage / 详情页) 只读监听地址"), { gate: "card" }),
   port: knob(z.number().int().min(0).max(65535).default(17890).describe("浏览器视图 (rolepage / 详情页) 只读监听端口; 0 = 不开视图监听 (控制面不走它, 被占用也只告警)"), { gate: "card" }),
+  portSpan: knob(z.number().int().min(0).max(1000).default(20).describe("视图端口被占时从 port 起逐个 +1 再试的次数 (0 = 只试 port); 实际口写进 <stateDir>/run/ports.json, 链接跟着它走; 全被占只告警"), { gate: "card" }),
   // 每个 pane 一个全量 MCP server 子进程是多余的一份注册表 (本机实测 RssAnon ≈ 33MB/pane);
   // relay 只用 node 内建模块把 stdio 转成 daemon socket 上的 POST /mcp (≈ 7~9MB/pane),
   // 身份走请求头, 口令不出本 uid。旧值 http (直连 TCP /mcp) 已随控制面迁走, 读成 relay。
@@ -329,7 +330,9 @@ const Sync = z.object({
 const Svr = z.object({
   host: knob(z.string().default("0.0.0.0").describe("svr 监听地址"), { gate: "card" }),
   port: knob(z.number().int().min(1).max(65535).default(17891).describe("svr 监听端口"), { gate: "card" }),
+  portSpan: knob(z.number().int().min(0).max(1000).default(20).describe("svr 端口被占时从 port 起逐个 +1 再试的次数 (0 = 只试 port); 实际口写进 <svr.stateDir>/run/ports.json; 全被占以退出码 78 退出 (单元不再重拉)"), { gate: "card" }),
   stateDir: z.string().default("~/.wezard/svr").describe("svr 状态目录"),
+  roomsDir: knob(z.string().default("").describe("svr 只读的 room 账本目录 (同机部署); 空 = 同一份配置的 daemon.stateDir 下的 rooms; 环境变量 WEZARD_ROOMS_DIR / --rooms 优先"), { gate: "card" }),
   tokenFile: knob(z.string().default("~/.wezard/svr-token").describe("svr 口令文件"), { gate: "hidden" }),
   token: knob(z.string().default("").describe("svr 口令"), { gate: "hidden" }),
   logLevel: z.enum(LOG_LEVELS).default("info").describe("svr 日志级别"),

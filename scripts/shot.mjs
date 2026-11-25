@@ -56,7 +56,13 @@ const readConfig = () => {
   const path = [process.env.WEZARD_CONFIG, "~/.wezard/config.jsonc", "~/.wezard/config.json"].filter(Boolean).map(expand).find(existsSync);
   const cfg = path ? parseJsonc(readFileSync(path, "utf8")) ?? {} : {};
   const d = cfg.daemon ?? {};
-  return { root, host: d.host ?? "127.0.0.1", port: d.port ?? 17890, stateDir: expand(d.stateDir ?? "~/.wezard/state") };
+  const stateDir = expand(d.stateDir ?? "~/.wezard/state");
+  return { root, host: d.host ?? "127.0.0.1", port: viewPortOf(stateDir) ?? d.port ?? 17890, stateDir };
+};
+
+/** 视图实际监听口 (daemon 写的 <stateDir>/run/ports.json; 配置口被占时视图落在 +N 上)。 */
+const viewPortOf = (stateDir) => {
+  try { return JSON.parse(readFileSync(join(stateDir, "run", "ports.json"), "utf8")).view?.port; } catch { return undefined; }
 };
 
 /** 最新一条 turn 记录的 id; 文件按追加顺序, 从尾往前找第一条。 */
