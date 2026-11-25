@@ -5,9 +5,12 @@
 # 并踢掉生产企微连接), 假 bot 凭据 (WS 认证失败不影响控制面), 控制面 socket / 视图口都在临时目录。
 # 接待 wizard 用名册里登记、没有活 pane 的条目; 它的交代用 /room/reply 以它的 target 身份模拟。
 #
-# 覆盖七项: ① ask → 交代 → wait answered → inbox → ack 后空 ② need → 带 re 续问
+# 覆盖: ① ask → 交代 → wait answered → inbox → ack 后空 ② need → 带 re 续问
 # ③ daemon 停机期间写下的交代, 重启后 wait / inbox 拿得到 ④ 10 分钟内重复同一正文返回同一个 req
 # ⑤ cancel 后迟到的交代仍是 canceled 且不进 inbox ⑥ 三种额度超限都 429 ⑦ TCP 视图口打 /external/* 得 410
+# ⑧ 口令轮换过 daemon 口令闸 + 旧口令立即失效
+# ⑨ (第 2 步) 接待 wizard 往绑定 room 发话 / 改配置被拒, 在自己的 adhoc room 放行; 出口 answer 抹掉 daemon-token
+# ⑩ (第 2 步) 逾期升级行落 owner room ⑪ (第 2 步) 额度告警只发一次 + ext status
 set -uo pipefail
 
 ROOM=''
@@ -51,6 +54,20 @@ trap cleanup EXIT
 
 mkdir -p "$H/.wezard" "$STATE" "$T/workspace"
 
+# 归属 room (owner): 一个绑定 room 的账本 (chat: 前缀 = 绑定), 只给人一个成员 —— 逾期 / 额度告警落这里。
+node -e '
+const fs = require("fs"), path = require("path");
+const [stateDir] = process.argv.slice(1);
+const room = "chat:wrOwner";
+const dir = path.join(stateDir, "rooms");
+fs.mkdirSync(dir, { recursive: true });
+const rows = [
+  { op: "open", at: 1, room, kind: "wecom-group", by: { kind: "daemon", id: "wezard" } },
+  { op: "join", at: 1, room, who: { kind: "human", id: "T1" }, ord: 1, via: "inbound", by: { kind: "daemon", id: "wezard" } },
+];
+fs.writeFileSync(path.join(dir, encodeURIComponent(room) + ".jsonl"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+' "$STATE"
+
 cat >"$CFG" <<EOF
 {
   "bot": { "botId": "rehearsal-bot", "secret": "rehearsal-secret" },
@@ -64,13 +81,15 @@ cat >"$CFG" <<EOF
     "portSpan": 2
   },
   "wrc": { "allowFrom": [], "cwd": "$T/workspace" },
+  "rooms": { "watchdog": { "intervalSec": 10 }, "overdue": { "remindMin": 0, "groupMin": 1 } },
   "external": {
     "enabled": true,
     "principals": [
-      { "name": "CoC",  "reception": "recv", "owner": "T1", "enabled": true, "perMinute": 10,  "perDay": 50,  "maxOpen": 5 },
-      { "name": "Tiny", "reception": "recv", "enabled": true, "perMinute": 1,   "perDay": 50,  "maxOpen": 5 },
+      { "name": "CoC",  "reception": "recv", "owner": "chat:wrOwner", "enabled": true, "perMinute": 10,  "perDay": 50,  "maxOpen": 5 },
+      { "name": "Tiny", "reception": "recv", "owner": "chat:wrOwner", "enabled": true, "perMinute": 1,   "perDay": 50,  "maxOpen": 5 },
       { "name": "Few",  "reception": "recv", "enabled": true, "perMinute": 100, "perDay": 100, "maxOpen": 1 },
-      { "name": "Day",  "reception": "recv", "enabled": true, "perMinute": 100, "perDay": 1,   "maxOpen": 100 }
+      { "name": "Day",  "reception": "recv", "enabled": true, "perMinute": 100, "perDay": 1,   "maxOpen": 100 },
+      { "name": "Slow", "reception": "recv", "owner": "chat:wrOwner", "enabled": true, "perMinute": 100, "perDay": 100, "maxOpen": 10 }
     ]
   }
 }
@@ -119,6 +138,14 @@ start_daemon() {
   done
   echo "daemon 起不来 (pid $DPID); 尾部日志:"; tail -30 "$T/daemon.stdout.log"
   return 1
+}
+
+# 演练环境没有真企微连接: WS 认证耗尽重试会把进程带走 (实现里 await ws.ready 失败 = 退出)。
+# 控制面不通就原样再起一份 —— 账本与索引都在盘上, 重启不丢事实, 这也是 ③ 已在验的性质。
+ensure_daemon() {
+  if sock -o /dev/null -f "http://wezard/healthz" 2>/dev/null; then return 0; fi
+  say "daemon 不在了 (演练的 WS 凭据是假的), 用同一份盘上状态重启"
+  start_daemon
 }
 
 reply() { # $1 = req, $2 = status, $3 = text
@@ -267,6 +294,8 @@ process.stdout.write(!sys ? "no-row" : (sys.wake || []).includes(uid) ? "woke" :
 ' "$STATE" "$req5" "$UID_W" >"$T/cancel-wake.txt"
 check "$(cat "$T/cancel-wake.txt")" "woke" "⑤ cancel 的 system 行 wake 含接待 wizard 的 uid"
 
+ensure_daemon
+
 # ── ⑥ 三种额度超限都是 429 ──────────────────────────────────────────────────
 t1=$(ext ask --as Tiny "tiny 第一句")
 check "$(printf '%s' "$t1" | jget state)" "open" "⑥ Tiny 第一句放行"
@@ -327,6 +356,96 @@ NEW_TOKEN=$(cat "$H/.wezard/external/CoC.token")
 old_code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --unix-socket "$SOCK" -m 5 \
   -H 'x-wezard-ext: CoC' -H "x-wezard-ext-token: $OLD_TOKEN" "http://wezard/external/inbox")
 check "$old_code" "403" "⑧ 旧口令立即失效 (403)"
+
+ensure_daemon
+
+# ── ⑨ 接待 wizard 的禁用表 + 出口脱敏 (第 2 步) ───────────────────────────────
+recv_403() { # $1 路由 $2 body
+  curl -sS --noproxy '*' --unix-socket "$SOCK" -m 10 -X POST -H 'content-type: application/json' \
+    -H "x-wezard-token: $(cat "$H/.wezard/daemon-token")" -d "$2" "http://wezard$1"
+}
+room_coc=$(node -e '
+const fs = require("fs");
+const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+const hit = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .filter((o) => o && o.op === "room" && o.principal === "CoC").pop();
+process.stdout.write(hit ? hit.room : "");' "$STATE/external/requests.jsonl")
+
+n_bound=$(recv_403 /room/notify "{\"target\":\"$TARGET\",\"room\":[\"chat:wrOwner\"],\"markdown\":\"外部不该进绑定群\"}")
+check "$(printf '%s' "$n_bound" | jget ok)" "false" "⑨ 接待 wizard 往绑定 room notify 被拒"
+printf '%s' "$n_bound" | jget reason | grep -q "外部接待" && pass "⑨ 拒绝原因写明是外部接待" || bad "⑨ 拒绝原因不对: $(printf '%s' "$n_bound" | jget reason)"
+
+s_adhoc=$(recv_403 /room/say "{\"target\":\"$TARGET\",\"room\":\"$room_coc\",\"text\":\"在自己的接待 room 里说话\"}")
+check "$(printf '%s' "$s_adhoc" | jget ok)" "true" "⑨ 接待 wizard 在接待 adhoc room 说话放行"
+
+s_bound=$(recv_403 /room/say "{\"target\":\"$TARGET\",\"room\":\"chat:wrOwner\",\"text\":\"不该进绑定群\"}")
+check "$(printf '%s' "$s_bound" | jget ok)" "false" "⑨ 接待 wizard 往绑定 room say 被拒"
+
+cfg_deny=$(recv_403 /config/set "{\"target\":\"$TARGET\",\"path\":\"external.enabled\",\"op\":\"set\",\"value\":false}")
+check "$(printf '%s' "$cfg_deny" | jget ok)" "false" "⑨ 接待 wizard 改配置被拒"
+printf '%s' "$cfg_deny" | jget reason | grep -q "外部接待" && pass "⑨ 改配置的拒绝原因写明是外部接待" || bad "⑨ 改配置原因不对: $(printf '%s' "$cfg_deny" | jget reason)"
+
+# 脱敏: 交代正文里带 daemon-token 原文, ext wait 拿到的 answer 必须是 ***
+DTOK=$(cat "$H/.wezard/daemon-token")
+r9=$(ext ask "第九件: 回一句带令牌的")
+req9=$(printf '%s' "$r9" | jget req)
+reply "$req9" done "令牌是 $DTOK 你自己看" >/dev/null
+w9=$(ext wait "$req9" --timeout 10)
+case "$(printf '%s' "$w9" | jget answer)" in
+  "令牌是 *** 你自己看") pass "⑨ 出口 answer 里的 daemon-token 被抹成 ***" ;;
+  *) bad "⑨ 脱敏不对: $(printf '%s' "$w9" | jget answer)" ;;
+esac
+node -e '
+const fs = require("fs"), path = require("path");
+const [stateDir, room, req, tok] = process.argv.slice(1);
+const rows = fs.readFileSync(path.join(stateDir, "rooms", encodeURIComponent(room) + ".jsonl"), "utf8");
+process.stdout.write(rows.includes(tok) ? "raw" : "gone");' "$STATE" "$room_coc" "$req9" "$DTOK" >"$T/ledger-raw.txt"
+check "$(cat "$T/ledger-raw.txt")" "raw" "⑨ 账本原样 (脱敏只作用在出口)"
+
+# ── ⑩ 逾期通知落 owner room ─────────────────────────────────────────────────
+r10=$(ext ask --as Slow "第十件: 一直没人回")
+req10=$(printf '%s' "$r10" | jget req)
+check "$(printf '%s' "$r10" | jget state)" "open" "⑩ Slow 的请求挂着"
+say "⑩ 等逾期扫描 (groupMin=1 分钟, 扫描 10s 一拍, 最多等 140s)…"
+found=''
+for _ in $(seq 1 28); do
+  sleep 5
+  ensure_daemon
+  found=$(node -e '
+const fs = require("fs"), path = require("path");
+const [stateDir, req] = process.argv.slice(1);
+const f = path.join(stateDir, "rooms", encodeURIComponent("chat:wrOwner") + ".jsonl");
+let rows = "";
+try { rows = fs.readFileSync(f, "utf8"); } catch { process.stdout.write(""); process.exit(0); }
+const hit = rows.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .find((r) => r && r.op === "msg" && typeof r.text === "string" && r.text.includes("外部调用方 Slow 的请求 " + req));
+process.stdout.write(hit ? hit.text : "");' "$STATE" "$req10")
+  [ -n "$found" ] && break
+done
+if [ -n "$found" ]; then pass "⑩ owner room 收到逾期行: $found"; else bad "⑩ 140s 内 owner room 没收到逾期行"; fi
+
+# ── ⑪ 额度告警只发一次 + ext status ────────────────────────────────────────
+ensure_daemon
+ext ask --as Tiny "tiny 第三句" >/dev/null 2>&1
+ext ask --as Tiny "tiny 第四句" >/dev/null 2>&1
+alerts=$(node -e '
+const fs = require("fs"), path = require("path");
+const [stateDir] = process.argv.slice(1);
+let rows = "";
+try { rows = fs.readFileSync(path.join(stateDir, "rooms", encodeURIComponent("chat:wrOwner") + ".jsonl"), "utf8"); } catch {}
+const n = rows.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .filter((r) => r && r.op === "msg" && typeof r.sys === "string" && r.sys.startsWith("ext-quota:Tiny:minute:")).length;
+process.stdout.write(String(n));' "$STATE")
+check "$alerts" "1" "⑪ 额度告警同一天同一种只发一次 (索引去重)"
+
+st=$(ext status)
+check "$(printf '%s' "$st" | jget ok)" "true" "⑪ ext status 可用"
+check "$(printf '%s' "$st" | jget principals.length)" "5" "⑪ ext status 列出全部调用方 (CoC/Tiny/Few/Day/Slow)"
+st_coc=$(node -e '
+const j = JSON.parse(process.argv[1]); const p = (j.principals || []).find((x) => x.name === "CoC") || {};
+process.stdout.write(String(p.today) + ":" + String(p.perDay) + ":" + (p.open > 0 ? "open" : "0"));' "$st")
+node -e 'const [t, d, o] = process.argv[1].split(":"); process.exit(Number(t) >= 1 && Number(d) === 50 && o === "open" ? 0 : 1)' "$st_coc" \
+  && pass "⑪ ext status 里 CoC 的今日 / 上限 / 未结 都对 ($st_coc)" || bad "⑪ ext status 的 CoC 行不对: $st_coc"
 
 echo "-----"
 if [ "$FAIL" -eq 0 ]; then

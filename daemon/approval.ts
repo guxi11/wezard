@@ -22,7 +22,9 @@ import {
   clearAutoWindow,
   getWindowMeta,
 } from "./session-cache.js";
-import { evaluateAllow, ruleMatchesAny, alwaysAllowRulesFor, splitSegments, NEVER_RULE_ALLOW, type DenyReason } from "../shared/allow-rules.js";
+import { evaluateAllow, isWezardMcpTool, ruleMatchesAny, alwaysAllowRulesFor, splitSegments, NEVER_RULE_ALLOW, type DenyReason } from "../shared/allow-rules.js";
+import { EXEC_SHELLS, shortToolOf } from "./exec-surface.js";
+import { replToolNames } from "../shared/repl-script.js";
 import { redact } from "./redact.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { dangerOf, dangerEarlyExit, selfConfigWriteOf, type DangerHit } from "./danger.js";
@@ -1916,6 +1918,29 @@ const unwrapDeferredTool = (toolName: string, toolInput: unknown): { toolName: s
   return { toolName: inner, toolInput: rest };
 };
 
+/** 会话归属是外部接待 wizard 时, 它是替哪个调用方干活 (第 2 步 §2)。缺省 = 不是接待 wizard。 */
+export const receptionCallerOf = (cfg: Config, target: string): { reception: string; principals: string[] } | undefined => {
+  const name = wizardStore()?.get(target)?.name || "";
+  if (!name) return undefined;
+  const callers = (cfg.external?.principals ?? []).filter((x) => x.enabled && x.reception === name).map((x) => x.name);
+  return callers.length ? { reception: name, principals: callers } : undefined;
+};
+
+/** 这一次调用是不是「只用 wezard 自家工具」: 直接调的 MCP 工具, 或 REPL 脚本里只调了
+ *  wezard 工具 / 纯计算。这种维持现状 (不发卡) —— 否则接待 wizard 连 chat_reply 都交代不了。 */
+export const wezardOnlyCall = (toolName: string, toolInput: unknown): boolean => {
+  if (isWezardMcpTool(toolName)) return true;
+  if (!EXEC_SHELLS.has(shortToolOf(toolName))) return false;
+  const code = toolInput && typeof toolInput === "object" ? (toolInput as { code?: unknown }).code : undefined;
+  if (typeof code !== "string" || !code.trim()) return false;
+  return replToolNames(code).every((n) => isWezardMcpTool(n) || (n.startsWith("tools.") && isWezardMcpTool(n.slice(6))));
+};
+
+/** 外部接待 wizard 的轮次: 除了 wezard 自家工具, matcher 拦下的一律发卡 (handler 里 forceCard 的唯一判据)。 */
+export const forceCardFor = (
+  reception: { reception: string; principals: string[] } | undefined, toolName: string, toolInput: unknown,
+): boolean => !!reception && !wezardOnlyCall(toolName, toolInput);
+
 export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }: ApprovalDeps): Handler => {
   const stewardGuard = makeStewardGuard();
   setCardQuoteMax(cfg.approval.cardQuoteMaxChars);
@@ -2137,6 +2162,10 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // v3 §3: 判定从「untagged 默认会话」升为「该聊天绑定的管家化身」(config chatPolicy.steward
     // 指定优先, 没绑 = 现存默认会话) —— 指定的化身即使是 tagged 也 arm, 换绑后旧默认会话不再 arm。
     const owner = getMirrorTarget?.(sessionId);
+    // 外部轮 (第 2 步 §2): 接待 wizard 的会话, matcher 拦下的调用一律发卡 —— 不走 allowRules /
+    // ⏱窗口 / 会话缓存 / skipAll。它手上一切不是 wezard 工具的动作都要人看一眼。
+    const reception = owner ? receptionCallerOf(cfg, owner) : undefined;
+    const forceCard = forceCardFor(reception, toolName, toolInput);
     // 受限会话的工具面 (daemon/tool-face.ts 的声明式注册表): 引导化身 / monitor 等一律在这里拒,
     // 排在手闸与一切放行之前 —— 它们只做一件受控的事, handoff / set_workspace 自己 / 发言正是
     // 2026-11-17 teststrict 与 2026-11-23 .monitor-2 的事故形态。CodeBuddy 的一切调用都包在
@@ -2226,10 +2255,14 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
 
     // 必发卡 = 危险名单 或 askRules 命中。这两者的语义是「每次都要人单独看一眼」,
     // 所以压过放行/窗口/缓存。守卫不在其列 —— 见上面 settleGuard 的注释。
-    const mustCard = nativePermission || Boolean(danger) || Boolean(askHit);
+    const mustCard = nativePermission || Boolean(danger) || Boolean(askHit) || forceCard;
     // 必发卡但不是危险的理由 — 卡片「审核」行 (askRules = 人自己要求每次问;
     // 危险名单命中由 danger 自己走「危险」行, 不在这里重复)。
-    const singleNote = askHit ? `命中 askRules「${askHit}」` : undefined;
+    // 接待 wizard 的卡要让人一眼看出「这是外部请求驱动的」—— 这一行与 askRules 说明合并进「审核」行。
+    const receptionNote = reception
+      ? `外部接待 ${reception.reception} · 由外部调用方 ${reception.principals.join("/")} 的请求驱动`
+      : "";
+    const singleNote = [askHit ? `命中 askRules「${askHit}」` : "", receptionNote].filter(Boolean).join(" · ") || undefined;
 
     // allowRules: matcher 拦下的工具里再挖细粒度豁免 (Bash 可按命令前缀区分)。
     // 交互卡工具 (AskUserQuestion 等) 在引擎内部硬保护, 规则写了也不放行。
@@ -2313,7 +2346,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 否则请求挂在长轮询上等一张子代理场景下没人点的卡, 最终 ask 回退成远端看不见的
     // 原生 picker。denyRules 已在上方生效 (拒绝不是审批), AskUserQuestion / ExitPlanMode
     // 的交互卡也已在上方分支返回, 均不受影响。
-    if (!nativePermission && BYPASS_MODES.has(body.permission_mode ?? "")) {
+    if (!nativePermission && !forceCard && BYPASS_MODES.has(body.permission_mode ?? "")) {
       log.info({ toolName, sessionId, mode: body.permission_mode }, "permission-mode bypass auto allow");
       json(res, 200, { decision: "allow", reason: `permission_mode:${body.permission_mode}` } satisfies ApproveResp);
       settleGuard();
@@ -2324,7 +2357,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 名单 / askRules / ⏱窗口 / 会话缓存 (原 danger.skipAll, 2026-10-28 并入 mode)。
     // denyRules / EnterPlanMode 拦截在前面已生效 (拒绝不是审批);
     // AskUserQuestion / ExitPlanMode 交互卡在上方分支已返回, 不受影响。
-    if (!nativePermission && cfg.approval.mode === "skip_all" && !apprenticeSession(sessionId)) {
+    if (!nativePermission && !forceCard && cfg.approval.mode === "skip_all" && !apprenticeSession(sessionId)) {
       log.info({ toolName, sessionId }, "skip_all auto allow");
       json(res, 200, { decision: "allow", reason: "skip_all" } satisfies ApproveResp);
       settleGuard();
@@ -2344,7 +2377,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // danger.skip / danger 模式的早退。第三个参数是「除 danger 外还有没有别的必发卡
     // 理由」—— askRules 不能被 danger 的开关顺带关掉。守卫不在其列: 它要的是事后按框,
     // 早退照样能给 (settleGuard), 拿它挡早退等于把 danger 的开关废掉。
-    const earlyExit = dangerEarlyExit(cfg, danger, nativePermission || Boolean(askHit) || Boolean(selfWrite));
+    const earlyExit = forceCard ? undefined : dangerEarlyExit(cfg, danger, nativePermission || Boolean(askHit) || Boolean(selfWrite));
     if (earlyExit) {
       // danger-only 模式 (mode=danger, 默认) 的自动放行按 ⏱ 窗口记账/续期 (人
       // 2026-10-28: 普通卡不再发, 非 danger 一律放行, 但要能看出是 10h 窗口放的,
