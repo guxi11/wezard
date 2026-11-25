@@ -7,7 +7,10 @@ import { loadConfig, type Config } from "../shared/config.js";
 import { clientSocketPath } from "../shared/daemon-addr.js";
 import { daemonRequest } from "../shared/daemon-client.js";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
-import { externalTokenOf, EXT_WAIT_MAX } from "../shared/external.js";
+import {
+  extRegistryFileOf, externalTokenOf, mergePrincipals, parseExtRegistry, EXT_WAIT_MAX,
+  type ExtPrincipal,
+} from "../shared/external.js";
 
 const RETRY_MS = 15_000;
 const CONN_CODES = new Set(["ECONNREFUSED", "ENOENT", "ECONNRESET", "EPIPE", "ETIMEDOUT", "EAGAIN", "ENETUNREACH", "EHOSTUNREACH"]);
@@ -50,24 +53,58 @@ const flagStr = (p: Parsed, key: string): string => {
   return typeof v === "string" ? v : "";
 };
 
-/** --as → env → 配置里唯一启用的调用方。 */
+/** 首连审批登记表 (<stateDir>/external/principals.json): 读不出来就当空。 */
+const registry = (): ExtPrincipal[] => {
+  try { return parseExtRegistry(readFileSync(extRegistryFileOf(STATE_DIR), "utf8")).entries; }
+  catch { return []; }
+};
+/** 生效名单 = 配置 ∪ 登记表 (同名以配置为准); CLI 只看启用着的。 */
+const merged = (): ExtPrincipal[] => mergePrincipals(cfg?.external.principals ?? [], registry());
+const enabledNow = (): ExtPrincipal[] => merged().filter((x) => x.enabled);
+
+/** 名字来源: --as / $WEZARD_EXT_NAME 是「明确指定」(可自动发登记卡), 其余是从名单推的。 */
+const explicitNameOf = (p: Parsed): string => flagStr(p, "as") || process.env.WEZARD_EXT_NAME?.trim() || "";
+
+/** --as → env → 生效名单里唯一启用的调用方。 */
 const resolveName = (p: Parsed): string => {
-  const explicit = flagStr(p, "as") || process.env.WEZARD_EXT_NAME?.trim() || "";
+  const explicit = explicitNameOf(p);
   if (explicit) return explicit;
-  const on = (cfg?.external.principals ?? []).filter((x) => x.enabled);
+  const on = enabledNow();
   if (on.length === 1) return on[0]!.name;
-  die(on.length ? "有多个启用的调用方, 用 --as <名字> 指定: " + on.map((x) => x.name).join(", ") : "没有启用的调用方 (external.principals 为空或都关了)", 2);
+  die(on.length ? "有多个启用的调用方, 用 --as <名字> 指定: " + on.map((x) => x.name).join(", ") : "还没有登记或启用的调用方: 用 wezard ext enroll --as <名字> 发登记卡", 2);
 };
 
-const tokenOf = (name: string): string => {
-  const f = externalTokenOf(STATE_DIR, name);
-  try {
-    const t = readFileSync(f, "utf8").trim();
-    if (t) return t;
-    die("口令文件是空的: " + f + " (用 wezard ext rotate " + name + " 重写)", 1);
-  } catch {
+const tokenOpt = (name: string): string => {
+  try { return readFileSync(externalTokenOf(STATE_DIR, name), "utf8").trim(); } catch { return ""; }
+};
+
+const stateOf = (r: Resp): string =>
+  r.json && typeof r.json === "object" ? String((r.json as { state?: unknown }).state ?? "") : "";
+
+/** 登记 (不等待): 首连审批卡由 daemon 发给审批人私聊。 */
+const enrollOnce = async (name: string): Promise<Resp> =>
+  withRetry(() => once("POST", "/external/enroll", { name }, {}, 20_000));
+
+/** 读不到口令 = 还没登记: 名字是 --as / env 明确给的, 就顺手发一次登记卡并退 3 (告诉 agent 等人点)。 */
+const ensureRegistered = async (name: string, explicit: boolean): Promise<void> => {
+  if (tokenOpt(name)) return;
+  if (!explicit) {
+    const f = externalTokenOf(STATE_DIR, name);
     die("读不到口令文件: " + f + " (daemon 会在启动 / 配置热载时生成; 也可用 wezard ext rotate " + name + ")", 1);
   }
+  const r = await enrollOnce(name);
+  const st = stateOf(r);
+  if (r.status >= 200 && r.status < 300 && st === "enrolled") {
+    if (tokenOpt(name)) return;
+    die("已登记, 但口令文件还没出现 (再试一次; 仍没有就用 wezard ext rotate " + name + ")", 1);
+  }
+  if (r.status >= 200 && r.status < 300 && st === "pending") {
+    const why = "已向本机主人发登记审批卡, 批准后再试";
+    out({ ok: false, state: "pending", reason: why });
+    process.stderr.write(why + "\n");
+    process.exit(3);
+  }
+  report(r);
 };
 
 interface Resp { status: number; json: unknown; text: string }
@@ -100,7 +137,8 @@ const main = async (): Promise<void> => {
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     process.stdout.write([
       "wezard ext <子命令>",
-      "  ask [--re <id>] [--wait <秒<=60>] [--thread <t>] <正文 | ->   发一条请求, 有 re = 接着那条续问",
+      "  enroll [--as <名字>] [--wait <秒<=60>]                        首发登记: 本机主人会在私聊收到一张审批卡, 点了才启用",
+      "  ask [--re <id>] [--wait <秒<=60>] [--thread <t>] <正文 | ->   发一条请求, 有 re = 接着那条续问 (还没登记时会自动发登记卡并退 3)",
       "  wait <req> [--timeout <秒<=60>]                               等它离开 open",
       "  inbox [--all]                                                 取未送达的结果 (--all 含 open / 已送达)",
       "  ack <req...>                                                  确认收到",
@@ -123,8 +161,30 @@ const main = async (): Promise<void> => {
     return;
   }
 
+  if (cmd === "enroll") {
+    const want = explicitNameOf(p) || ((): string => {
+      const on = enabledNow();
+      if (on.length === 1) return on[0]!.name;
+      die(on.length ? "有多个已启用的调用方, 用 --as <名字> 指定: " + on.map((x) => x.name).join(", ")
+        : "要 --as <名字> 说明是哪个调用方 (还没有已登记 / 启用的)", 2);
+    })();
+    const waitSec = Math.min(Number(flagStr(p, "wait") || 0) || 0, EXT_WAIT_MAX);
+    const end = Date.now() + waitSec * 1000;
+    for (;;) {
+      const r = await enrollOnce(want);
+      const st = stateOf(r);
+      if (r.status >= 200 && r.status < 300 && st === "enrolled") { out(r.json ?? { ok: true, state: "enrolled" }); return; }
+      if (r.status >= 200 && r.status < 300 && st === "pending" && Date.now() < end) { await sleep(2000); continue; }
+      if (r.status >= 200 && r.status < 300 && st === "pending") {
+        out(r.json ?? { ok: true, state: "pending" });
+        die("已发登记卡, 等本机主人在私聊里点确认 (带 --wait 60 可以等到结果)", 3);
+      }
+      report(r);
+    }
+  }
   const name = resolveName(p);
-  const headers = { "x-wezard-ext": name, "x-wezard-ext-token": tokenOf(name) };
+  await ensureRegistered(name, !!explicitNameOf(p));
+  const headers = { "x-wezard-ext": name, "x-wezard-ext-token": tokenOpt(name) };
 
   if (cmd === "ask") {
     let text = p.rest.join(" ");
