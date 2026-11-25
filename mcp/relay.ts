@@ -40,8 +40,16 @@ const identityHeaders = (): Record<string, string> => {
 
 interface Reply { status: number; body: string }
 
+/** 请求没能送达的失败 (连接从未建立): 重发安全。连上之后出的错 (含 ECONNRESET) 不在此列。 */
+class NotConnected extends Error {
+  constructor(readonly code: string, message: string) { super(message); }
+}
+/** 连上之后断开: 请求可能已被 daemon 收下并在执行, 重发会重复跑 (重复建 wizard / 开 duty)。 */
+class ConnectionLost extends Error {}
+
 const post = (payload: string): Promise<Reply> =>
   new Promise((resolve, reject) => {
+    let connected = false;
     const req = request(
       {
         socketPath: sock,
@@ -60,25 +68,32 @@ const post = (payload: string): Promise<Reply> =>
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c: Buffer) => chunks.push(c));
-        res.on("error", reject);
+        res.on("error", (e) => reject(new ConnectionLost(e.message)));
         res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
       },
     );
-    req.on("error", reject);
+    req.on("socket", (s) => {
+      // unix socket 的 connect 事件: 触发过 = 连接已建立, 此后任何错误都不许重发。
+      if (!s.connecting) connected = true;
+      else s.once("connect", () => { connected = true; });
+    });
+    req.on("error", (e) => {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      reject(connected ? new ConnectionLost(`${code || "error"}: ${e.message}`) : new NotConnected(code, e.message));
+    });
     req.end(payload);
   });
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-// Only connection-level failures are retried (nothing reached the daemon, so a resend
-// cannot double-run a tool); an answered request — whatever its status — is final.
-const CONNECT_ERRORS = new Set(["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"]);
+// 只在连接从未建立 (socket 不在 / 拒连, 如 reload 空窗) 时重试: 那时请求没到过 daemon, 重发不会
+// 重复执行。连上之后断开 (daemon 收到请求后退出 / 崩溃) 一律不重发 —— 工具调用可能已经跑了。
+const RETRYABLE = new Set(["ENOENT", "ECONNREFUSED"]);
 const postWithRetry = async (payload: string): Promise<Reply> => {
   const deadline = Date.now() + RETRY_WINDOW_MS;
   for (;;) {
     try { return await post(payload); } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code ?? "";
-      if (!CONNECT_ERRORS.has(code) || Date.now() >= deadline) throw e;
+      if (!(e instanceof NotConnected) || !RETRYABLE.has(e.code) || Date.now() >= deadline) throw e;
       await sleep(RETRY_STEP_MS);
     }
   }
@@ -115,7 +130,9 @@ const handleLine = async (line: string): Promise<void> => {
       ids.forEach((id) => out(rpcError(id, why)));
     }
   } catch (e) {
-    const why = `wezard daemon unreachable via ${sock}`;
+    const why = e instanceof ConnectionLost
+      ? `wezard daemon connection lost mid-request via ${sock}; the call may or may not have run (not retried): ${e.message}`
+      : `wezard daemon unreachable via ${sock}`;
     process.stderr.write(`[wezard-relay] ${why}: ${(e as Error).message}\n`);
     // 批量请求: 每个带 id 的各回一条; 通知不回。
     ids.forEach((id) => out(rpcError(id, why)));

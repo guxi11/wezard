@@ -76,8 +76,8 @@ const config = join(root, "config.jsonc");
 writeFileSync(config, JSON.stringify({ bot: { botId: "test", secret: "test" }, daemon: { socket: sock }, approval: { hookTimeoutSec: 5 } }));
 const input = { session_id: "codex-session", hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "printf hello", description: "test sandbox permission" } };
 // 跑源码 (tsx) 而不是 dist: 不依赖有没有 build 过。
-const runHook = (payload: unknown, socketPath = sock): Promise<any> => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, ["--import", "tsx", "cli/codex-hook.ts"], { env: { ...process.env, WEZARD_MANAGED: "1", WEZARD_CONFIG: config, WEZARD_DAEMON_SOCK: socketPath }, stdio: ["pipe", "pipe", "pipe"] });
+const runHook = (payload: unknown, socketPath = sock, extraEnv: Record<string, string> = {}): Promise<any> => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, ["--import", "tsx", "cli/codex-hook.ts"], { env: { ...process.env, WEZARD_MANAGED: "1", WEZARD_CONFIG: config, WEZARD_DAEMON_SOCK: socketPath, ...extraEnv }, stdio: ["pipe", "pipe", "pipe"] });
   let out = "", err = "";
   child.stdout.on("data", (b) => { out += b; }); child.stderr.on("data", (b) => { err += b; });
   child.on("error", reject); child.on("exit", (code) => { try { assert.equal(code, 0, err); resolve(JSON.parse(out)); } catch (e) { reject(e); } });
@@ -108,6 +108,17 @@ try {
   assert.equal(client.sent.length, before, "ordinary tools retain configured policy");
   assert.equal((await runHook({ ...input, hook_event_name: "PreToolUse" }, missingSock)).hookSpecificOutput.permissionDecision, "deny", "socket missing: bridge failure cannot fail open at PreToolUse");
   assert.equal((await runHook(input, missingSock)).hookSpecificOutput, undefined, "socket missing: native permission falls back to Codex's own prompt, never granted");
+  // 断连窗口 (outage) 用完、而 hook 预算还有富余: 与上面 deadline→ask 那条路不同, 这条走 outage 分支。
+  // PreToolUse 必须 deny (不是 {}), PermissionRequest 保持 ask (交回 codex 原生框)。
+  const longBudget = join(root, "config-long.jsonc");
+  writeFileSync(longBudget, JSON.stringify({ bot: { botId: "test", secret: "test" }, daemon: { socket: sock }, approval: { hookTimeoutSec: 75 } }));
+  const outageEnv = { WEZARD_CONFIG: longBudget, WEZARD_CODEX_OUTAGE_MS: "1500" };
+  const outagePre = await runHook({ ...input, hook_event_name: "PreToolUse", tool_input: { command: "rm -rf /tmp/x" } }, missingSock, outageEnv);
+  assert.equal(outagePre.hookSpecificOutput?.permissionDecision, "deny", "outage 用完后 PreToolUse 仍 deny, 不失败开放");
+  assert.match(outagePre.hookSpecificOutput.permissionDecisionReason, /bridge unavailable \(.*missing\.sock\)/);
+  const outagePerm = await runHook(input, missingSock, outageEnv);
+  assert.equal(outagePerm.hookSpecificOutput, undefined, "outage 后 PermissionRequest 回 ask (systemMessage), 交回 codex 原生框");
+  assert.match(outagePerm.systemMessage ?? "", /bridge unavailable/);
   client.isConnected = true;
   client.failSend = true;
   const failedSend = await runHook(input);

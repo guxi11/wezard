@@ -83,7 +83,7 @@ rolepage / 详情页是给浏览器看的, 浏览器连不了 unix socket, 本�
 - **自动回收**: daemon 识别「起于旧控制面」的 pane —— pane 里 CLI 进程的 argv (`ps -o args`, macOS/Linux 通用) 含 `session-mcp.json` / `session-mcp-http.json` (claude 系) 或 `WEZARD_DAEMON_BASE` (codex 的 `-c`)。argv 里什么 wezard MCP 痕迹都没有的 pane 不动 (不是本次升级造成的)。纯函数 `isLegacyCtlArgs(args)` 单测。
   在 watchdog 节拍上, 对**空闲** (`!isBusy`, 不在审批卡上) 的这类 pane 调 `sleepPane(target)` (保留绑定与身份, 下一条注入 `--resume` 用新启动行重起), 每个 pane 记一行 info; 忙的等下一拍。不需要人去 handoff。
 - 直到被回收前, 旧 pane 的 MCP 工具调用失败且原因可读 (410 文案)。
-- `wezard.sh reload` 从旧 daemon 切到新 daemon: 见 §4, 只走进程管理器重启。代价: 这一次旧 daemon 不 drain, 正挂着的审批 long-poll 收到连接断 → hook 按现有逻辑重试/等 daemon (服务仍注册), 新 daemon 起来后重新推卡。
+- `wezard.sh reload` 从旧 daemon 切到新 daemon: 见 §4, 只走进程管理器重启, 旧 daemon 不 drain。**这一次**已经挂在 long-poll 上的审批并不会「新 daemon 起来后重新推卡」: 正挂着的 bash hook 跑的是内存里的旧脚本 (脚本 `mv` 换了 inode, 但它已经读进内存), 它对旧 TCP 地址做 `wait_for_daemon`, 新 daemon 视图端口的 `/healthz` 会答, 随后它 POST TCP `/approve` → 410 → `.decision // "ask"` → **ask (本地弹框, 人在 CLI 里点)**。不会 allow, 但卡不会重推。codex 同理: 正在飞的旧 `codex-hook` 进程跑的是内存里的旧代码, 打 TCP 得到 410 → 视作断连, 约 60s 后按**旧代码**对 PreToolUse 放行 (`daemon down, auto-allow`) —— 这是只发生在「首次从 TCP 旧 daemon reload 的那一刻、恰好有 codex 审批在飞」的一次性窗口; 新启动的 hook 进程已是 fail-closed (outage 用完 PreToolUse deny / PermissionRequest ask)。此后 (socket 版 daemon 之间的 reload) 仍走 drain + `retry` + 续接同一张卡。
 
 ## 测试 (新增 / 改)
 

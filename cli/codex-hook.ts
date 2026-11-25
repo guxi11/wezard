@@ -8,6 +8,9 @@ import { sleep } from "../shared/std.js";
 import { recordCodexPaneSession } from "../shared/codex.js";
 import { readHookMode } from "../shared/hook-mode.js";
 
+// 每段断连最多等多久 (reload 要恢复几百个镜像, 两三次重试不够); 只给测试缩短用。
+const OUTAGE_MS = Number(process.env.WEZARD_CODEX_OUTAGE_MS) || 60_000;
+
 const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply> => {
   const { config: cfg } = loadConfig();
   if (!cfg.approval.enabled) return { decision: "ask", reason: "approval_disabled" };
@@ -35,16 +38,18 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
       await sleep(1000);
     } catch (e) {
       // Restoring hundreds of mirrors can outlast two retries during reload.
-      // Keep the pending card id and bound each outage by the hook budget / 60s.
+      // Keep the pending card id and bound each outage by the hook budget / OUTAGE_MS.
       outageSince ??= Date.now();
-      const remaining = Math.min(deadline, outageSince + 60_000) - Date.now();
+      const remaining = Math.min(deadline, outageSince + OUTAGE_MS) - Date.now();
       if (remaining <= 0) {
         const error = e as Error & { code?: string };
         const why = `bridge unavailable (${socketPath}): ${error.message}${error.code ? `: ${error.code}` : ""}`;
-        // Daemon down: let ordinary tools through; sandbox escalations fall back to Codex's native prompt.
+        // Daemon down: fail closed. Codex has no PreToolUse "ask", so an unreachable bridge denies the
+        // tool (never allow — that would hand the pane every permission while the human believes
+        // approval is on); sandbox escalations (PermissionRequest) fall back to Codex's native prompt.
         return input.hook_event_name === "PermissionRequest"
           ? { decision: "ask", reason: why }
-          : { decision: "allow", reason: `daemon down, auto-allow: ${why}` };
+          : { decision: "deny", reason: why };
       }
       await sleep(Math.min(1000, remaining));
     }

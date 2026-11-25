@@ -132,6 +132,25 @@ try {
   await gap.close();
   await new Promise<void>((r) => late.close(() => r()));
 
+  // ── 连上之后断开: 请求可能已被执行, 绝不重发; 带 id 的请求得到 JSON-RPC error ──
+  let hits = 0;
+  const dropper = createServer((req, res) => {
+    hits++;
+    req.resume();
+    req.on("end", () => req.socket.destroy()); // 请求体完整送达之后才断 (daemon 收到并在执行时 reload 退出)
+  });
+  await listen(dropper);
+  const lost = startRelay({ HOME: goodHome, WEZARD_RELAY_RETRY_MS: "10000" });
+  lost.send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "list_tasks", arguments: {} } });
+  const lostErr = await lost.next();
+  assert.equal(lostErr.id, 5);
+  assert.equal(lostErr.error.code, -32000);
+  assert.match(lostErr.error.message, /connection lost mid-request.*may or may not have run/);
+  await new Promise((r) => setTimeout(r, 1500)); // 若会重试, 窗口内早该再来一次
+  assert.equal(hits, 1, "daemon 只收到 1 次, relay 没有重发");
+  await lost.close();
+  await new Promise<void>((r) => dropper.close(() => r()));
+
   // ── daemon 不在: 重试窗口过后, 带 id 的请求得到 JSON-RPC error, 通知静默 ──
   const down = startRelay({ HOME: goodHome, WEZARD_RELAY_RETRY_MS: "1200" });
   const t0 = Date.now();
