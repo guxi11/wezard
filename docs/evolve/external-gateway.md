@@ -84,7 +84,7 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 - 子命令: `ask [--re <id>] [--wait <秒≤60>] [--thread <t>] <正文 | - 读 stdin>`、`wait <req> [--timeout <秒≤60>]`、`inbox [--all]`、`ack <req…>`、`cancel <req>`、`rotate <名字>`。
 - 输出: 每次一行 JSON 到 stdout (给 agent 读), 退出码 0 = 调用成功 (哪怕 state=open), 非 0 = 鉴权 / 额度 / 连不上 等错误, 原因写 stderr。
 - 连不上 socket 时退避重试至多 15 秒再报错 (覆盖 reload 空窗); wait 中途断开同样重试, 不把断开报成失败。
-- thread 缺省: 从环境里读会话 id (变量名见第 0 步结论, 由 lead 补进来; 读不到就不带)。
+- thread 缺省: env `CODEBUDDY_SESSION_ID` (第 0 步实测: codebuddy 给 Bash 子进程注入, 等于 ACP sessionId, session/load 续接后不变); 读不到再试 `CLAUDE_SESSION_ID`, 都没有就不带。bridge 层跨轮是否复用同一会话未定 (待大圆两轮实测), 所以 thread 只记录, v1 不按它过滤。
 
 ## CoC 侧调用约定 (写进大圆平台上 CoC 的提示词, lead 负责交给人)
 
