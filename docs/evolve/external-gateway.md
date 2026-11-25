@@ -40,7 +40,7 @@
 
 ## 接口 (只挂在控制面 socket 上; TCP 视图端口按现有规则一律 410)
 
-鉴权头: `x-wezard-ext: <名字>` + `x-wezard-ext-token: <口令>`, 用常数时间比较。总开关关 / 名字不存在 / 被禁用 / 口令不对 → 403, 正文写明原因。这些路由不读 pane / session 身份头, 也不接受 wizard 的 daemon-token 代替。
+鉴权头: `x-wezard-ext: <名字>` + `x-wezard-ext-token: <口令>`, 用常数时间比较。总开关关 / 还没登记 / 被禁用 / 口令不对 → 403, 正文写明原因。**只有 `POST /external/enroll` 不要口令** —— 它就是「第一次连上来要人批」那一步; socket 上任何进程都能打它, 所以有全机待决上限与拒后冷却。这些路由不读 pane / session 身份头, 也不接受 wizard 的 daemon-token 代替。
 
 | 路由 | 请求 | 回包 |
 | --- | --- | --- |
@@ -49,6 +49,7 @@
 | GET /external/inbox | `?all=1` 可选 | 本调用方全部「非 open 且未送达」的请求 (`all` 时含 open 与已送达, 最多最近 50 条): `[{ req, state, answer?, askedAt, answeredAt?, re? }]` |
 | POST /external/ack | `{ req: string[] }` | 只认自己的、非 open 的; 回 `{ ok, acked: [...] }` |
 | POST /external/cancel | `{ req }` | 只认自己的 open / need: 落一条 DAEMON system 行 (re 该请求, to 接待 wizard): `[wezard] 外部调用方 <名字> 已撤回 <req>, 不用再做; 用 chat_reply status canceled 关掉它`, 索引记 canceled |
+| POST /external/enroll | `{ name }` (**不要口令**) | 首连登记: `{ state: "enrolled" \| "pending" }`; 被禁用 403; 冷却中 / 待决满 429 (`retryAt`); 发卡后先在后台 settle, 批准落登记表 + 接待 wizard + 口令文件, 拒绝冷却 1 小时 |
 
 额度 (每个调用方, 配置可改): 每分钟新请求 10、自然日 50、同时 open+need 5。超了 429, 正文写哪一条超了、何时恢复。正文上限 8000 字, 超长 400。
 
@@ -56,21 +57,22 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 
 ## 配置与口令
 
-`shared/config.ts` 加 `external` 节 (zod, describe 写人话; config-meta 标这一节只有人能改 / 需放权卡, 照现有放权项的做法):
+`shared/config.ts` 的 `external` 节 (zod, describe 写人话; config-meta 标这一节只有人能改 / 需放权卡):
 
 ```jsonc
 "external": {
-  "enabled": false,
-  "principals": [
-    { "name": "CoC", "reception": "<接待 wizard 实例名>", "owner": "<人的 userid, 第 2 步用>", "enabled": true,
-      "perMinute": 10, "perDay": 50, "maxOpen": 5 }
-  ]
+  "enabled": true,       // 缺省就是 true —— 没登记的调用方只能触发登记卡, 所以缺省开不放权; 要整体关才写 false
+  "principals": []       // 可选的「手写名单」: 平时留空, 走首连审批登记; 写了就压过登记表里的同名项
 }
 ```
 
-- 口令文件: `<wezard home>/external/<名字>.token` (目录 0700、文件 0600; 路径从现有 home 推导函数取, 别本地拼 ~/.wezard)。daemon 启动和配置热载时, 对缺口令的调用方生成 32 字节随机口令。轮换 = CLI `wezard ext rotate <名字>` (经 socket 让 daemon 重写), 旧口令立即失效。daemon 每次校验时现读文件 (或按 mtime 缓存), 不常驻旧值。
+- **登记表 (主路径)**: `<stateDir>/external/principals.json` (目录 0700、文件 0600、原子写), 每项 `{name, reception, owner, perMinute, perDay, maxOpen, enabled, approvedAt, approvedBy}`。外部 agent 第一次连上来 (`POST /external/enroll`, 或 CLI 自动发) 时 daemon 给**审批人私聊**发一张审批卡, 人点了才写这一项 + 生成口令 + 建接待 wizard。
+- **生效名单 = 配置 `external.principals` ∪ 登记表, 同名以配置为准**。鉴权 / 口令生成与脱敏 / `ext status` / rotate / 逾期落点 / 接待 wizard 的审批判定读的都是这一份合并名单。
+- 口令文件: `<wezard home>/external/<名字>.token` (目录 0700、文件 0600; 路径从现有 home 推导函数取, 别本地拼 ~/.wezard)。登记时 / daemon 启动 / 配置热载时对其名单里缺口令的调用方生成 32 字节随机口令。轮换 = CLI `wezard ext rotate <名字>` (经 socket 让 daemon 重写), 旧口令立即失效。daemon 每次校验时现读文件, 不常驻旧值。
+- **接待 wizard 由 daemon 自建**: 名字 `ext-<名字小写>` (撞名退 -N), 会话 target = 审批人私聊 base 上的槽 `<审批人私聊>#ext-<名字小写>`, 工作区 = wezard 配置根, 只落记录不预起 pane; ask 落在它名下、它还没有活会话时顺手起一个。它的审批卡也落审批人私聊 —— 频道 home 发卡会 93006, 所以登记卡与接待卡都走人的私聊。
+- **登记卡缺省值**: `owner` = 审批人私聊 `user:<id>` (逾期与额度告警落这里); 额度 每分钟 10 / 自然日 50 / 同时未结 5; 接待 wizard 见上一条。
+- 登记卡的护栏: 全机同时待决 ≤ 3 张; 被拒 (或点了「不要」) 后同名冷却 1 小时 (内存记, 重启清零); 超时不算拒绝, 可以再发。
 - 接待 wizard 按实例名在名册里现查 uid; 查不到 → ask 回 409 「接待 wizard <名> 不在名册」, 不落行。
-
 ## 索引与审计
 
 - 索引 `<stateDir>/external/requests.jsonl`, 只追加: `{op:"room", principal, room, reception, at}` / `{op:"ask", principal, req, room, thread?, re?, at}` / `{op:"cancel", req, at}` / `{op:"ack", req, at}`。追加后 fsync; boot 时重放。坏行跳过并 warn, 不中止。
@@ -80,18 +82,19 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 
 `cli/ext.ts` → `dist/cli/ext.js`; `cli/wezard.sh` 加 `ext)` 分支转给它。走 `shared/daemon-client.ts` 的 socket 请求, socket 路径用 `shared/daemon-addr.ts` 现有解析 (CoC 的环境里没有 WEZARD_DAEMON_SOCK, 回落默认路径)。
 
-- 身份: `--as <名字>`, 缺省读 env `WEZARD_EXT_NAME`, 再缺省 = 配置里唯一启用的调用方。口令从口令文件现读。
-- 子命令: `ask [--re <id>] [--wait <秒≤60>] [--thread <t>] <正文 | - 读 stdin>`、`wait <req> [--timeout <秒≤60>]`、`inbox [--all]`、`ack <req…>`、`cancel <req>`、`rotate <名字>`。
-- 输出: 每次一行 JSON 到 stdout (给 agent 读), 退出码 0 = 调用成功 (哪怕 state=open), 非 0 = 鉴权 / 额度 / 连不上 等错误, 原因写 stderr。
+- 身份: `--as <名字>`, 缺省读 env `WEZARD_EXT_NAME`, 再缺省 = 生效名单里唯一启用的那个。口令从口令文件现读 (CLI 也读登记表, 所以刚登记的调用方不用等配置)。
+- 子命令: `enroll [--as <名字>] [--wait <秒≤60>]`、`ask [--re <id>] [--wait <秒≤60>] [--thread <t>] <正文 | - 读 stdin>`、`wait <req> [--timeout <秒≤60>]`、`inbox [--all]`、`ack <req…>`、`cancel <req>`、`rotate <名字>`、`status`。
+- **自动登记**: 读不到口令文件、且名字来自 `--as` / env 时, `ask / wait / inbox / ack / cancel` 会先打一次 `/external/enroll` (不等待), 回 `{ok:false, state:"pending", reason:"已向本机主人发登记审批卡, 批准后再试"}` 并**退 3**。名字不是明确给的 (从名单推的) 就按老样子报「读不到口令」。
+- 输出: 每次一行 JSON 到 stdout (给 agent 读)。退出码: 0 = 调用成功 (哪怕 state=open); 1 = 鉴权 / 额度 / 连不上; 2 = 用法; **3 = 等本机主人点登记卡**。原因写 stderr。
 - 连不上 socket 时退避重试至多 15 秒再报错 (覆盖 reload 空窗); wait 中途断开同样重试, 不把断开报成失败。
 - thread 缺省: env `CODEBUDDY_SESSION_ID` (第 0 步实测: codebuddy 给 Bash 子进程注入, 等于 ACP sessionId, session/load 续接后不变); 读不到再试 `CLAUDE_SESSION_ID`, 都没有就不带。bridge 层跨轮是否复用同一会话未定 (待大圆两轮实测), 所以 thread 只记录, v1 不按它过滤。
-
 ## CoC 侧调用约定 (写进大圆平台上 CoC 的提示词, lead 负责交给人)
 
+0. **首次连接先登记**: `ext --as CoC enroll --wait 60`。state=enrolled 就继续; state=pending / 退出码 3 就告诉用户「本机主人在私聊里收到一张审批卡, 点了才放行」, 不要反复重试。
 1. 每轮开头先 `<仓库>/cli/wezard.sh ext inbox`; 有结果就转述给用户, 然后 `ext ack <req…>`。
 2. 要找 wizard 办事: `ext ask --wait 60 "<要点>"`。state=answered 直接用; open 就告诉用户「已转交, 下次跟我说一声我去取」; need 就把问题转给用户, 用户答了再 `ext ask --re <req> …`。
 3. 用户说不要了: `ext cancel <req>`。
-
+4. 命令退 3 = 还没登记 / 等点卡, 把这句话转给用户, 不要原地重试刷屏。
 ## 第 1 步实现任务 (执行者按此做, 以本文件为准)
 
 范围: 上面「模型 / 接口 / 配置与口令 / 索引与审计 / CLI」五节。第 2 步 (审批收紧、禁往绑定 room 发话、答复脱敏、逾期通知 owner、用量归属) **不在本步**。
@@ -181,9 +184,9 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 
 ### 第 3 步进度 (执行者自维护)
 
-- [ ] 合并名单函数 + 各处改读 + enabled 缺省开
-- [ ] /external/enroll + 登记表 + 接待 wizard 自建 + 冷启动
-- [ ] CLI enroll + 自动登记
-- [ ] 单测 + 演练 ⑫ + 回归
-- [ ] 文档三节改写
+- [x] 合并名单函数 + 各处改读 + enabled 缺省开
+- [x] /external/enroll + 登记表 + 接待 wizard 自建 + 冷启动
+- [x] CLI enroll + 自动登记
+- [x] 单测 + 演练 ⑫ + 回归
+- [x] 文档三节改写
 
