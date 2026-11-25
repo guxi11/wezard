@@ -41,7 +41,7 @@
 - `npx tsx tests/tool-hints.test.ts` (改了 `HINT_TOOL` / `hintOf` 时); `npx tsx tests/session-mcp.test.ts` (只测注入配置, 不测工具清单)。
 - 路由本身: 起 daemon 后 `curl` 或在真实 pane 里调一次; 带口令的路由先 `cat ~/.wezard/daemon-token` 当 `x-wezard-token`。
 
-**生效方式**: http 传输 (默认 `daemon.mcpTransport:"http"`) 每个请求现建一份注册表, `reload` daemon 后新请求就是新工具面; stdio 的 pane 是长驻子进程, 要开新会话。已在跑的 CLI 对新工具的发现时机由 CLI 自己决定 (多数要新会话或 `/mcp` 重连, 未逐个验证)。
+**生效方式**: 默认 `daemon.mcpTransport:"relay"`: pane 里的 relay 只转发到 daemon 的 `POST /mcp`, 每个请求在 daemon 里现建一份注册表, `reload` daemon 后新请求就是新工具面; `stdio` (全量 server.js) 的 pane 是长驻子进程, 工具面冻在它自己的代码里, 要开新会话。已在跑的 CLI 对新工具的发现时机由 CLI 自己决定 (多数要新会话或 `/mcp` 重连, 未逐个验证)。
 
 ---
 

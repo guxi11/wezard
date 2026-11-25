@@ -370,7 +370,7 @@ wezard uninstall           # 完整卸载（先于 npm uninstall）
 ## 常见问题
 
 **Q: hook 不触发？**
-审批 hook 与 wezard MCP 都是按会话注入的：看那个 CLI 进程的启动行有没有 `--settings …/session-hooks.json` / `--mcp-config …/session-mcp.json`（`ps -o command= -p <pid>`）。没有就是升级前起的老 pane，`/new` 或重开即可；全机 settings 里本来就不该有 wezard。
+审批 hook 与 wezard MCP 都是按会话注入的：看那个 CLI 进程的启动行有没有 `--settings …/session-hooks.json` / `--mcp-config …/session-mcp-sock.json`（`ps -o command= -p <pid>`）。没有（或还是 `session-mcp.json` / `session-mcp-http.json`）就是升级前起的老 pane，空闲时 daemon 会自动回收、下一句话 `--resume` 重起；全机 settings 里本来就不该有 wezard。
 
 **Q: 卡片点了没反应？**
 企业微信卡片就地刷新只有 5 秒窗口，超时不刷新是正常的，决策本身仍然生效。

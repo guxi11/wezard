@@ -46,7 +46,7 @@ import { codebuddyTrustPrompt, startupConfirmation, startupDialog, workspaceTrus
 import { isModalPane } from "../shared/modal-pane.js";
 import { prepareSessionHooks, sessionHookArgs, type SessionHookSpec } from "../shared/session-hooks.js";
 import { daemonSocketPath } from "../shared/daemon-addr.js";
-import { prepareSessionMcp, sessionMcpArgs, type SessionMcpSpec } from "../shared/session-mcp.js";
+import { mcpEntry, prepareSessionMcp, sessionMcpArgs, type SessionMcpSpec } from "../shared/session-mcp.js";
 import { prepareSessionSkills, sessionSkillArgs, type SessionSkillSpec } from "../shared/session-skills.js";
 
 
@@ -207,8 +207,9 @@ const launchEnv = (cfg: Config): string[] => [
   // wizard 不用 claude.ai 远程连接器 (Gmail / Drive / Docs ...): 关掉省每进程约 10~12MB、
   // 启动时的连接请求和提示里的工具名。不认该变量的后端 (codebuddy / codex) 直接忽略。
   "ENABLE_CLAUDEAI_MCP_SERVERS=false",
-  `WEZARD_DAEMON_BASE=${shQuote(`http://${cfg.daemon.host}:${cfg.daemon.port}`)}`,
-  `WEZARD_DAEMON_URL=${shQuote(`http://${cfg.daemon.host}:${cfg.daemon.port}/approve`)}`,
+  // 控制面是 unix socket: hook / relay / codex-hook 都从这个变量找它。不再带旧的
+  // WEZARD_DAEMON_BASE / WEZARD_DAEMON_URL (TCP 地址)。
+  `WEZARD_DAEMON_SOCK=${shQuote(daemonSocketPath(cfg))}`,
   `WEZARD_STATE_DIR=${shQuote(expandHome(cfg.daemon.stateDir))}`,
   `WEZARD_HOOK_TIMEOUT=${cfg.approval.hookTimeoutSec}`,
 ];
@@ -1107,7 +1108,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
     const conflict = sandboxDisabled ? codexSandboxArgConflict(cfg.wrc.extraArgs) : undefined;
     if (conflict) return { ok: false, retryable: false, reason: `Codex extraArgs ${conflict} conflicts with wrc.cliBackends.codex.disableSandbox; remove the shortcut and use the sandbox config` };
     const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
-    const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
+    const command = codexHookCommand(loadConfig().sourcePath, daemonSocketPath(cfg), hookEntry);
     try { codexApprovalArgs = await codexHookLaunchArgs(backend.bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled); }
     catch (e) { return { ok: false, reason: `Codex approval hooks unavailable: ${(e as Error).message}` }; }
     try {
@@ -1222,9 +1223,10 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
         "--no-daemon",
         // Keep the startup update picker out of this managed invocation only.
         "-c", "check_for_update_on_startup=false",
+        // MCP 入口按 daemon.mcpTransport: relay (缺省, 只用 node 内建模块) 或全量 server.js; 两者都经 socket。
         "-c", `mcp_servers.wezard.command=${JSON.stringify(process.execPath)}`,
-        "-c", `mcp_servers.wezard.args=${JSON.stringify([fileURLToPath(new URL("../mcp/server.js", import.meta.url))])}`,
-        "-c", `mcp_servers.wezard.env.WEZARD_DAEMON_BASE=${JSON.stringify(`http://127.0.0.1:${cfg.daemon.port}`)}`,
+        "-c", `mcp_servers.wezard.args=${JSON.stringify([mcpEntry(cfg.daemon.mcpTransport)])}`,
+        "-c", `mcp_servers.wezard.env.WEZARD_DAEMON_SOCK=${JSON.stringify(daemonSocketPath(cfg))}`,
         "-c", `mcp_servers.wezard.env.TMUX_PANE=${JSON.stringify(pane)}`,
         "-c", `mcp_servers.wezard.env.CODEX_THREAD_ID=${JSON.stringify(sessionId)}`,
       ] : []),

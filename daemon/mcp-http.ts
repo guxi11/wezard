@@ -1,5 +1,7 @@
 // In-process MCP endpoint: the daemon serves the same tool surface as a pane's
-// stdio child, over StreamableHTTP on the loopback port it already owns.
+// stdio child, over StreamableHTTP on its control socket. The per-pane child that
+// reaches it is mcp/relay.ts (no TCP port is left open for MCP: anything that listens
+// on TCP can be squatted in a restart gap and would collect the token from the headers).
 //
 // Stateless by construction — one server + transport per request. The SDK binds a
 // server to exactly one transport and JSON-RPC ids are per-connection, so sharing

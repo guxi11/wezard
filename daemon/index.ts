@@ -67,7 +67,9 @@ import {
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
 import { addressed, footerTarget, responseFormatPolicy, roomBubble, withBubbleFooter } from "./message-format.js";
-import { scanClaudeSessions } from "./session-scan.js";
+import { procSnapshot, scanClaudeSessions } from "./session-scan.js";
+import { createLegacyPaneReaper, parsePanePids } from "./legacy-panes.js";
+import { removeLegacyMcpFiles } from "../shared/session-mcp.js";
 import {
   startScheduler,
   promptWantsFreshWizard,
@@ -219,6 +221,11 @@ const main = async (): Promise<void> => {
   setTmuxTimeoutReporter(({ args, timeoutMs }) =>
     log.warn({ args: args.slice(0, 4), timeoutMs }, "tmux command timed out — killed"),
   );
+
+  // 旧版的按会话 MCP 产物: TCP 时代的 session-mcp.json / session-mcp-http.json 不再生成, 这里清掉
+  // (http 那份里是口令原文, 留在盘上就是个泄露点)。新产物是 session-mcp-sock.json, 由 spawn 时写。
+  const removedMcp = removeLegacyMcpFiles(expandHome(cfg.daemon.stateDir));
+  if (removedMcp.length) log.info({ files: removedMcp }, "legacy per-session MCP configs removed");
 
   // Restore auto-approve windows persisted across daemon restarts —
   // otherwise a `wezard reload` silently drops the user's "10min" choice.
@@ -2485,6 +2492,22 @@ const main = async (): Promise<void> => {
     // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单 (paste 端口的 touch 见 hub ports)。
     const watchdogTimer = setInterval(() => void roomWatchdog.scan(), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
     watchdogTimer.unref?.();
+    // 起于旧控制面 (TCP) 的 pane: 它们的 MCP 只会得到 410 —— 与看门狗同节拍, 空闲的就地 sleepPane
+    // (绑定与身份保留, 下一条注入 --resume 用新启动行重起); 忙的等下一拍。argv 里没有旧痕迹的不碰。
+    const legacyReaper = createLegacyPaneReaper({
+      log: log.child({ mod: "legacy-panes" }),
+      listPanes: async () => {
+        const r = await runTmux(["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"]);
+        return r.ok ? { ok: true, panes: parsePanePids(r.stdout) } : { ok: false, error: r.stderr.slice(0, 200) };
+      },
+      procs: async () => new Map([...(await procSnapshot())].map(([pid, e]) => [pid, { ppid: e.ppid, cmd: e.cmd }] as const)),
+      bindings: () => m.chatRoster("").flatMap((c) => c.targets).filter((t) => !isInternalKey(t))
+        .flatMap((target) => { const pane = m.sessionInfo(target)?.tmuxPane; return pane ? [{ target, pane }] : []; }),
+      isBusy: (target) => m.isBusy(target),
+      sleepPane: (target) => m.sleepPane(target),
+    });
+    const legacyTimer = setInterval(() => void legacyReaper.scan().catch((e) => log.warn({ err: (e as Error).message }, "legacy-panes scan failed")), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
+    legacyTimer.unref?.();
     // duty 逾期两级提醒: 与看门狗同节拍, 阈值每轮现读 (hot)。处理人忙 (跑着这一轮 / 停在审批框上)
     // 就这一轮不催; 下游还有未关 duty 时只催下游 (递归式, 见 shared/room-overdue)。
     const overdue = createOverdueScan({

@@ -29,6 +29,7 @@ import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard,
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { newStewardSpec, resumedStewardSpec } from "./steward-model.js";
+import { daemonSocketPath } from "../shared/daemon-addr.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit, clipLine } from "../shared/std.js";
@@ -2370,7 +2371,7 @@ const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {
       if (typeof meta?.cwd === "string") cwd = meta.cwd;
       const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
       const { loadConfig } = await import("../shared/config.js");
-      const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
+      const command = codexHookCommand(loadConfig().sourcePath, daemonSocketPath(cfg), hookEntry);
       codexArgs = await codexHookLaunchArgs(bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled);
     } catch (e) { return { ok: false, reason: `Codex resume setup failed: ${(e as Error).message}` }; }
   }
@@ -2420,8 +2421,7 @@ const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {
       // 审批 (缺了它 hook 会当成别人的会话交回本地 CLI —— 而这里根本没有 TTY 可点)。
       env: {
         ...process.env, PATH: augmentedPath(process.env.PATH), WEZARD_MANAGED: "1",
-        WEZARD_DAEMON_BASE: `http://${cfg.daemon.host}:${cfg.daemon.port}`,
-        WEZARD_DAEMON_URL: `http://${cfg.daemon.host}:${cfg.daemon.port}/approve`,
+        WEZARD_DAEMON_SOCK: daemonSocketPath(cfg),
         WEZARD_STATE_DIR: expandHome(cfg.daemon.stateDir),
         WEZARD_HOOK_TIMEOUT: String(cfg.approval.hookTimeoutSec),
       },
@@ -5418,9 +5418,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   let restored: Promise<void> = Promise.resolve();
   if (persistedKeys.length > 0) {
     // 裸 fan-out 会把 2N 次 tmux 同时压下去 —— 几百个绑定就是七百个 client 一起
-    // 撞 10s 超时, spawn 风暴顺带把事件循环压住, :17890 要 25s 才 bind, 而 CLI 的
+    // 撞 10s 超时, spawn 风暴顺带把事件循环压住, 控制面 socket 要 25s 才 bind, 而 CLI 的
     // reload 探测早放弃了 (「reload issued but /status not responding」的真身)。
-    // 一张快照 + 封顶并发; await 立刻让出, startHttp 先绑端口。
+    // 一张快照 + 封顶并发; await 立刻让出, startHttp 先绑控制面 socket。
     restored = (async () => {
       const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}\t#{window_name}\t#{pane_pid}"]);
       const panes = snap.ok ? parsePaneList(snap.stdout) : undefined;

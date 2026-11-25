@@ -83,7 +83,7 @@ const runTmux = (args: string[]): Promise<{ ok: boolean; stdout: string }> => ru
 // and the agent-cli filter both read from it, so the source (Linux /proc vs
 // macOS ps) is a contained difference.
 
-interface ProcEntry {
+export interface ProcEntry {
   ppid: number;
   cmd: string;
 }
@@ -141,7 +141,7 @@ const procSnapshotPs = async (): Promise<Map<number, ProcEntry>> => {
   return m;
 };
 
-const procSnapshot = (): Promise<Map<number, ProcEntry>> | Map<number, ProcEntry> =>
+export const procSnapshot = (): Promise<Map<number, ProcEntry>> | Map<number, ProcEntry> =>
   process.platform === "linux" ? procSnapshotLinux() : procSnapshotPs();
 
 // cwd is only needed for the handful of agent-cli candidates, so it's resolved
