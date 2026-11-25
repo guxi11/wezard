@@ -6,16 +6,21 @@
 // gateway 只写 ask 行与 system 行, 永远不以调用方身份写 reply —— judge 让 daemon 作者
 // 能关任何 duty, 那条能力不给外部。
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import {
   applyExtOp, askText, cancelText, checkQuota, deriveOutcome, extAuthor, extIndexFileOf, externalHomeOf, externalTokenOf,
-  foldExtIndex, isWaiting, judgeAck, judgeCancel, judgeExtAuth, parseExtIndex, roomTitle, EXT_TEXT_MAX, EXT_WAIT_DEFAULT, EXT_WAIT_MAX,
+  foldExtIndex, isWaiting, judgeAck, judgeCancel, judgeExtAuth, localDayKey, overdueOwnerRoom, parseExtIndex, quotaAlertSys,
+  redactText, roomTitle, secretsInJson, EXT_TEXT_MAX, EXT_WAIT_DEFAULT, EXT_WAIT_MAX,
   type ExtIndex, type ExtIndexOp, type ExtOutcome, type ExtPrincipal, type ExtRequest,
 } from "../shared/external.js";
+import { isBoundRoom } from "../shared/room.js";
+import { DAEMON_TOKEN_FILE } from "../shared/daemon-token.js";
+import { SECRETS_PATH } from "../shared/config.js";
+import { expandHome } from "../shared/paths.js";
 import { adhocRoomId, DAEMON, idList, whoKey, type Draft, type RoomOp, type RoomState, type Verdict, type Who } from "../shared/room.js";
 import type { RoomStore } from "./rooms.js";
 import type { Handler } from "./http.js";
@@ -136,12 +141,57 @@ export const createExternal = (p: ExternalPorts) => {
     return id;
   };
 
+  // ── 出口脱敏 (第 2 步 §3): 只作用在 answer, 账本原样 ────────────────────
+  // 口令集合按 mtime 缓存: 文件一变 (轮换 / 改 secrets) 下一次调用就重建, 不每次读盘。
+  const secretFiles = (): string[] => [
+    DAEMON_TOKEN_FILE, p.cfg().svr.tokenFile,
+    ...p.cfg().external.principals.map((x) => externalTokenOf(stateDir(), x.name)),
+    SECRETS_PATH,
+  ];
+  let secretCache: { key: string; list: string[] } = { key: "", list: [] };
+  const secretsNow = (): string[] => {
+    const files = secretFiles();
+    const key = files.map((f) => {
+      try { const st = statSync(expandHome(f)); return f + ":" + st.mtimeMs + ":" + st.size; } catch { return f + ":-"; }
+    }).join("|");
+    if (key === secretCache.key) return secretCache.list;
+    const set = new Set<string>();
+    for (const f of files) {
+      let text = "";
+      try { text = readFileSync(expandHome(f), "utf8").trim(); } catch { continue; }
+      if (!text) continue;
+      if (f === SECRETS_PATH) {
+        try { for (const s of secretsInJson(JSON.parse(text))) set.add(s); } catch { /* 坏 json 跳过 */ }
+      } else if (text.length >= 8) set.add(text);
+    }
+    secretCache = { key, list: [...set] };
+    return secretCache.list;
+  };
+  const answerOf = (o: ExtOutcome): { answer?: string } => (o.answer === undefined ? {} : { answer: redactText(o.answer, secretsNow()) });
+
   const outcomeOf = (rec: ExtRequest): ExtOutcome => deriveOutcome(tryState(rec.room), rec);
+
+  /** 额度告警 (第 2 步 §5): 发到 owner room, 每个调用方每天每种额度最多一次 (去重认账本的 sys 键)。 */
+  const alertQuota = (pr: ExtPrincipal, kind: "minute" | "day" | "open", reason: string): void => {
+    try {
+      const owner = overdueOwnerRoom(pr.owner, isBoundRoom);
+      if (!owner) { log.info({ principal: pr.name, kind, owner: pr.owner }, "external: 额度告警没有可发的 owner room"); return; }
+      const st = tryState(owner);
+      if (!st) { log.warn({ principal: pr.name, owner }, "external: owner room 不存在, 额度告警不发"); return; }
+      const sys = quotaAlertSys(pr.name, kind, localDayKey(now()));
+      if (st.msgs.some((m) => m.sys === sys)) return;
+      const v = p.append(owner, {
+        author: DAEMON, kind: "system", origin: "daemon", sys,
+        text: "⏰ 外部调用方 " + pr.name + " 触发额度: " + reason,
+      });
+      if (!v.ok) log.warn({ principal: pr.name, owner, reason: v.reason }, "external: 额度告警写入被拒");
+    } catch (e) { log.warn({ principal: pr.name, err: (e as Error).message }, "external: 额度告警失败"); }
+  };
   const asksOf = (principal: string): ExtRequest[] => [...index.requests.values()].filter((r) => r.principal === principal);
 
   const snapshot = (rec: ExtRequest): Record<string, unknown> => {
     const o = outcomeOf(rec);
-    return { ok: true, req: rec.req, state: o.state, ...(o.answer !== undefined ? { answer: o.answer } : {}), waitedMs: 0 };
+    return { ok: true, req: rec.req, state: o.state, ...answerOf(o), waitedMs: 0 };
   };
 
   /** 等到状态离开 open 或超时 (每 500ms 重读一次房间状态, 不忙等)。 */
@@ -152,7 +202,7 @@ export const createExternal = (p: ExternalPorts) => {
       const o = outcomeOf(rec);
       const waitedMs = now() - started;
       if (o.state !== "open" || now() >= deadline)
-        return { ok: true, req: rec.req, state: o.state, ...(o.answer !== undefined ? { answer: o.answer } : {}), waitedMs };
+        return { ok: true, req: rec.req, state: o.state, ...answerOf(o), waitedMs };
       await sleep(Math.min(500, deadline - now()));
     }
   };
@@ -213,6 +263,7 @@ export const createExternal = (p: ExternalPorts) => {
     // 额度先判: 超了就不该替它开一间房 (开房是副作用, 且会留下空的接待 room)。
     const q = checkQuota(asksOf(pr.name), (r) => outcomeOf(r).state, pr, now());
     if (!q.ok) {
+      alertQuota(pr, q.kind, q.reason);
       reply(429, { ok: false, reason: q.reason, ...(q.retryAt ? { retryAt: isoOf(q.retryAt) } : {}) });
       return;
     }
@@ -256,7 +307,7 @@ export const createExternal = (p: ExternalPorts) => {
       .sort((x, y) => x.rec.at - y.rec.at)
       .slice(-50)
       .map(({ rec, out }) => ({
-        req: rec.req, state: out.state, ...(out.answer !== undefined ? { answer: out.answer } : {}),
+        req: rec.req, state: out.state, ...answerOf(out),
         askedAt: isoOf(rec.at), ...(out.answeredAt ? { answeredAt: isoOf(out.answeredAt) } : {}),
         ...(rec.re ? { re: rec.re } : {}), ...(rec.delivered ? { delivered: true } : {}),
       }));
@@ -301,6 +352,23 @@ export const createExternal = (p: ExternalPorts) => {
     reply(200, { ok: true, req: rec.req, state: "canceled", woke: v.row.wake });
   });
 
+  /** GET /external/status (过 daemon 口令闸): 每个调用方的启用态 / 今日用量 / 未结 / 接待 wizard。
+   *  接待 wizard 的今日 token 用量不在这里 —— usage.ts 按会话扫一周 transcript, 没有「按 wizard 现成取」的口子。 */
+  const status = guard("GET /external/status", async (_req, _res, _url, _a, reply) => {
+    const s = p.cfg().external;
+    const t = now();
+    const day = localDayKey(t);
+    const rows = s.principals.map((x) => {
+      const asks = asksOf(x.name);
+      const today = asks.filter((r) => localDayKey(r.at) === day).length;
+      const open = asks.filter((r) => isWaiting(outcomeOf(r).state)).length;
+      const lastAt = asks.reduce((m, r) => Math.max(m, r.at), 0);
+      return { name: x.name, enabled: x.enabled, reception: x.reception, today, perDay: x.perDay,
+        perMinute: x.perMinute, open, maxOpen: x.maxOpen, ...(lastAt ? { lastAt: isoOf(lastAt) } : {}) };
+    });
+    reply(200, { ok: true, enabled: s.enabled, day, principals: rows });
+  });
+
   const rotate = guard("POST /external/rotate", async (req, res, _url, a, reply) => {
     const b = await bodyOf(req);
     const name = typeof b.name === "string" ? b.name.trim() : "";
@@ -321,6 +389,7 @@ export const createExternal = (p: ExternalPorts) => {
       "POST /external/cancel": cancel,
     }),
     rotateRoute: (): Handler => rotate,
+    statusRoute: (): Handler => status,
     syncTokens,
     /** 诊断 / 测试: 当前索引快照。 */
     index: (): ExtIndex => index,

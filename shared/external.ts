@@ -195,6 +195,9 @@ export const localDayStart = (now: number): number => {
   d.setHours(0, 0, 0, 0);
   return d.getTime();
 };
+/** 本地自然日的键 (YYYY-MM-DD), 告警去重用。 */
+export const localDayKey = (t: number): string => dayTextOf(t);
+
 export const nextLocalDayStart = (now: number): number => {
   const d = new Date(localDayStart(now));
   d.setDate(d.getDate() + 1);

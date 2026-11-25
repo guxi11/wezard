@@ -407,7 +407,7 @@ const Models = z.object({
 const ExternalPrincipal = z.object({
   name: z.string().regex(/^[\w.-]+$/, "只许字母数字 _ - .").describe("调用方名字 (账本里的作者 = ext:<名字>, 也是口令文件名)"),
   reception: z.string().min(1).describe("接待 wizard 的实例名: 外部请求只在这一个 wizard 名下开 duty, 它再自己 delegate"),
-  owner: z.string().default("").describe("调用方的归属人 userid (第 2 步逾期通知用; 现在只记录)"),
+  owner: z.string().default("").describe("调用方的归属 room id (绑定 room, 如主群 chat:…): 逾期与额度告警发到这里; 空 = 不通知"),
   enabled: z.boolean().default(true).describe("关掉 = 这个调用方一律 403, 不影响别的"),
   perMinute: z.number().int().min(1).default(10).describe("每分钟最多新请求数 (超出 429)"),
   perDay: z.number().int().min(1).default(50).describe("自然日最多新请求数 (超出 429)"),

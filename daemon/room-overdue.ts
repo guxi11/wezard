@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
 import { DAEMON, isBoundRoom, type Draft, type JudgeCtx, type RoomState, type Verdict, type Who } from "../shared/room.js";
 import { buildDescendantActivity, buildOpenChildDuties, groupSysOf, overdueDue, type OverdueHit, SYS_OVERDUE_GROUP, SYS_OVERDUE_REMIND } from "../shared/room-overdue.js";
+import { overdueOwnerRoom } from "../shared/external.js";
 
 export interface OverdueDeps {
   log?: Logger;
@@ -22,6 +23,9 @@ export interface OverdueDeps {
   wizardOf: (uid: string) => { target: string; name: string } | undefined;
   nameOf: (w: Who) => string;
   roomLabel: (room: string) => string;
+  /** 提问者是外部调用方 (ext:<名>) → 它的名字与 owner (归属 room id): 升级行改发 owner room,
+   *  不发接待 wizard 的 home。缺省 = 没有外部调用方。 */
+  externalOf?: (w: Who) => { name: string; owner: string } | undefined;
   /** 处理人这一轮还在跑 / 停在审批框上 (isBusy 把 parked 也算忙): 忙就不催, 等它闲下来。
    *  缺省 = 都不忙 (单测 / 只读部署)。 */
   isBusy?: (uid: string) => Promise<boolean> | boolean;
@@ -60,6 +64,24 @@ export const createOverdueScan = (p: OverdueDeps): { scan: () => Promise<{ remin
     if (!v.ok) { p.log?.warn({ room, msg: duty.msg, reason: v.reason }, "overdue: group 记录被拒"); return; }
     out.group++;
     if (isBoundRoom(room)) return; // 本身就镜像进企微
+    // 外部调用方问的活: 逾期升级发到它自己的 owner room, 不发接待 wizard 的 home —— 那边是
+    // 它服务的人的群, 不该被外部请求的进度刷屏, 而且 owner 才是该决定「还做不做」的人。
+    const ext = p.externalOf?.(duty.asker);
+    if (ext) {
+      const owner = overdueOwnerRoom(ext.owner, isBoundRoom);
+      if (!owner) {
+        p.log?.warn({ room, msg: duty.msg, principal: ext.name, owner: ext.owner }, "overdue: 外部调用方的 owner 不是绑定 room, 只记账本");
+        return;
+      }
+      try {
+        const m = p.append(owner, {
+          author: DAEMON, kind: "system", origin: "daemon", sys: SYS_OVERDUE_GROUP,
+          text: `[wezard] ⏰ 外部调用方 ${ext.name} 的请求 ${duty.msg} 已 ${n} 分钟没回 (接待 ${holderName}, 在 ${p.roomLabel(room)})`,
+        });
+        if (m.ok) out.mirrored++; else p.log?.warn({ owner, msg: duty.msg, reason: m.reason }, "overdue: owner room 通知被拒");
+      } catch (e) { p.log?.warn({ owner, msg: duty.msg, err: (e as Error).message }, "overdue: owner room 通知失败 (不补发)"); }
+      return;
+    }
     const home = homeOf(holder) ?? homeOf(duty.asker);
     if (!home) { p.log?.info({ room, msg: duty.msg }, "overdue: 处理人与提问者都没有绑定的 home 群, 只记账本"); return; }
     // 取舍: 上面的 room 内记录已落盘 (去重靠它), home 通知失败 / 抛错就不补发 —— 宁可漏一次通知, 也不重复刷群。

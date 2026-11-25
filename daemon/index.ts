@@ -1473,6 +1473,7 @@ const main = async (): Promise<void> => {
     for (const [key, handler] of Object.entries(external.routes())) http.register(key, handler);
     // 重写口令是一条能力: 单独过 daemon 口令闸 (同 /config/set), 不让 socket 上任何进程替调用方换口令。
     http.register("POST /external/rotate", guarded(external.rotateRoute()));
+    http.register("GET /external/status", guarded(external.statusRoute()));
     external.syncTokens();
     // boot 摘 lead: leadOf 全关了的, 以及没有 leadOf 的老 lead 名下已无同伴的活 (2026-11-22 admin 选 B)。
     try { settleLeads(true); } catch (e) { log.warn({ mod: "lead", err: errText(e) }, "lead: boot 清扫失败 (不影响启动)"); }
@@ -2568,6 +2569,11 @@ const main = async (): Promise<void> => {
       thresholds: () => ({ remindMin: cfg.rooms?.overdue?.remindMin ?? 60, groupMin: cfg.rooms?.overdue?.groupMin ?? 120 }),
       rooms: roomStore.ids, stateOf: roomState, append: (room, d, extra) => hub.append(room, d, extra),
       wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
+      externalOf: (w) => {
+        const name = extNameOf(w);
+        if (!name) return undefined;
+        return { name, owner: cfg.external.principals.find((x) => x.name === name)?.owner ?? "" };
+      },
       isBusy: async (uid) => {
         const rec = roomWizardOf(uid);
         return rec ? await m.isBusy(rec.target) : false;

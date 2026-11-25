@@ -106,6 +106,7 @@ const main = async (): Promise<void> => {
       "  ack <req...>                                                  确认收到",
       "  cancel <req>                                                  撤回还没交代的请求",
       "  rotate <名字>                                                 重写口令 (旧口令立即失效)",
+      "  status                                                        每个调用方的启用态 / 今日用量 / 未结 / 接待 wizard (要 daemon 口令)",
       "  --as <名字> / $WEZARD_EXT_NAME                                指定调用方 (缺省 = 唯一启用的那个)",
       "",
     ].join("\n"));
@@ -159,6 +160,13 @@ const main = async (): Promise<void> => {
         await sleep(300);
       }
     }
+  }
+
+  if (cmd === "status") {
+    // 诊断面要 daemon 口令 (同 rotate); 不需要调用方口令 —— 它看的是全部调用方。
+    const headers = { [DAEMON_TOKEN_HEADER]: readDaemonToken() };
+    report(await withRetry(() => once("GET", "/external/status", undefined, headers, 20_000)));
+    return;
   }
 
   if (cmd === "inbox") {
