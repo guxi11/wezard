@@ -402,6 +402,25 @@ const Models = z.object({
   }).default({}).describe("各 backend 独立的五档模型配置; 按 wrc.defaultCli 取值"),
 });
 
+// 外部 agent (CoC) 接入 (docs/evolve/external-gateway.md): 每个调用方一个名字 + 一个接待 wizard。
+// 口令不在这里 (在 <wezard home>/external/<名字>.token, 0600), 配置只决定谁能进、进多少。
+const ExternalPrincipal = z.object({
+  name: z.string().regex(/^[\w.-]+$/, "只许字母数字 _ - .").describe("调用方名字 (账本里的作者 = ext:<名字>, 也是口令文件名)"),
+  reception: z.string().min(1).describe("接待 wizard 的实例名: 外部请求只在这一个 wizard 名下开 duty, 它再自己 delegate"),
+  owner: z.string().default("").describe("调用方的归属人 userid (第 2 步逾期通知用; 现在只记录)"),
+  enabled: z.boolean().default(true).describe("关掉 = 这个调用方一律 403, 不影响别的"),
+  perMinute: z.number().int().min(1).default(10).describe("每分钟最多新请求数 (超出 429)"),
+  perDay: z.number().int().min(1).default(50).describe("自然日最多新请求数 (超出 429)"),
+  maxOpen: z.number().int().min(1).default(5).describe("同时未结 (open / need) 的请求上限 (超出 429)"),
+});
+const External = z.object({
+  enabled: z.boolean().default(false).describe("外部接入总开关: 关 = 所有 /external 路由 403 (口令文件与索引保留)"),
+  principals: z.array(ExternalPrincipal).default([]).describe("允许接入的外部 agent: 名字 / 接待 wizard / 额度"),
+}).superRefine((v, ctx) => {
+  const names = v.principals.map((x) => x.name);
+  names.forEach((n, i) => { if (names.indexOf(n) !== i) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["principals", i, "name"], message: "调用方名字重复: " + n }); });
+});
+
 // 方向选 name→principal 而不是反过来: 名字是寻址用的 key, 这个方向天然保证唯一, 手写
 // 也更顺。聊天目录用 name → principal 映射, 供跨 chat 寻址和开会话时解析。见 daemon/chat-name.ts。
 const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr…` / `user:…`)"));
@@ -449,6 +468,7 @@ export const ConfigSchema = z.object({
   models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及管家档位")),
   sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json; 改完跑 `wezard sync` 才生效"), { gate: "card" }),
   weixin: Weixin.default({}).describe("微信 ClawBot 通道: 扫码绑定、收发节流"),
+  external: knob(External.default({}).describe("外部 agent 接入 (CoC): 总开关 + 调用方与接待 wizard; 口令在 <wezard home>/external/"), { gate: "card", apply: "hot" }),
   svr: Svr.default({}).describe("独立详情中转服务 (wezard svr); svr 自己启动时读, 改完重启 svr 才生效"),
 }).superRefine(uniqueBots);
 

@@ -12,6 +12,8 @@
 //
 // 这里只做「字 → 结构」。名字的解析 / 账本回查 / 渲染都在调用方 (shared/role-render)。
 
+import { EXT_LABEL_PREFIX } from "./external.js";
+
 export interface InjectLine {
   /** 账本行 id ([d2581c34.7])。 */
   id: string;
@@ -112,7 +114,9 @@ export const parseInjection = (raw: string): InjectBlock[] | undefined => {
   return blocks;
 };
 
-const isHumanAuthor = (author: string): boolean => !!author && !author.startsWith(".") && author !== "wezard";
+// 外部调用方 (ext:<名字>) 的标签是「外部·<名字>」—— 一个 daemon 作者, 不是人话。
+const isHumanAuthor = (author: string): boolean =>
+  !!author && !author.startsWith(".") && author !== "wezard" && !author.startsWith(EXT_LABEL_PREFIX);
 
 /** 一次唤醒里这一轮是谁在哪开的口: 取「你要交代」点到的行里**最后一条人话行** (live 路径只看触发行, 同口径);
  *  有交代行、但点到的都不是人话 (如同伴 chat_ask 唤醒, 未读上下文里恰好有人对别人说的话) = undefined;

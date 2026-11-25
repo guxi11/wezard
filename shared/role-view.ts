@@ -11,6 +11,7 @@
 //
 // role id: wizard 就是它的 target key; 人是 human:<userid>; 定时任务是 task:<id>。
 import { baseOfKey, labelFor, rawTagHeader, stripSigil, tagOfKey } from "./session-label.js";
+import { EXT_AUTHOR_PREFIX, extLabel } from "./external.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import type { WorldFacts, WorldFactWeixin, WorldFactWizard } from "./world.js";
@@ -211,12 +212,13 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
   const chatName = (base: string): string => facts.chatNames[base] ?? "";
   const nameOf = (id: string): string => {
     if (id.startsWith("task:")) return "定时 " + id.slice(5);
+    if (id.startsWith(EXT_AUTHOR_PREFIX)) return extLabel(id.slice(EXT_AUTHOR_PREFIX.length));
     if (id === SYSTEM) return "wezard";
     if (wizards.has(id)) return (facts_.get(id)?.name ?? "").trim() || tagOfKey(id) || chatName(baseOfKey(id)) || id;
     return id.startsWith("human:") ? facts.humanNames?.[id] || id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
-    id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
+    id.startsWith("task:") ? "⏰" : id.startsWith(EXT_AUTHOR_PREFIX) ? "🌐" : id === SYSTEM ? "🧙" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
   // 地址 = 一个实例的 target, 按 target 或名字解析到它自己。同身份的多个实例各是各的页
   // (人 2026-11-22 拍板): 不选代表、不改写 —— 之前「同身份收敛到一个规范 target」会让
   // 点 wezard-15 落到 wezard-1 的页面上。

@@ -58,6 +58,8 @@ import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
+import { createExternal, type ExternalGateway } from "./external.js";
+import { extLabel, extNameOf } from "../shared/external.js";
 import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf, meWorkspaceOf } from "./me-room.js";
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
@@ -1279,7 +1281,7 @@ const main = async (): Promise<void> => {
     const roomNameOf = (w: Who): string =>
       w.kind === "wizard" ? "." + (roomWizardOf(w.id)?.name ?? w.id)
         : w.kind === "human" ? w.id
-        : "wezard";
+        : (extNameOf(w) ? extLabel(extNameOf(w)!) : "wezard");
     const roomLabel = (room: string): string => {
       // host 起的名字是显式别名, 优先于聊天名与成员拼名 (对 dm 也生效; 只影响显示, 寻址仍只认 id)。
       const s = roomState(room);
@@ -1459,6 +1461,16 @@ const main = async (): Promise<void> => {
         return r.ok ? "ok" : r.uncertain ? "uncertain" : r.gone ? "gone" : "failed";
       },
     });
+    // 外部 agent (CoC) 接入: 每个调用方一间 adhoc room, 请求 = 一条 ask 行, 状态从账本现算。
+    // 路由只挂在控制面 socket (视图口按规则 410); 口令按调用方一个文件, boot / 配置热载时补齐。
+    const external: ExternalGateway = createExternal({
+      cfg: () => cfg, log: log.child({ mod: "external" }), store: roomStore,
+      append: (room, d) => hub.append(room, d),
+      write: (room, ops) => hub.write(room, ops),
+      findWizard: (name) => { const rec = wizards.byName(name); return rec?.uid ? { uid: rec.uid, name: rec.name || name } : undefined; },
+    });
+    for (const [key, handler] of Object.entries(external.routes())) http.register(key, handler);
+    external.syncTokens();
     // boot 摘 lead: leadOf 全关了的, 以及没有 leadOf 的老 lead 名下已无同伴的活 (2026-11-22 admin 选 B)。
     try { settleLeads(true); } catch (e) { log.warn({ mod: "lead", err: errText(e) }, "lead: boot 清扫失败 (不影响启动)"); }
     // boot 对账: 停机期间 / 旧版本落下的 after 欠账 (前置已 done、被点名者没被叫过) 补一条 trigger 行。
@@ -4348,6 +4360,8 @@ const main = async (): Promise<void> => {
           if (!now.ok) return now;
           patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
           applyHot(cfg, now);
+          // 新加的调用方在第一次调用之前就要有口令文件可读 (agent 拿不到口令就发不出请求)。
+          external.syncTokens();
           return now;
         }, (now) => now.ok ? { what: `\`config_set ${now.path.join(".")}\``, self: caller, byHuman, reload: now.apply === "reload", after: charterUnder(now) } : undefined);
         return now.ok ? { ...now, charter: await note } : now;
