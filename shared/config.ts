@@ -136,7 +136,7 @@ const Channel = z.object({
   // (daemon/channel-context.ts)。官方接口仍是事实来源: 本地只做最近上下文与回填,
   // 搜索走官方索引; 关掉 history 就退回「每条消息现打接口」。
   history: z.object({
-    enabled: z.boolean().default(true).describe("把频道消息存一份本地缓存 (stateDir/channels/*.jsonl), 判官与主 wizard 的上下文优先读它"),
+    enabled: z.boolean().default(true).describe("把频道消息存一份本地缓存 (stateDir/channels/*.jsonl), perceptron 与主 wizard 的上下文优先读它"),
     keepDays: z.number().int().min(1).max(3650).default(30).describe("本地缓存保留多少天"),
     maxMessages: z.number().int().min(100).max(200000).default(5000).describe("单个频道本地最多留多少条"),
     mainPosts: z.number().int().min(2).max(50).default(12).describe("主 wizard 上下文里带最近多少条帖子"),
@@ -147,7 +147,7 @@ const Channel = z.object({
   }).default({}),
   // v3 §6 频道管家 (与群聊的 chatPolicy.<chat>.steward 是两张互不覆盖的表):
   // 频道也是「组团里的一个群」, 接待解析 = 本表 > 频道现存的默认会话 > 全局管家,
-  // 判官放行后的消息走同一条解析。键是裸 topic_id (频道缓存/事件都用它, 不带 chat: 前缀)。
+  // perceptron 放行后的消息走同一条解析。键是裸 topic_id (频道缓存/事件都用它, 不带 chat: 前缀)。
   steward: hot(z.record(z.string(), z.string()).default({}).describe("频道管家表: 裸 topic_id → wizard 身份名 (参数写裸名)。频道专用的绑定键, 不写 chatPolicy (那是群聊/单聊的); 绑定后该频道裸消息路由到这个身份在频道的化身 (没有就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 频道现存默认会话; 新频道由全局管家接待。热生效")),
 }).default({});
 
@@ -198,7 +198,7 @@ const Wrc = z.object({
   // 机器人显示名由建机器人的人自己取, 我们无法从消息里读到。群里 @ 它 / 引用它的
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
   botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个业务别名), 用于剥掉 @; 内置 wezard 恒生效"),
-  channel: Channel.default({}).describe("频道 (灰度): 每条消息先由轻量判官决定是否回应"),
+  channel: Channel.default({}).describe("频道: 频道 / 帖子 room 的传输与感知 (monitor = 为需要感知的 room 建 perceptron, 没点名的人话由它判该谁回应; history = 本地缓存)"),
   // v3 §7 学徒: 每 bot 实例唯一、代表人、连续唯一会话 (不是每群一个化身)。
   apprentice: z.object({
     name: z.string().min(1).default("学徒").describe("学徒的名字 (人定; 点名 / 派活 / 定时都用它)。"),

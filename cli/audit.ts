@@ -1,20 +1,25 @@
-// Slash-command entry: `wezard audit [tag]`.
-//   - With a tag: ask the daemon for the newest-by-mtime mirror whose target
-//     carries `#<tag>` and audit THAT session (regardless of which CLI/pane
-//     the command was fired from). Fails hard when the daemon is down or no
-//     match — falling back to "current session" would silently mis-answer.
+// Slash-command entry: `wezard audit [.name|slot]`.
+//   - With an argument: a wizard name (`.name` / `name`, same lookup as IM `/audit <.name>`:
+//     wizards.json → that identity's anchor target) audits that wizard's session; when no
+//     wizard has the name, it is read as a slot id and matches the newest-by-mtime mirror
+//     whose target carries `#<slot>` (the old form, kept working). Either way the audit is of
+//     THAT session regardless of which CLI/pane the command was fired from. Fails hard when
+//     the daemon is down or nothing matches — falling back to "current session" would
+//     silently mis-answer.
 //   - Without a tag: resolve the caller's own session (via
 //     $CLAUDE_CODE_SESSION_ID or newest-mtime jsonl under the project dir),
 //     print locally, and — when the daemon is up and this session is
 //     mirrored — also push the report into WeCom.
 // WeCom-side `/audit` doesn't go through here; daemon/inbound.ts intercepts
 // it and calls computeAuditReport directly (bypasses the flaky tmux paste path).
-import { readdirSync, statSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import { computeAuditReport } from "../daemon/audit.js";
+import { computeAuditReport, pickMirror } from "../daemon/audit.js";
 import { cliSocketPath } from "../shared/cli-socket.js";
 import { daemonRequest } from "../shared/daemon-client.js";
+import { loadConfig } from "../shared/config.js";
+import { foldName, identityOf } from "../daemon/wizard.js";
 
 // daemon 控制面 = unix socket; 连不上 (daemon 没起) 一律当「没有镜像」。
 
@@ -67,25 +72,32 @@ const expandHome = (p: string): string => (p.startsWith("~/") ? join(homedir(), 
 
 interface MirrorRef { sessionId: string; jsonlPath: string; target: string; }
 
-// Ask daemon for all live mirrors, then filter to targets carrying `#<tag>`
-// and pick the newest by jsonl mtime. Returns null when daemon is unreachable
-// or no mirror matches.
-const findMirrorByTag = async (tag: string): Promise<MirrorRef | null> => {
-  const wanted = tag.replace(/^#/, "");
+// Name → anchor target, read straight off the registry file (the CLI has no daemon-side store):
+// same rule as WizardStore.byName — fold case/sigil, then take the identity's anchor record.
+const wizardTargetOfName = (name: string): string | undefined => {
+  const key = foldName(name);
+  if (!key) return undefined;
+  try {
+    const file = expandHome(loadConfig().config.wrc.mirror.wizardsFile);
+    const rows = Object.values(JSON.parse(readFileSync(file, "utf8")) as Record<string, { target: string; name?: string; identity?: string }>);
+    const hits = rows.filter((w) => w.target && foldName(w.name ?? "") === key);
+    const id = [...new Set(hits.map(identityOf))].sort()[0];
+    if (!id) return undefined;
+    const kin = hits.filter((w) => identityOf(w) === id).sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
+    return (kin.find((w) => w.target === id) ?? kin[0])?.target;
+  } catch { return undefined; }
+};
+
+// Ask daemon for all live mirrors and resolve `arg` among them. Returns null when the daemon is
+// unreachable or nothing matches.
+const findMirror = async (arg: string): Promise<MirrorRef | null> => {
   try {
     const res = await daemonRequest("GET", "/mirror/status", { socketPath: cliSocketPath(), timeoutMs: 2000 });
     if (res.status !== 200) return null;
     const status = (res.json ?? {}) as { mirrors?: MirrorRef[] };
-    const matches = (status.mirrors ?? []).filter((m) => (m.target.split("#")[1] ?? "") === wanted);
-    if (matches.length === 0) return null;
-    const ranked = matches
-      .map((m) => {
-        let mt = 0;
-        try { mt = statSync(expandHome(m.jsonlPath)).mtimeMs; } catch { /* ignore */ }
-        return { m, mt };
-      })
-      .sort((a, b) => b.mt - a.mt);
-    return ranked[0]?.m ?? null;
+    return pickMirror(status.mirrors ?? [], arg, wizardTargetOfName, (m) => {
+      try { return statSync(expandHome(m.jsonlPath)).mtimeMs; } catch { return 0; }
+    });
   } catch { return null; }
 };
 
@@ -109,7 +121,7 @@ const main = async (): Promise<void> => {
   const tag = (process.argv.slice(2).join(" ") || "").trim().replace(/^#/, "");
 
   if (tag) {
-    const mirror = await findMirrorByTag(tag);
+    const mirror = await findMirror(tag);
     if (!mirror) {
       console.error(`no mirror found for tag \`${tag}\` (daemon down or session not attached)`);
       process.exit(1);

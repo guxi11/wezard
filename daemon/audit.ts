@@ -180,3 +180,22 @@ export const computeAuditReport = (opts: AuditOpts): string => {
   out.push("", `**总计: ${fmtTokens(grandTokens)} tokens · ${fmtCost(grandCost)}**`);
   return out.join("\n");
 };
+
+// Pure: which live mirror does `arg` mean — a wizard's exact target when `arg` names one, else the
+// newest-by-mtime mirror carrying `#<arg>` (legacy slot form). `mtimeOf` is injected so it stays testable.
+export const pickMirror = <M extends { target: string }>(
+  mirrors: M[],
+  arg: string,
+  targetOfName: (name: string) => string | undefined,
+  mtimeOf: (m: M) => number,
+): M | null => {
+  const wanted = arg.replace(/^#/, "");
+  const named = targetOfName(arg);
+  const matches = named
+    ? mirrors.filter((m) => m.target === named)
+    : mirrors.filter((m) => (m.target.split("#")[1] ?? "") === wanted);
+  return matches
+    .map((m) => ({ m, mt: mtimeOf(m) }))
+    .sort((a, b) => b.mt - a.mt)[0]?.m ?? null;
+};
+

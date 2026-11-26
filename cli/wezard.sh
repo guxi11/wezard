@@ -73,8 +73,8 @@ wezard <subcommand>
                          WeChat ClawBot: list accounts / scan-to-bind a WeChat user as a chat (terminal QR; needs an approver's confirm card) / unbind
   skills [list|install|remove|pin|unpin|update] [name] [--force]
                          bundled skills (e.g. 企微文档套件): show / reinstall / opt out / take over
-  audit [slot]           token/cost breakdown for the current Claude session (main + subagents);
-                         slot = the part after # in a target key (in IM use `/audit <.name>`)
+  audit [.name|slot]     token/cost breakdown for the current Claude session (main + subagents);
+                         .name = that wizard's session (same as IM `/audit <.name>`); slot = the part after # in a target key (legacy)
   ext <enroll|ask|wait|inbox|ack|cancel|status|rotate>
                          outward-facing agent bridge (CoC): enroll (owner approves a card), ask a wizard, collect answers
   update                 npm i -g wezard@latest + repoint/restart daemon + sync (one command, see /wezard:update)

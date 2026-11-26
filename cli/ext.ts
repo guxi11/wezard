@@ -1,4 +1,4 @@
-// 外部 agent (CoC) 的 CLI: wezard ext <ask|wait|inbox|ack|cancel|rotate>。
+// 外部 agent (CoC) 的 CLI: wezard ext <enroll|ask|wait|inbox|ack|cancel|status|rotate>。
 // 走 daemon 控制面 unix socket (shared/daemon-client), 身份 = x-wezard-ext + 口令头。
 // 输出: 每次一行 JSON 到 stdout (给 agent 读); 非 0 退出 = 鉴权 / 额度 / 连不上, 原因写 stderr。
 // 连不上 socket 时退避重试至多 15 秒 (覆盖 daemon reload 的空窗), wait 中途断开同样重试。
