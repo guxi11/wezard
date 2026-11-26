@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="wezard">
+  <title>wezard — chat bubble wearing a wizard hat</title>
+  <rect x="3" y="3" width="506" height="506" rx="110" fill="#fff" stroke="#BFE6D2" stroke-width="6"/>
+  <path d="M120 236 H392 A44 44 0 0 1 436 280 V368 A44 44 0 0 1 392 412 H236 L156 472 V412 H120 A44 44 0 0 1 76 368 V280 A44 44 0 0 1 120 236 Z" fill="#07C160"/>
+  <path transform="translate(262 252) scale(.82)" d="M-110 0 L-26 -218 C-16 -248 22 -260 62 -240 C34 -232 26 -212 24 -186 L110 0 Z" fill="#0B3D2A"/>
+  <rect x="104" y="236" width="304" height="40" rx="20" fill="#0B3D2A"/>
+  <circle cx="176" cy="344" r="19" fill="#fff"/>
+  <circle cx="256" cy="344" r="19" fill="#fff"/>
+  <circle cx="336" cy="344" r="19" fill="#fff"/>
+  <circle cx="404" cy="104" r="12" fill="#07C160"/>
+</svg>

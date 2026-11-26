@@ -66,13 +66,17 @@ wezard <subcommand>
   logs [-f]            tail daemon log
   config-path            show resolved config path
   use [cli|wecom]        approval hook: 交给本地 CLI 自己弹框 / 交回企微审批卡 (无参 = 看当前)
-  sync                   write hooks/MCP/env into sync.targets settings.json
-  unsync                 remove our entries from sync.targets settings.json
-  wx [bind|list|unbind]  WeChat ClawBot: scan-to-bind a WeChat user as a chat (terminal QR)
+  sync                   clean up wezard hook/MCP/env entries that older versions wrote into sync.targets
+                         (hooks/MCP are injected per session now); codex targets still get their hooks.json handlers
+  unsync                 sync --remove: leave no wezard registration in sync.targets (daemon stays)
+  wx [list|bind [name]|unbind <n|name>]
+                         WeChat ClawBot: list accounts / scan-to-bind a WeChat user as a chat (terminal QR; needs an approver's confirm card) / unbind
   skills [list|install|remove|pin|unpin|update] [name] [--force]
                          bundled skills (e.g. 企微文档套件): show / reinstall / opt out / take over
-  audit [tag]            token/cost breakdown for current Claude session (main + subagents)
-  ext <ask|wait|inbox|ack|cancel|rotate>  outward-facing agent bridge (CoC): ask a wizard, collect answers
+  audit [slot]           token/cost breakdown for the current Claude session (main + subagents);
+                         slot = the part after # in a target key (in IM use `/audit <.name>`)
+  ext <enroll|ask|wait|inbox|ack|cancel|status|rotate>
+                         outward-facing agent bridge (CoC): enroll (owner approves a card), ask a wizard, collect answers
   update                 npm i -g wezard@latest + repoint/restart daemon + sync (one command, see /wezard:update)
   uninstall              full teardown: stop daemon + unsync + plugin uninstall + remove daemon (run before `npm uninstall -g`)
                          add `--purge` to also delete ~/.wezard state

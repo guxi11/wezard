@@ -9,6 +9,9 @@
 //
 // 选项: --role <名字|target|chat:…>  --room <roomId|空串> (拼进 URL 的 room=; 缺省不带)  --url <完整 URL> (与 --role 二选一)  --mobile  --full (整页)
 //       --scroll <css> (截图前把它滚到视口中间; 如 detail 里某条消息 '.rv-msg[data-id="…"]')  --click <css> (截图前先点它, 可重复; 如切到关系图)  --selector <css> (只截该元素)  --wait-for <css>  --wait <ms, 默认 1500>  --scale <dsf, 默认 1>
+//       --redact <正则> (可重复; 截图前把页面可见文本里匹配的片段包进 blur 遮罩, 如 '/tmp/claude-\S+' '/home/\w+')
+//       --mask <css>[::keep=<正则>] (可重复; 把匹配 css 的元素整个 blur —— 关系图里的群 / 人节点; 带 ::keep= 时文本匹配该正则的留着不糊, 如 'g[data-node]::keep=^\W*[A-Z][a-z]+[A-Z][a-z]+' 只留随机英文名的 wizard)
+//       --forbid <正则> (可重复; 遮罩之后若截图元素里仍有可见文本匹配就报错退出、不出图 —— 隐私闸, 与 --redact 配对用)
 //       --base <http://host:port> (默认本机守护进程回环; 想看 svr 就传它)  --out <png 路径>
 // 输出: 末行打印 png 的绝对路径 (默认 ~/.wezard/shots/)。送图给人: send_file 发进群。
 //
@@ -37,7 +40,7 @@ const { values: o } = parseArgs({
     role: { type: "string" }, room: { type: "string" }, url: { type: "string" }, base: { type: "string" },
     mobile: { type: "boolean", default: false }, full: { type: "boolean", default: false },
     selector: { type: "string" }, click: { type: "string", multiple: true }, "wait-for": { type: "string" }, wait: { type: "string", default: "1500" },
-    scale: { type: "string", default: "1" }, scroll: { type: "string" }, out: { type: "string" }, help: { type: "boolean", short: "h", default: false },
+    scale: { type: "string", default: "1" }, scroll: { type: "string" }, redact: { type: "string", multiple: true }, mask: { type: "string", multiple: true }, forbid: { type: "string", multiple: true }, out: { type: "string" }, help: { type: "boolean", short: "h", default: false },
   },
 });
 if (o.help || (!o.role && !o.url)) die("需要 --role <名字|target> 或 --url <URL>; 详见脚本头部注释", o.help ? 0 : 2);
@@ -122,6 +125,52 @@ cleanup = dropLock;
 process.on("SIGINT", () => { dropLock(); process.exit(130); });
 process.on("SIGTERM", () => { dropLock(); process.exit(143); });
 
+// 在页面里跑 (evaluate): 把匹配 src 的文本片段拆出来包进 blur 的 span。
+const maskText = (src) => {
+  const rx = new RegExp(src, "g");
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (w.nextNode()) nodes.push(w.currentNode);
+  for (const n of nodes) {
+    const el = n.parentElement;
+    if (!el || el.closest("script,style,.shot-mask") || !rx.test(n.nodeValue)) continue;
+    rx.lastIndex = 0;
+    const f = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = rx.exec(n.nodeValue)) && m[0]) {
+      f.append(n.nodeValue.slice(last, m.index));
+      const s = document.createElement("span");
+      s.className = "shot-mask"; s.style.cssText = "filter:blur(5px);user-select:none"; s.textContent = m[0];
+      f.append(s);
+      last = m.index + m[0].length;
+    }
+    f.append(n.nodeValue.slice(last));
+    n.replaceWith(f);
+  }
+};
+// 在页面里跑: `css[::keep=正则]` —— 匹配 css、且文本不匹配 keep 的元素整个 blur (加 shot-mask 类, forbid 当作已遮)。
+const maskEls = (spec) => {
+  const [css, keep] = spec.split("::keep=");
+  const rx = keep ? new RegExp(keep) : undefined;
+  document.querySelectorAll(css).forEach((e) => {
+    if (rx?.test(e.textContent.trim())) return;
+    e.classList.add("shot-mask"); e.style.filter = "blur(5px)"; e.style.pointerEvents = "none";
+  });
+};
+// 在页面里跑: 选择器范围内、有版面的文本里, 仍匹配 pats 的片段 (遮罩 span 与 script/style 不算)。
+const visibleHits = ({ sel, pats }) => {
+  const root = document.querySelector(sel) ?? document.body;
+  const rxs = pats.map((p) => new RegExp(p, "g"));
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const hits = [];
+  while (w.nextNode()) {
+    const n = w.currentNode, el = n.parentElement;
+    if (!el || el.closest("script,style,.shot-mask") || !el.checkVisibility()) continue;
+    for (const rx of rxs) { rx.lastIndex = 0; const m = rx.exec(n.nodeValue); if (m) hits.push(m[0]); }
+  }
+  return hits;
+};
+
 let browser;
 try {
   // 无桌面机器缺的系统库: shot-setup.sh 解在这, 存在就挂上 (没有 sudo 也能跑)。
@@ -149,6 +198,12 @@ try {
   for (const c of o.click ?? []) { await page.locator(c).first().click({ timeout: 10_000 }); await page.waitForTimeout(500); }
   await page.waitForTimeout(Math.max(0, Number(o.wait) || 0));
   if (o.scroll) { await page.locator(o.scroll).first().evaluate((e) => e.scrollIntoView({ block: "center" })); await page.waitForTimeout(400); }
+  for (const src of o.redact ?? []) await page.evaluate(maskText, src);
+  for (const spec of o.mask ?? []) await page.evaluate(maskEls, spec);
+  if (o.forbid?.length) {
+    const hits = await page.evaluate(visibleHits, { sel: o.selector ?? "body", pats: o.forbid });
+    if (hits.length) die(`--forbid 命中 ${hits.length} 处 (未出图): ${hits.slice(0, 3).map((h) => JSON.stringify(h.slice(0, 40))).join(" ")}`);
+  }
   if (o.selector) await page.locator(o.selector).first().screenshot({ path: outPath });
   else await page.screenshot({ path: outPath, fullPage: o.full });
   if (errors.length) console.error(`shot: 页面有 ${errors.length} 个 JS 报错, 首条: ${errors[0].slice(0, 200)}`);

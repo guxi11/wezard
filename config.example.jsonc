@@ -59,7 +59,12 @@
   // ── PreToolUse approval (all tools → button card; align with auth-helper) ─
   "approval": {
     "enabled": true,
-    "mode": "all",               // all = 每次调用都发卡；danger = 只有命中下面危险名单的才发卡，其余静默放行
+    // 审批粒度 (缺省 "danger"; 本样例写 "all" 示范「每次都点」):
+    //   danger   = 只有命中下面危险名单 / askRules 的才发卡, 其余静默放行
+    //   all      = 每个命中 matcher 的调用都发卡 (allowRules / ⏱窗口 / 缓存可豁免)
+    //   skip_all = 一律放行不发权限卡 (denyRules / AskUserQuestion / ExitPlanMode 卡仍生效)
+    // 原来的 danger.enabled / skip / skipAll 三个布尔已并入这一项 (旧键在盘上仍会被读成 skip_all)。
+    "mode": "all",
     "matcher": ".*",             // 全量拦截；Bash 只读命令(grep/ls/cat/...)走脚本 fast-path
     // Claude-Code 风格放行规则(语法子集): 命中的调用跳过发卡直接放行。与 matcher
     // 的分工: matcher 按工具名圈定审批范围, allowRules 在范围内做细粒度豁免 ——
@@ -69,9 +74,9 @@
     //   | "Bash(npm run test:*)" 前缀(冒号-星) | "Bash(python3 .claude/skills/*)"
     // 安全语义: 复合命令(&&/;/|)逐段校验、段首 VAR= 前缀剥掉、含 $()/反引号不命中;
     // AskUserQuestion / ExitPlanMode / EnterPlanMode 永不可被规则放行。
-    // 默认 ["ToolSearch"] (deferred 工具的 schema 查询, 只读元工具); 这里显式写出会
-    // 整份覆盖默认值 —— 自定义时想保留它就把 "ToolSearch" 一并写上。
-    "allowRules": ["ToolSearch"],  // 例: ["Bash(git log *)", "Bash(python3 .claude/skills/*)"]
+    // 默认 ["ToolSearch", "mcp__wezard"] (deferred 工具的 schema 查询 + wezard 自家 MCP); 这里显式写出会
+    // 整份覆盖默认值 —— 自定义时想保留它们就把 "ToolSearch" / "mcp__wezard" 一并写上。
+    "allowRules": ["ToolSearch", "mcp__wezard"],  // 例: ["Bash(git log *)", "Bash(python3 .claude/skills/*)"]
     // 三层语义 deny > ask > allow, 对齐 Claude Code permissions:
     // denyRules 命中直接拒绝不发卡(Bash 复合命令任一段命中即拒);
     // askRules 命中必发卡, 压过 allowRules / ⏱自动放行窗口 / 会话缓存 —— 给
@@ -84,8 +89,9 @@
     "askRules": [],              // 例: ["Bash(rm *)", "Bash(sudo *)", "Bash(git push *)"]
     // `.claude/**` 写守卫: 改动 Claude 自己的配置面(settings/hooks/skills/…)会触发
     // CC 原生确认框, 那个框**不过 hook** —— 规则放行 = 不发卡 + pane 静默阻塞。
-    // 开启后这类调用必发卡; 点「允许」后 daemon 去 pane 上代按一次性 Yes, 按不掉
-    // 则 Esc 取消并把原因注入会话(模型会改走实体路径)。仅镜像会话(有活 pane)生效。
+    // 开启后, 这类调用**每一条放行出口**(规则 / 窗口 / 缓存 / 点 ✅ ……)之后, daemon
+    // 都去 pane 上代按一次性 Yes; 按不掉则 Esc 取消并把原因注入会话(模型会改走实体路径)。
+    // 它不改变要不要发卡; 仅镜像会话(有活 pane)、非 Codex 生效。
     "claudeConfigGuard": true,
     "claudeConfigModalWaitMs": 4000,  // 批准后等那个框出现的最长时间(轮询步进 200ms)
     // 审批卡引用区(命令/参数体)的最大字符数。企微对 quote_text 无长度限制, 但手机端
@@ -99,7 +105,7 @@
     "hookTimeoutSec": 43210,     // hook curl --max-time (12h + 10s)
     "longPollSec": 43200,        // daemon long-poll (12h)
     "sessionCacheMinutes": 30,   // (session_id, tool, cmd_prefix_hash) → decision
-    "windowMinutes": 5,          // 「⏱ N 分钟」按钮：开窗口期间所有请求自动 allow
+    "windowMinutes": 600,        // 「⏱ N 分钟」按钮：开窗口期间所有请求自动 allow (缺省 600 = 10h)
     // 原生权限框自动代按成功后要不要逐条贴进聊天。默认 "off"（只写 daemon 日志）——
     // 代按一个本就不危险的确认是这套设置的默认姿态，逐条贴只是刷屏。
     // "unseen" = 只报屏面没看全入参的代按；"all" = 每次成功代按都报。
@@ -112,15 +118,7 @@
     // 内置覆盖 rm/git push/kubectl delete/DROP TABLE/敏感路径等；下面三组正则
     // (大小写不敏感) 追加自定义规则，allowPatterns 优先级最高。
     "danger": {
-      "enabled": true,
-      // true = 命中危险名单的调用也免卡直接放行(只豁免命中名单的那些,
-      // 不是跳过所有审批)。默认 false。
-      "skip": false,
-      // true = 跳过所有审批: 命中 matcher 的调用一律静默放行, 压过危险名单/
-      // askRules/⏱窗口/缓存(denyRules 拒绝与 AskUserQuestion/ExitPlanMode
-      // 交互卡不受影响)。默认 false。
-      "skipAll": false,
-      "builtin": true,
+      "builtin": true,           // false = 只用下面的自定义规则
       "commandPatterns": [],     // 例: ["\\bpm2\\s+delete\\b"]
       "toolPatterns": [],        // 例: ["^mcp__prod__"]
       "pathPatterns": [],        // 例: ["/prod/"]

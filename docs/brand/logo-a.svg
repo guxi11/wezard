@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="wezard">
+  <title>wezard — hat with terminal prompt</title>
+  <rect width="512" height="512" rx="112" fill="#07C160"/>
+  <path transform="translate(244 372) scale(1.1)" d="M-110 0 L-26 -218 C-16 -248 22 -260 62 -240 C34 -232 26 -212 24 -186 L110 0 Z" fill="#fff"/>
+  <rect x="84" y="364" width="344" height="56" rx="28" fill="#fff"/>
+  <path d="M210 236 L250 272 L210 308" fill="none" stroke="#07C160" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M270 312 H322" fill="none" stroke="#07C160" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="414" cy="130" r="14" fill="#fff" opacity=".9"/>
+  <circle cx="112" cy="190" r="9" fill="#fff" opacity=".6"/>
+</svg>

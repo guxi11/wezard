@@ -12,6 +12,7 @@ secrets.json
 docs/*
 !docs/evolve/
 !docs/room/
+!docs/brand/
 !docs/v3-design.md
 !docs/dev-guide.md
 !docs/v3-p3-steward-table.md

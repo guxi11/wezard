@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="wezard">
+  <title>wezard — three hats, one chat</title>
+  <defs><path id="h" d="M-110 0 L-26 -218 C-16 -248 22 -260 62 -240 C34 -232 26 -212 24 -186 L110 0 Z"/></defs>
+  <rect x="3" y="3" width="506" height="506" rx="110" fill="#0F2A1E" stroke="#1F6B46" stroke-width="6"/>
+  <use href="#h" transform="translate(130 386) scale(.62)" fill="#0A9B4E"/>
+  <use href="#h" transform="translate(382 386) scale(.62)" fill="#7BE0AB"/>
+  <use href="#h" transform="translate(256 386) scale(.98)" fill="#fff"/>
+  <rect x="52" y="378" width="408" height="40" rx="20" fill="#07C160"/>
+  <path d="M214 270 L246 298 L214 326" fill="none" stroke="#07C160" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M264 330 H302" fill="none" stroke="#07C160" stroke-width="20" stroke-linecap="round"/>
+</svg>
