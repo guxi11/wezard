@@ -63,6 +63,26 @@ for (const internal of [INTERNAL_BASE, `${INTERNAL_BASE}#steward`]) {
   assert.deepEqual(newStewardSpec(cfg, internal, "claude", { model: "task", effort: "high" }), want);
   assert.deepEqual(resumedStewardSpec(cfg, internal, "claude", { model: "recorded", effort: "high" }), want);
 }
+// 引导化身 (#guide / #guide-2 …) 同样是替一个聊天接待人的常驻会话: 首建 / 冷恢复都吃 router 档,
+// 显式 model / 记录值不覆盖; 普通 slot 分身与 monitor 不受影响。
+const guideCfg = ConfigSchema.parse({ bot, wrc: { defaultCli: "codebuddy" }, models: {
+  router: "light",
+  backends: { codebuddy: { tiers: { mini: { model: "tiny", effort: "low" }, light: { model: "flash", effort: "low" } } } },
+} });
+const guideLight = { model: "flash", effort: "low" };
+for (const tag of ["guide", "guide-2", "guide-11"]) {
+  const g = `${target}#${tag}`;
+  assert.deepEqual(newStewardSpec(guideCfg, g, "codebuddy"), guideLight, `${tag} → router`);
+  assert.deepEqual(resumedStewardSpec(guideCfg, g, "codebuddy", {}), guideLight);
+  assert.deepEqual(newStewardSpec(guideCfg, g, "codebuddy", { model: "explicit", effort: "high" }), guideLight);
+  assert.deepEqual(resumedStewardSpec(guideCfg, g, "codebuddy", { model: "recorded", effort: "high" }), guideLight);
+}
+// 名字里带 guide 但不是 guide 系 slot (guidebook / guide-x) 不套档。
+for (const tag of ["guidebook", "guide-x"]) {
+  const g = `${target}#${tag}`;
+  assert.deepEqual(resumedStewardSpec(guideCfg, g, "codebuddy", { model: "recorded", effort: "high" }),
+    { model: "recorded", effort: "high" });
+}
 // room 的 monitor 固定吃 wrc.channel.monitor.tier (默认 light), 首建 / 冷恢复都不落 CLI 默认;
 // 显式 model / 记录值同样不覆盖。管理员的 router 档与它无关。
 const mon = `${target}#monitor`;

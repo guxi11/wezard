@@ -65,11 +65,16 @@ export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy =>
     Object.entries(cfg.chatPolicy?.[baseOfKey(target)] ?? {}).filter(([k]) => !RETIRED_POLICY_KEYS.has(k)),
   ));
 
+/** guide 系 slot: 群 / 频道引导化身 (`base#guide`, 占位退到 `#guide-2` …)。 */
+const GUIDE_TAG_RE = /^guide(?:-\d+)?$/;
+export const isGuideTag = (target: string): boolean => GUIDE_TAG_RE.test(tagOfKey(target));
+
 /** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
  *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,
- *  但既不属于任何群、也不是谁的分身 —— 不给档它就落 CLI 自己的默认模型, 比 router 那档重得多。真 slot 分身才不套档。 */
+ *  但既不属于任何群、也不是谁的分身 —— 不给档它就落 CLI 自己的默认模型, 比 router 那档重得多。真 slot 分身才不套档。
+ *  引导化身 (guide / guide-N) 同为「替一个聊天接待人」的常驻会话: 首建、/new、死 pane 重生都走 router。 */
 export const stewardTierOf = (cfg: Config, target: string): TierName | undefined =>
-  isInternalKey(target) || !tagOfKey(target) ? cfg.models.router : undefined;
+  isInternalKey(target) || !tagOfKey(target) || isGuideTag(target) ? cfg.models.router : undefined;
 
 /** 已命名的聊天 (存量冻结标签), 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>

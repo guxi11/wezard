@@ -67,11 +67,15 @@ assert.equal(cleared?.[2], submitted);
 assert.equal((cleared?.[3] as () => boolean)(), true, "handoff clear rechecks permission");
 const spawnResponse = present("spawn_wizard", { ok: true, name: "x", model: "m", tierNote: "legacy" }) as Record<string, unknown>;
 assert.equal("tierNote" in spawnResponse, false, "spawn_wizard presentation omits the removed tierNote field");
-assert.deepEqual(spawnResponse, { ok: true, name: "x", model: "m" }, "spawn_wizard presentation retains normal response fields");
+assert.deepEqual(spawnResponse, { ok: true, name: "x", model: "m", said: "已起了 .x" }, "spawn_wizard presentation retains normal response fields");
 for (const args of captured) assert.deepEqual({ model: args.model, effort: args.effort, cli: args.cli },
   { model: "gpt-6.1-sol", effort: "medium", cli: "codex" });
 assert.equal(captured.length, 2, "first creation and /new must reach the correct spawn spec");
 await newSession("user:test#child", "child", { model: "task-model", effort: "low" });
 assert.deepEqual({ model: captured.at(-1)?.model, effort: captured.at(-1)?.effort },
   { model: "task-model", effort: "low" }, "ordinary task model and explicit effort are preserved");
+// 引导化身首建 (/new 同链) 也走 router, 显式给的档位不覆盖它。
+await newSession("user:test#guide", "guide", { model: "task-model", effort: "low" });
+assert.deepEqual({ model: captured.at(-1)?.model, effort: captured.at(-1)?.effort },
+  { model: "gpt-6.1-sol", effort: "medium" }, "guide session takes the router tier");
 console.log("Steward creation: creation model routing, handoff coordination, and spawn response presentation");

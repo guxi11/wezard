@@ -11,7 +11,7 @@ import type { Config } from "../shared/config.js";
 import { isBoundRoom, rowText, type MsgRow } from "../shared/room.js";
 import { allNames } from "../shared/session-label.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { chatNameOf, stewardTierOf } from "./chat-name.js";
+import { chatNameOf, isGuideTag, stewardTierOf } from "./chat-name.js";
 import type { Part, WakeTail } from "./notices.js";
 import { peerMentionPart, renderStewardHint, type PeerMention } from "./peers.js";
 import { wizardStore } from "./wizard.js";
@@ -39,7 +39,7 @@ export const peerMentionsOf = (bridge: Pick<MirrorBridge, "resolvePeerTag" | "ge
   };
 
 export interface WakeTailPorts {
-  /** 被唤醒的 wizard 是不是某个群的管家 (stewardTierOf)。 */
+  /** 被唤醒的 wizard 是不是某个群的管家 (stewardTierOf; 引导化身同吃 router 档但不算管家)。 */
   isSteward: (target: string) => boolean;
   mentionsOf: (who: string, text: string) => PeerMention[];
   /** 收件人自己的工作区: 同工作区的同伴点名行不重复写 cwd。 */
@@ -74,7 +74,7 @@ export const wakeInjectOpts = (tail: WakeTail | undefined): { requireIdle: true;
 
 /** 生产接线: steward 判定 / 点名解析 / 工作区都取自守护进程的真实依赖。 */
 export const wakeTailPorts = (cfg: Config, bridge: Pick<MirrorBridge, "resolvePeerTag" | "getCwd">): WakeTailPorts => ({
-  isSteward: (t) => !!stewardTierOf(cfg, t),
+  isSteward: (t) => !!stewardTierOf(cfg, t) && !isGuideTag(t),
   mentionsOf: peerMentionsOf(bridge, cfg),
   cwdOf: (t) => ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)),
 });
