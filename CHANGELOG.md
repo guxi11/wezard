@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-11-26
+
 ### Added
 - **外部 agent 接入第 1 步: `wezard ext` + 控制面 `/external/*` (人 2026-11-25 拍板, 设计 docs/evolve/external-gateway.md)** — 大圆上的外部 agent (CoC) 经本地 CLI `wezard ext ask|wait|inbox|ack|cancel|rotate` 走 daemon.sock 找一个指定的接待 wizard: 调用方在账本里是 daemon 作者 `ext:<名字>` (同定时任务, 无人话特权), 每个调用方一间 adhoc room, 请求 id = ask 行 id, 状态 (open/need/answered/failed/canceled) 从账本现算; 一次等待 ≤60s, 取件后 ack; 额度每分钟 / 每天 / 同时未结; 口令按调用方一个文件 (`<wezard home>/external/<名>.token`), 轮换过 daemon 口令闸; 新配置 `external` (缺省关, 改动走放权卡)。视图 TCP 口一律 410。
 - **外部 agent 接入第 2 步: 外部接待 wizard 的安全加固 (docs/evolve/external-gateway.md)** — 接待 wizard 认定 = 名字 ∈ 启用中的 `external.principals[].reception` (现读配置)。① 审批: 它的轮次里除 wezard 自家工具 (直接 MCP, 或 REPL 脚本里只调 wezard / 纯计算) 外, matcher 拦下的调用一律单次发卡, 压过 allowRules / ⏱窗口 / 会话缓存 / skip_all / danger 早退 / permission_mode 直通; 卡面「审核」行写明「外部接待 <名> · 由外部调用方 <名> 的请求驱动」。② 禁用表 (daemon 路由层, 403 带原因): 改配置、set_workspace、room_bind/unbind/fork/name/invite、schedule/cancel_task、clone_wizard (spawn 放行)、停 / 改别的 wizard、移别人出 room、chat / workspace 作用域的记忆; say/ask/reply/notify/send_file 目标是绑定 room 一律拒, dm / adhoc 照常。③ 出口脱敏: ask / wait / inbox 交还的 answer 抹掉 daemon / ext / svr 口令与 secrets.json 里的字符串, 以及 JWT、sk-/ghp_、≥32 位 hex、私钥块; 账本原样。④ 逾期: `principals[].owner` 改义为归属 room id, 外部请求逾期的升级行发 owner room (不再发接待 wizard 的 home); owner 空或不是绑定 room 只记账本。⑤ 额度超限 (429) 往 owner room 发告警, 同一调用方同一天同一种只发一次; 新增 `GET /external/status` (过 daemon 口令闸) 与 `wezard ext status`。测试 `tests/external.test.ts` / `tests/external-reception.test.ts`, 演练 `scripts/external-rehearsal.sh` 63 项。
@@ -1626,6 +1628,7 @@
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
 [Unreleased]: https://github.com/guxi11/wezard/compare/v3.0.1...HEAD
+[3.0.2]: https://github.com/guxi11/wezard/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/guxi11/wezard/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/guxi11/wezard/compare/v2.9.0...v3.0.0
 [2.9.0]: https://github.com/guxi11/wezard/compare/v2.8.8...v2.9.0
