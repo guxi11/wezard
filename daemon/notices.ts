@@ -129,7 +129,7 @@ export const tildePath = (p: string): string => (p === HOME || p.startsWith(`${H
 /** logfmt 的值: 有空白 / 引号 / `=` 才加引号。 */
 const val = (s: string): string => (/[\s"=]/.test(s) ? `"${s.replace(/"/g, "'")}"` : s);
 const kv = (k: string, v: string | undefined): string => (v ? ` ${k}=${val(v)}` : "");
-const clip = (s: string): string => clipLine(s, 80);
+const clip = (s: string): string => clipLine(s, 40);
 
 /** 一条变动 → 一行 logfmt (`op .name k=v …`)。`cwd` = 收件人自己的工作区: 同一个就不提。 */
 export const renderNotice = (n: Notice, cwd = ""): string => {
@@ -218,9 +218,8 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
     const notes = fresh.filter(([, n]) => !subsumed(n));
     return {
       text: renderReminder({ wezard: "roster" }, [
-        "Wizards in this chat now (as of this message; truth: wizard_roster). FYI only — don't reply.",
-        // 列义只随整表给 (每个窗口一次), 变动行不重复。delegate 不点名时自己算冷热, 这几列只在点名 `to` / chat_ask 时要看。
-        "state: busy=mid-turn (a new task queues behind it) · parked=waiting on an approval click · idle=free · -=no live session (waking respawns it). cache cold = waking it rewrites its whole ctx (≈ctx/25k × a fresh spawn); only weigh this when you name `to` — delegate already does.",
+        // 列义只随整表给 (每个窗口一次), 变动行不重复。c 列只在点名 `to` / chat_ask 时要看。 delegate 不点名时自己算冷热。
+        "Wizards now (truth: wizard_roster; FYI, don't reply). state: busy|parked|idle|-=no session; cache cold = waking rewrites its whole ctx.",
         ...renderSnapshot(table),
         ...groupRows(notes.map(([, n]) => n), cwd).map((r) => `- ${r}`),
       ]),
@@ -233,7 +232,7 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
   return {
     text: renderReminder({ wezard: "roster" }, [
       ...(rule ? ["Roster changes since your charter snapshot (truth: wizard_roster). FYI only — don't reply or relay; skip if irrelevant."] : []),
-      ...(moved.length ? ["Rows changed since the last table (name,state,ctx,cache,job; as of this message):", ...moved.map(snapRow)] : []),
+      ...(moved.length ? ["Changed since last table (name,state,ctx,cache,job):", ...moved.map(snapRow)] : []),
       ...rows.map((r) => `- ${r}`),
     ]),
     keys: [...(rule ? ["rule:roster"] : []), ...moved.map(valKey), ...fresh.map(([r]) => `r:${r}`)],

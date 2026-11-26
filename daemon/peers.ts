@@ -581,7 +581,7 @@ export { parseEnvelope, type Envelope };
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */
 export const renderStewardHint = (): string =>
   renderReminder({ wezard: "hint" }, [
-    "管家自查: 进度 / 闲聊 / 你已知道的 → 自己答; 要看代码才答得了的 (机制、原理、「现在还会不会…」、方案、排查、改动), 哪怕看一眼就像能答 → 先 `delegate` 派出去; 多处改动或要 coder + reviewer 的带 `lead:true` 开需求单。",
+    "管家自查: 闲聊/已知的自己答; 要看代码才答得了的先 delegate 派出去。",
   ]);
 
 

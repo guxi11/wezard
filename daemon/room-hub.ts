@@ -82,6 +82,7 @@ export const createRoomHub = (p: HubPorts) => {
   const reminded = new Set<string>();              // duty key: 已提醒过 (轮终贴提醒 / Stop hook 拦一次)
   const stopChecked = new Map<string, number>();   // uid → 它的 Stop hook 最近一次来问的时刻
   const busyNoted = new Set<string>(); // 已打过「目标忙」info 的 uid, 投成功或不忙时清掉
+  const replyHintGiven = new Set<string>(); // uid → 已随投递附过「用 chat_reply 交代」半句 (本进程内不再附; 重启重给一次)
   const failedAs = new Map<string, PasteResult>(); // uid → 上次投递失败的结果 (只在状态变化时打 warn, 30s 重踢不刷屏)
   let running: Promise<void> | undefined;
   let again = false;
@@ -230,7 +231,7 @@ export const createRoomHub = (p: HubPorts) => {
   };
 
   /** 渲染一次唤醒: 每个 room 一段 (游标之后没看过的行, 触发行全文), 末尾列出它要交代的 duty。 */
-  const render = (uid: string, rooms: Map<string, MsgRow[]>): { text: string; seen: Array<{ room: string; seq: number }>; msgs: string[] } => {
+  const render = (uid: string, rooms: Map<string, MsgRow[]>): { text: string; seen: Array<{ room: string; seq: number }>; msgs: string[]; hintGiven: boolean } => {
     const who: Who = { kind: "wizard", id: uid };
     const names = { nameOf: p.nameOf, roomLabel: p.roomLabel };
     const parts: string[] = [];
@@ -238,7 +239,8 @@ export const createRoomHub = (p: HubPorts) => {
     const msgs: string[] = [];
     const again = uncertain.get(uid);
     // 用法半句是教学不是事实: 它最近 N 批唤醒里自己回过 chat_reply 就不再重复 (id 与「这是你的 duty」照旧给)。
-    const usage = replyHintDue(roomsOf(uid), uid, p.replyHintWindow?.() ?? 0) ? " —— 用 chat_reply({re, text, status}) 交代。" : "";
+    const usage = !replyHintGiven.has(uid) && replyHintDue(roomsOf(uid), uid, p.replyHintWindow?.() ?? 0) ? " —— 用 chat_reply({re, text, status}) 交代。" : "";
+    let hintGiven = false;
     for (const [room, triggers] of rooms) {
       const s = state(room)!;
       const u = unreadFor(s, who, triggers.map((t) => t.id));
@@ -273,11 +275,12 @@ export const createRoomHub = (p: HubPorts) => {
         return r && r.kind !== "trigger" && !sameWho(r.author, who) ? [[r.id, r] as [string, MsgRow]] : [];
       })).values()];
       const refLines = refRows.length ? ["派活指向的原话: " + refRows.map((r) => renderMsgLine(r, names, 300)).join(" / ")] : [];
+      if (oweLine && usage) hintGiven = true;
       parts.push([head, ...lines, ...refLines, ...(humanHint ? [humanHint] : []), ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
       msgs.push(...triggers.map((t) => t.id));
     }
-    return { text: parts.join("\n\n"), seen, msgs };
+    return { text: parts.join("\n\n"), seen, msgs, hintGiven };
   };
 
   const deliver = async (uid: string, rooms: Map<string, MsgRow[]>): Promise<void> => {
@@ -298,7 +301,7 @@ export const createRoomHub = (p: HubPorts) => {
       await p.interrupt(w.target); // 先 Esc 打断再投, 不拆 pane (§3b I-1); 被打断那一轮的 duty 不关
     }
     busyNoted.delete(uid);
-    const { text, seen, msgs } = render(uid, rooms);
+    const { text, seen, msgs, hintGiven } = render(uid, rooms);
     const res = await p.paste(w.target, text, p.tailOf?.(w.target, [...rooms.values()].flat()));
     if (res === "ok") {
       for (const [room, rows] of rooms) for (const t of rows)
@@ -306,6 +309,7 @@ export const createRoomHub = (p: HubPorts) => {
       const batchAt = now(); // 同一批跨 room 共用一个 at: 「最近 N 批」按它去重
       for (const { room, seq } of seen) p.store.append(room, [{ op: "seen", at: batchAt, room, who: { kind: "wizard", id: uid }, seq, batch: true }]);
       uncertain.delete(uid);
+      if (hintGiven) replyHintGiven.add(uid);
       const t: TurnWake = turns.get(uid) ?? { rooms: new Set(), msgs: new Set(), replied: new Set(), at: now() };
       seen.forEach(({ room }) => t.rooms.add(room));
       msgs.forEach((m) => t.msgs.add(m));

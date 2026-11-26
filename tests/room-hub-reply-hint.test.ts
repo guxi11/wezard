@@ -16,7 +16,7 @@ let window = 3;
 let busy = false;
 const pasted: string[] = [];
 const store = openRoomStore(mkdtempSync(join(tmpdir(), "reply-hint-")));
-const hub = createRoomHub({
+const makeHub = () => createRoomHub({
   store, now: () => t,
   wizardOf: (u) => wiz[u],
   nameOf: (w: Who) => (w.kind === "wizard" ? "." + (wiz[w.id]?.name ?? w.id) : w.id),
@@ -27,6 +27,9 @@ const hub = createRoomHub({
   paste: async (_target, text) => { pasted.push(text); return "ok"; },
   replyHintWindow: () => window,
 });
+let hub = makeHub();
+/** 模拟 daemon 重启: 内存态 (含「已附过用法半句」的闸) 清零, 账本仍在。 */
+const reboot = (): void => { hub = makeHub(); };
 const mk = (room: string) => {
   hub.write(room, [
     { op: "open", at: t, room, kind: "adhoc", by: WA },
@@ -50,10 +53,13 @@ const SHORT = (id: string) => new RegExp("你要交代: " + id.replace(".", "\\.
 const first = await ask();
 assert.match(first.text, USAGE);
 const second = await ask();
-assert.match(second.text, USAGE);
+assert.doesNotMatch(second.text, USAGE, "同一 uid 第二次投递不再附用法半句");
+assert.match(second.text, SHORT(second.id), "id 短形照旧");
+reboot();
 const third = await ask();
 assert.match(third.text, USAGE, "已有 2 批 < 3, 照附");
 // ≥N 批且窗口内没写过 reply → 附
+reboot();
 const fourth = await ask();
 assert.match(fourth.text, USAGE, "已有 3 批, 窗口内无 reply → 附");
 
@@ -68,6 +74,7 @@ assert.doesNotMatch(sixth.text, USAGE, "reply 还在最近 3 批里");
 const seventh = await ask();
 assert.doesNotMatch(seventh.text, USAGE, "reply 恰在窗口起点上");
 // 窗口外的老 reply 不算: 再三批没回, 它滑出去 → 附
+reboot();
 const eighth = await ask();
 assert.match(eighth.text, USAGE, "老 reply 已在窗口外");
 
@@ -75,6 +82,7 @@ assert.match(eighth.text, USAGE, "老 reply 已在窗口外");
 window = 0;
 t += 1000;
 assert.ok(hub.append(R1, { author: WB, kind: "reply", origin: "tool", re: [eighth.id], text: "再回" }).ok);
+reboot();
 assert.match((await ask()).text, USAGE);
 
 // 跨 room 同批只算一次: 一次 pump 同时投 R1 + R2 → 每个 room 的 seen 带同一个 at, 去重后是 1 批
