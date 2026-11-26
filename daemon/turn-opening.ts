@@ -2,9 +2,9 @@
 //
 // 一轮开头那句 user 行有两种形状:
 //   · 挂着信封 (`wezard="envelope"`): 定时任务 / 记忆整理在写; 老转录里还有人话与同伴信封 (只读)。
-//   · 没有信封: room 唤醒 (人话信封已删)。哪个 room = 唤醒头 `【label】(roomId)`, 谁说的 = 触发行 `[id] <author>:`
-//     (作者认形状: `.名字` 是 wizard、`wezard` 是系统, 其余是人, 见 shared/inject-view humanOpening);
-//     绑定 room 的 id 就是群的 base principal → channel = 群; dm / adhoc 是私下 → channel `""`。
+//   · 没有信封: room 唤醒 (人话信封已删)。哪个 room = 唤醒头 (新 `【label】#hash8 标记` / 旧 `【label】(roomId)`),
+//     谁说的 = 触发行 `[id] <author>:` (作者认形状: `.名字` 是 wizard、`wezard` 是系统, 其余是人, 见 shared/inject-view humanOpening);
+//     绑定 room → channel = 群 base principal (新格式由 #hash 反查); dm / adhoc 是私下 → channel `""`。
 //     唤醒里没有人话行 (同伴 / 回执 / 定时的 room 行) = undefined, 调用方回落到最近一轮的印章。
 import type { TurnFrom } from "../shared/detail-store.js";
 import { humanOpening } from "../shared/inject-view.js";

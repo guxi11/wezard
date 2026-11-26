@@ -163,7 +163,7 @@ const charter = renderCharter({
   chatMemory: "", workspaceMemory: "", steward: false, stewardBudget: 4, lead: false, tiers: [],
 });
 assert.ok(charter.includes("你是学徒 (连续身份)"), "宪章带学徒章");
-assert.ok(charter.includes("注入头 `【群名】(roomId)`"), "宪章写明多群出处看注入头");
+assert.ok(charter.includes("注入头 `【群名】#hash8 标记`"), "宪章写明多群出处看注入头");
 assert.ok(charter.includes("wizard_remember"), "交接前先记忆");
 const charterPlain = renderCharter({
   self: { name: "x", address: "x", description: "", cwd: "~" },
