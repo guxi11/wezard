@@ -27,7 +27,7 @@ import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
 import { buildRoomFact, buildRoomFacts, dutyFacts, verdictFacts, type ChannelOf, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
-import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
+import { roomHash, unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
@@ -422,6 +422,18 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         ? wizardMessages(states, uid, { limit: 0 }, n).msgs.filter((m) => m.at >= since).map(wire).map(linked)
         : [];
       // 时间轴只回最近一页 (见 stream-page.ts); sbefore = 往前翻的游标, 带它时只回那一页的行, 名片 / 消息 / 名册一概不重复。
+      // 注入头只有 #hash8 (上一条消息的房头): 时间轴要把块里的房间认回来, 按当前账本现建反查表;
+      // 撞车的不进表 (认不出时退回块头里的显示名, 不猜)。
+      const roomByHash = ((): ((h: string) => string | undefined) => {
+        const byHash = new Map<string, string>();
+        const dup = new Set<string>();
+        for (const s of states) {
+          const h = roomHash(s.id), prev = byHash.get(h);
+          if (prev && prev !== s.id) dup.add(h); else byHash.set(h, s.id);
+        }
+        for (const h of dup) byHash.delete(h);
+        return (h) => byHash.get(h);
+      })();
       const sb = url.searchParams.get("sbefore"), sl = url.searchParams.get("slimit");
       const page = streamPage(
         withNotes(wizardStream(records, role, dir, now, {
@@ -429,6 +441,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
           msgs: streamMsgs,
           woke: uid ? wokeRows(states, uid, since, n).map(wire) : [],
           roomLabel: n.roomLabel,
+          roomByHash,
           chatLabel: roomShortOf(f),
           repliesOf: lx.repliesOf,
           lookup: lx.lookup,

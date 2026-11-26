@@ -37,11 +37,34 @@ export interface RoomStore {
   /** boot 对账闸的判定 (只读)。 */
   bindingGate: () => BindingGate;
   roomOfMsg: (msgId: string) => string | undefined;
+  /** 8 位 hash → room (注入头 #hash 的反查; 撞车 = undefined, 用完整 id)。 */
+  roomByHash: (hash: string) => string | undefined;
+  /** 这个 hash 是否撞了 (两个不同 room 同一 hash) —— 房头据此退回全 id。 */
+  hashAmbiguous: (hash: string) => boolean;
   /** 每个 room 的文件路径 (迁移脚本 / 测试)。 */
   fileOf: (id: string) => string;
 }
 
 export const roomFile = (dir: string, id: string): string => join(dir, encodeURIComponent(id) + ".jsonl");
+
+/** 参数形如 `#hash8` (可省 #) 的 room 简写 → 全 id; 不是这个形状 = undefined (调用方继续按
+ *  全 id / 聊天名认); 撞车 = 明确报错, 绝不猜是哪一个。 */
+export const resolveHashRef = (store: Pick<RoomStore, "roomByHash" | "hashAmbiguous">, ref: string): { room: string } | { error: string } | undefined => {
+  const m = /^#?([0-9a-f]{8})$/.exec((ref ?? "").trim());
+  if (!m) return undefined;
+  const hash = m[1]!;
+  if (store.hashAmbiguous(hash)) return { error: "hash 歧义 (两个 room 同 hash), 请用完整 room id: " + hash };
+  const room = store.roomByHash(hash);
+  return room ? { room } : undefined;
+};
+
+/** 往 hash 索引里放一个 room。同 hash 落到第二个不同 id = 撞车: 记进 collided, 反查一律
+ *  让调用方退完整 id —— 静默覆盖会让 #hash 指到另一个 room 的账本去。 */
+export const indexRoomHash = (byHash: Map<string, string>, collided: Set<string>, hash: string, id: string): void => {
+  const prev = byHash.get(hash);
+  if (prev && prev !== id) { collided.add(hash); return; }
+  byHash.set(hash, id);
+};
 
 /** 解析一份账本文本: 尾部撕裂行丢弃, 中段坏行抛错。 */
 export const parseJournal = (id: string, raw: string): RoomOp[] => {
@@ -64,9 +87,10 @@ export const openRoomStore = (dir: string): RoomStore => {
   const cache = new Map<string, RoomState>();
   const broken = new Map<string, string>();
   const byHash = new Map<string, string>();
+  const collided = new Set<string>();
   const fileOf = (id: string): string => roomFile(dir, id);
   const ids = (): string[] => readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => decodeURIComponent(f.slice(0, -6)));
-  for (const id of ids()) byHash.set(roomHash(id), id);
+  for (const id of ids()) indexRoomHash(byHash, collided, roomHash(id), id);
 
   // ── boot 绑定索引 + 对账闸 (§3.2) ────────────────────────────────────
   // 同一批账本走两路推导, 必须逐笔对上: ① 行上自称的容器 (op.room) 按目录序应用成索引;
@@ -120,7 +144,7 @@ export const openRoomStore = (dir: string): RoomStore => {
     try {
       const st = parseJournal(id, readFileSync(f, "utf8")).reduce(applyOp, emptyRoom(id));
       cache.set(id, st);
-      byHash.set(roomHash(id), id);
+      indexRoomHash(byHash, collided, roomHash(id), id);
       return st;
     } catch (e) {
       const reason = e instanceof RoomBroken ? e.message : String(e);
@@ -158,7 +182,7 @@ export const openRoomStore = (dir: string): RoomStore => {
       else if (o.op === "unbind") { if (bindIndex.get(o.source)?.room === id) bindIndex.delete(o.source); }
     }
     cache.set(id, st);
-    byHash.set(roomHash(id), id);
+    indexRoomHash(byHash, collided, roomHash(id), id);
     return st;
   };
 
@@ -172,8 +196,10 @@ export const openRoomStore = (dir: string): RoomStore => {
     bindingGate: () => gate,
     roomOfMsg: (msgId) => {
       const p = parseMsgId(msgId);
-      return p ? byHash.get(p.hash) : undefined;
+      return p && !collided.has(p.hash) ? byHash.get(p.hash) : undefined;
     },
+    roomByHash: (hash) => (collided.has(hash) ? undefined : byHash.get(hash)),
+    hashAmbiguous: (hash) => collided.has(hash),
     fileOf,
   };
 };

@@ -83,6 +83,18 @@ export const parseMsgId = (id: string): { hash: string; seq: number } | undefine
   return m ? { hash: m[1]!, seq: Number(m[2]) } : undefined;
 };
 
+/** 注入头里的出站等级标记 (一个字): 群 / 单 = 绑定企微出站, 私 / 临 = 只在 rolepage 里。 */
+export const ROOM_MARKS = ["群", "单", "私", "临"] as const;
+export type RoomMark = (typeof ROOM_MARKS)[number];
+export const isRoomMark = (s: string | undefined): s is RoomMark => !!s && (ROOM_MARKS as readonly string[]).includes(s);
+export const roomMark = (room: string): RoomMark =>
+  room.startsWith("dm:") ? "私"
+  : room.startsWith("adhoc:") ? "临"
+  : room.startsWith("user:") || room.startsWith("me:") ? "单"
+  : "群";
+/** 标记 → 这一行真的进不进企微 (与 isBoundRoom 同口径, 但读的是注入头里的标记)。 */
+export const markIsBound = (m: RoomMark): boolean => m === "群" || m === "单";
+
 // ── 账本行 ─────────────────────────────────────────────────────────────
 
 export type JoinVia = "founder" | "invite" | "approve" | "mention" | "spawn" | "transfer" | "inbound" | "migrate";

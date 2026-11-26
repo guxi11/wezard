@@ -34,8 +34,12 @@ export interface InjectLine {
 export interface InjectBlock {
   /** 注入当时的 room 显示名 (【】里那一段)。 */
   label: string;
-  /** room id (圆括号里那一段)。 */
-  room: string;
+  /** room id —— 只有旧格式 (`【label】(roomId)`) 有; 新格式 (`【label】#hash8 标记`) 用 roomHash。 */
+  room?: string;
+  /** 新格式房头里的 8 位 room hash (反查 room 由调用方做, 这里保持纯函数)。 */
+  roomHash?: string;
+  /** 新格式房头里的出站等级标记: 群 / 单 / 私 / 临。 */
+  mark?: string;
   /** 头一行后缀里的提醒 (上次投递不确定 / 更早还有 N 条)。 */
   notes: string[];
   lines: InjectLine[];
@@ -45,7 +49,16 @@ export interface InjectBlock {
   raw: string;
 }
 
-const HEAD_RE = /^【([^】\n]*)】\(([^)\n]*)\)([^\n]*)$/;
+// 两种房头都要认: 新 `【label】#hash8 标记` (缺省格式), 旧 `【label】(roomId)` (存量转录回放)。
+const HEAD_NEW_RE = /^【([^】\n]*)】#([0-9a-f]{8})(?: ([^\s·]+))?([^\n]*)$/;
+const HEAD_OLD_RE = /^【([^】\n]*)】\(([^)\n]*)\)([^\n]*)$/;
+const HEAD_RE = { test: (l: string): boolean => HEAD_NEW_RE.test(l) || HEAD_OLD_RE.test(l) };
+const headOf = (line: string): { label: string; room?: string; roomHash?: string; mark?: string; suffix: string } | undefined => {
+  const n = HEAD_NEW_RE.exec(line);
+  if (n) return { label: n[1]!.trim(), roomHash: n[2]!, ...(n[3] ? { mark: n[3] } : {}), suffix: n[4]! };
+  const o = HEAD_OLD_RE.exec(line);
+  return o ? { label: o[1]!.trim(), room: o[2]!.trim(), suffix: o[3]! } : undefined;
+};
 const OWE_RE = /^你要交代:\s*(.*)$/;
 const STATUSES = new Set(["done", "passed", "canceled", "need", "progress", "error", "timeout"]);
 
@@ -80,6 +93,10 @@ const parseLine = (line: string): InjectLine | undefined => {
   };
 };
 
+/** 一个注入块的 room 全 id: 旧格式直接有; 新格式只有 hash, 反查由调用方注入 (shared 保持纯)。 */
+export const blockRoom = (b: InjectBlock, roomOfHash?: (hash: string) => string | undefined): string =>
+  b.room ?? (b.roomHash ? roomOfHash?.(b.roomHash) ?? "" : "");
+
 const oweOf = (line: string): string[] | undefined => {
   const m = line.match(OWE_RE);
   if (!m) return undefined;
@@ -97,10 +114,11 @@ export const parseInjection = (raw: string): InjectBlock[] | undefined => {
     const from = heads[h]!;
     const to = heads[h + 1] ?? lines.length;
     const own = lines.slice(from, to);
-    const m = own[0]!.match(HEAD_RE)!;
+    const hd = headOf(own[0]!)!;
     const block: InjectBlock = {
-      label: m[1]!.trim(), room: m[2]!.trim(), notes: notesOf(m[3]!),
-      lines: [], owe: [], raw: own.join("\n").trimEnd(),
+      label: hd.label, ...(hd.room !== undefined ? { room: hd.room } : {}),
+      ...(hd.roomHash ? { roomHash: hd.roomHash } : {}), ...(hd.mark ? { mark: hd.mark } : {}),
+      notes: notesOf(hd.suffix), lines: [], owe: [], raw: own.join("\n").trimEnd(),
     };
     for (const l of own.slice(1)) {
       if (!l.trim()) continue;
@@ -123,10 +141,17 @@ const isHumanAuthor = (author: string): boolean =>
  *  根本没有交代行 (room_watch 订阅者没有 duty) 才回落到全部行里最后一条人话。没有人话行 = undefined。
  *  作者认形状: 行里 wizard 写作 `.名字`、daemon 写作 `wezard`, 其余就是人 (nameOf 对人渲染 userid)。
  *  人话信封删了之后, 重载接回这一轮的出处只剩这一处 —— 与 parseInjection 读同一个唤醒头 / 行头。 */
-export const humanOpening = (raw: string): { room: string; speaker: string } | undefined => {
+export const humanOpening = (raw: string): { room: string; roomHash?: string; mark?: string; speaker: string } | undefined => {
   const blocks = parseInjection(raw) ?? [];
-  const lines = blocks.flatMap((b) => b.lines.map((l) => ({ room: b.room, line: l, owed: b.owe.includes(l.id) })));
+  const lines = blocks.flatMap((b) => b.lines.map((l) => ({ block: b, line: l, owed: b.owe.includes(l.id) })));
   const pool = lines.some((x) => x.owed) ? lines.filter((x) => x.owed) : lines;
   const hit = pool.filter((x) => isHumanAuthor(x.line.author)).at(-1);
-  return hit ? { room: hit.room, speaker: hit.line.author } : undefined;
+  if (!hit) return undefined;
+  const b = hit.block;
+  // 新格式只有 hash (反查在调用方, 见 daemon/turn-opening); 旧格式还是全 id。
+  return {
+    room: b.room ?? "#" + (b.roomHash ?? ""),
+    ...(b.roomHash ? { roomHash: b.roomHash } : {}), ...(b.mark ? { mark: b.mark } : {}),
+    speaker: hit.line.author,
+  };
 };

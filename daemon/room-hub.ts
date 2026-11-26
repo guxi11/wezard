@@ -16,7 +16,7 @@ import type { Logger } from "pino";
 import {
   DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, hasMonitor, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
   renderMsgLine, replyHintDue, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
-  isDirectParent,
+  isDirectParent, roomHash, roomMark,
 } from "../shared/room.js";
 import type { WakeTail } from "./notices.js";
 import type { RoomStore } from "./rooms.js";
@@ -245,7 +245,10 @@ export const createRoomHub = (p: HubPorts) => {
       const s = state(room)!;
       const u = unreadFor(s, who, triggers.map((t) => t.id));
       const label = p.roomLabel(room);
-      const head = "【" + label + "】(" + room + ")" + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
+      // 房头: 默认 #hash8 + 一个字标记 (群 / 单 / 私 / 临) —— 全 id 47 字符太贵; 只在 hash 撞车时
+      // 退回全 id (反查、寻址、账本一律仍用全 id, 这里只是渲染)。
+      const ref = p.store.hashAmbiguous(roomHash(room)) ? "(" + room + ")" : "#" + roomHash(room) + " " + roomMark(room);
+      const head = "【" + label + "】" + ref + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
       const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500));
       const held = openDuties(s).filter((d) => sameWho(holderOf(s, d), who));
       const owe = held.filter((d) => triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));

@@ -2583,6 +2583,8 @@ export interface MirrorDeps {
   /** 身份级工作区 (新群引导给管家落的 workspace; "" = 没记)。newSession 在这个 target 还没有
    *  任何会话 / 绑定记录时用它, 压过聊天兜底与 cfg.wrc.cwd —— 哪条入口起的首个会话都一样。 */
   identityWorkspace?: (target: string) => string;
+  /** 注入头 #hash8 → room 全 id (reload 接回一轮的频道; room 块创建晚于 bridge, 用惰性口)。 */
+  roomOfHash?: (hash: string) => string | undefined;
   sendFrozen?: (channel: string, content: string, stream?: { frame: WsFrameHeaders; id: string }) => Promise<unknown>;
 }
 
@@ -3935,7 +3937,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const openingOf = (a: AttachState): { channel: string; speaker?: string; from?: TurnFrom; query: string } | undefined => {
     const t = a.jsonlPath ? lastUserTurn(a.jsonlPath, a.openingOffset) : undefined;
     a.activeEventId = t?.env?.eventId;
-    return turnOpening(t, baseOfKey(a.target), (name) => wizardStore()?.byName(stripSigil(name))?.target);
+    return turnOpening(t, baseOfKey(a.target), (name) => wizardStore()?.byName(stripSigil(name))?.target, deps.roomOfHash);
   };
 
   /** 频道印章: 有新印章就换频道; 没有则 `reset` (CLI 手敲 / 人从聊天发起) 回到

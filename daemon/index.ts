@@ -50,7 +50,7 @@ import {
   makeClaimResetHandler,
 } from "./claim.js";
 import { errText, installResponseTracker } from "./last-response.js";
-import { BindGateClosed, openRoomStore } from "./rooms.js";
+import { BindGateClosed, openRoomStore, resolveHashRef } from "./rooms.js";
 import { bindCandidates, planBind, planChannelBackfill, planFork, planUnbind, pendingFirstTouches, sourceRoomOf } from "./room-bind.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { repairStewardInstances, unspawnedStewards } from "./steward-repair.js";
@@ -299,6 +299,8 @@ const main = async (): Promise<void> => {
   let ensureRoom: ((room: string, routed: string) => string) | undefined;
   /** mirror 轮终回调 (bridge 创建早于 room 块, 这里先挂口)。 */
   let roomTurnEnd: (target: string) => void = () => undefined;
+  /** 注入头 #hash8 → room 全 id (mirror 的 turn-opening 回读用; room 块里回填)。 */
+  let roomOfHashHook: (hash: string) => string | undefined = () => undefined;
   /** room 泵注入成功的 touch (看门狗活动时钟; 同上, room 块里回填)。 */
   let roomActivityTouch: (target: string) => void = () => undefined;
   /** 新群引导在 room 模型里的两个接线点 (见 inbound.ts InboundOpts): room 块里回填 —— 只有它持有 hub。 */
@@ -309,7 +311,7 @@ const main = async (): Promise<void> => {
   /** 引导在途状态 (onboarding.json): inbound 与 /onboarding/bind 共用这一份, 不各读各的盘。 */
   const onboarding = loadOnboardingStore(cfg);
 
-  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, identityWorkspace: (t) => identityWorkspaceOf(wizardStore(), t), sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream),
+  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, identityWorkspace: (t) => identityWorkspaceOf(wizardStore(), t), roomOfHash: (h) => roomOfHashHook(h), sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream),
     // 轮终事件 (wiring C): mirror tail 的非 soft turn_end → room 的 F-1 轮界。
     onTurnEnd: (target) => { roomTurnEnd(target); } });
   // 群里每个 `.name` 都挂它的 rolepage (见 session-label 的 TagLinker)。正文提及
@@ -1226,6 +1228,7 @@ const main = async (): Promise<void> => {
     // 事件表这一步还并行活着 (B/C 节再拆), 这里只把新面接上。
     const roomsDir = roomsDirOf(cfg.daemon.stateDir);
     const roomStore = openRoomStore(roomsDir);
+    roomOfHashHook = (h) => roomStore.roomByHash(h);
     /** 损坏的 room 文件 (RoomBroken) 不挡 boot, 也不参与任何判定 —— 只记一行。 */
     const roomState = (id: string): RoomState | undefined => {
       try { return roomStore.get(id); } catch (e) { log.warn({ mod: "room", room: id, err: errText(e) }, "room: 账本损坏, 跳过"); return undefined; }
@@ -1614,11 +1617,14 @@ const main = async (): Promise<void> => {
       const uid = wizards.get(target)?.uid;
       return uid ? { kind: "wizard", id: uid } : undefined;
     };
-    /** room 参数: room id 原样, 或聊天名 (chatBaseOf)。 */
+    /** room 参数: room id 原样, 或聊天名 (chatBaseOf), 或注入头里的 #hash8 (可省 #)。 */
     const roomResolve = (ref: string | undefined): { room?: string; error?: string } => {
       const raw = (ref ?? "").trim();
       if (!raw) return {};
       if (roomState(raw)) return { room: raw };
+      // #hash8: 注入头 / 消息 id 前缀的简写。撞车 = 有歧义, 不猜。
+      const byHash = resolveHashRef(roomStore, raw);
+      if (byHash) return "room" in byHash ? byHash : { error: byHash.error };
       const base = chatBaseOf(cfg, raw);
       if (base && base !== raw && roomState(base)) return { room: base };
       return { error: "认不出这个 room: " + raw };

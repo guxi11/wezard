@@ -12,7 +12,7 @@
 import { escHtml, hashStr, renderCutMark, renderTurnGroup, splitReminders, turnUsageChips, type HandoffDeco, type HandoffStatus, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { parseInjection } from "./inject-view.js";
+import { blockRoom, parseInjection } from "./inject-view.js";
 import { allMessages, inSpan, marksOf, SYSTEM, teammateOf, unwrapMates, type Directory, type Msg, type SessionSpan } from "./role-view.js";
 import type { MemberNote, RoomMsg } from "./room-view.js";
 import { whoKey, type MsgRow, type Who } from "./room.js";
@@ -115,8 +115,8 @@ export const renderTurnBox = (r: TurnDetailRecord, records: readonly DetailRecor
 
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 
-/** room 注入的头一行: 【room 名】(room id) —— 这一轮是被账本行唤醒的。 */
-const INJECTION_HEAD = /^【[^\n]*】\([^)\n]*\)/;
+/** room 注入的头一行 —— 这一轮是被账本行唤醒的。两种形状: 新 `【名】#hash8 标记`, 旧 `【名】(room id)`。 */
+const INJECTION_HEAD = /^【[^\n]*】(?:#[0-9a-f]{8}(?: [^\s·]+)?|\([^)\n]*\))/;
 export const isInjection = (r: TurnDetailRecord): boolean => INJECTION_HEAD.test((r.userQuery ?? "").trimStart());
 
 /** 一轮的话分两种: 写进账本的 (气泡, 客户端按账本行画) 与 CLI 原话 (标 aside, 收进过程框)。
@@ -196,6 +196,8 @@ export const withNotes = (rows: readonly StreamRow[], notes: readonly StreamRow[
 export interface StreamQuery extends DecoQuery {
   /** 频道 base → 显示名 (与账本行同一个口径)。 */
   roomLabel?: (base: string) => string;
+  /** 注入头 #hash8 → room 全 id (新格式房头只有 hash; 不给 = 认不出, 退回块头里的显示名)。 */
+  roomByHash?: (hash: string) => string | undefined;
   /** 视角 role 的一段 session (切换会话时只看这一段)。 */
   span?: SessionSpan;
   /** 该 role 的账本行 (W-1 / W-2 已由调用方选好, 已过 wireMsg)。 */
@@ -256,7 +258,7 @@ export const wizardStream = (
       const fromLabel = named ? dir.labelOf(from) : /^human:/.test(from) ? "👤" : SYSTEM === from ? "🧙" : "👤";
       // 收件人 = 这一轮真正的主人 (turn.target), 不被身份折叠后的页 id 带偏。
       const to = m.turn.target ?? m.to;
-      const room = led?.room ?? b.room;
+      const room = led?.room ?? blockRoom(b, q.roomByHash);
       const re = led?.re ?? ln.re;
       const status = led?.status ?? ln.status;
       // 账本全文也要过 splitInline: reminder 折成标签 (rems), 不让信封原文进气泡。
@@ -295,7 +297,7 @@ export const wizardStream = (
     // 一次只带一个 room 块的注入: 这一轮真正发生在那 个 room 里 —— 轮的 channel 是投递时的
     // 兜底 (home 群), 拿它当头部会把 dm 里说的话挂到群里。
     const blocks = isInjection(r) ? parseInjection(r.userQuery ?? "") : undefined;
-    const injRoom = blocks?.length === 1 ? blocks[0]!.room : undefined;
+    const injRoom = blocks?.length === 1 ? blockRoom(blocks[0]!, q.roomByHash) : undefined;
     const era = r.createdAt >= roomFrom || isInjection(r);
     const spoken = spokenTurn(r, said, era);
     const live = !r.closed;

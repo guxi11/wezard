@@ -8,7 +8,7 @@
 //     唤醒里没有人话行 (同伴 / 回执 / 定时的 room 行) = undefined, 调用方回落到最近一轮的印章。
 import type { TurnFrom } from "../shared/detail-store.js";
 import { humanOpening } from "../shared/inject-view.js";
-import { isBoundRoom } from "../shared/room.js";
+import { isBoundRoom, isRoomMark, markIsBound } from "../shared/room.js";
 import type { Turn } from "./peers.js";
 
 export interface TurnOpening { channel: string; speaker?: string; from?: TurnFrom; query: string }
@@ -18,12 +18,17 @@ const rowOf = (env: { kind: string; receipt?: boolean; event?: string }): string
   env.receipt || env.kind === "task" ? env.event : undefined;
 
 /** `home` = 接话 wizard 的 home 群 (baseOfKey); `peerTarget` = 同伴名 → target (老同伴信封用)。 */
-export const turnOpening = (t: Turn | undefined, home: string, peerTarget: (name: string) => string | undefined): TurnOpening | undefined => {
+export const turnOpening = (t: Turn | undefined, home: string, peerTarget: (name: string) => string | undefined,
+  roomOfHash?: (hash: string) => string | undefined): TurnOpening | undefined => {
   const env = t?.env;
   if (!t) return undefined;
   if (!env) {
     const h = humanOpening(t.text);
-    return h ? { channel: isBoundRoom(h.room) ? h.room : "", speaker: `user:${h.speaker}`, query: t.text } : undefined;
+    if (!h) return undefined;
+    // 新格式房头只有 #hash8 + 标记: 标记定 bound (群 / 单), hash 反查全 id 作频道; 旧格式照旧看 id。
+    const bound = isRoomMark(h.mark) ? markIsBound(h.mark) : isBoundRoom(h.room);
+    const room = h.roomHash ? (roomOfHash?.(h.roomHash) ?? "") : h.room;
+    return { channel: bound ? room : "", speaker: `user:${h.speaker}`, query: t.text };
   }
   const handed = false; // transfer 语义已随路由表退役
   const from: TurnFrom | undefined =
