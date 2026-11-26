@@ -69,7 +69,10 @@ const NAMES = { nameOf: (w: Who) => (w.kind === "wizard" ? "." + w.id : w.id), r
 {
   const R = "chat:wrG", h = roomHash(R);
   assert.deepEqual(expandMsgRef("120", [R]), { id: h + ".120" }, "单 room: 补成全 id");
-  assert.deepEqual(expandMsgRef("120", []), { id: "120" }, "没有本轮唤醒信息: 原样 (交原解析报不认识)");
+  const none = expandMsgRef("120", []);
+  assert.ok(none.error && none.error.includes("#hash8"), "0 room (刚 reload): 给可行动报错, 教模型拿块头 hash 拼全形: " + none.error);
+  assert.deepEqual(expandMsgRef(H + ".120", []), { id: H + ".120" }, "0 room 但已是全形: 照旧直通");
+  assert.deepEqual(expandMsgRef("乱七八糟", []), { id: "乱七八糟" }, "0 room 的垃圾 id: 原样穿透 (交原解析报不认识)");
   const amb = expandMsgRef("120", [R, "chat:wrH"]);
   assert.ok(amb.error && amb.error.includes("请用完整 id (hash8.seq)"), "多 room: 明确报歧义: " + amb.error);
   assert.deepEqual(expandMsgRef(h + ".120", [R, "chat:wrH"]), { id: h + ".120" }, "全形永远直通 (跨 room 也行)");
