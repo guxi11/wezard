@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-11-26
+
+### Fixed
+- **引导会话 (#guide / #guide-N) 落到 CLI 自己的默认模型, 比 router 那档重得多** — `stewardTierOf` 把引导系 slot (含占位退到 `#guide-2` …) 与群管家、内建记忆整理执行体同列: 首建 / `/new` / 死 pane 冷恢复一律吃 `models.router`, 显式 model 与记录值都不覆盖。引导**不算管家** —— `wakeTailPorts.isSteward` 把它排除在外, 唤醒注入不再带管家提示。名字里只是含 guide 的普通 slot (`guidebook` / `guide-x`) 不受影响。测试 `tests/steward-model.test.ts` / `tests/steward-creation.test.ts`。
+
 ## [3.0.2] - 2026-11-26
 
 ### Added
@@ -1627,7 +1632,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v3.0.2...HEAD
+[3.0.3]: https://github.com/guxi11/wezard/compare/v3.0.2...v3.0.3
 [3.0.2]: https://github.com/guxi11/wezard/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/guxi11/wezard/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/guxi11/wezard/compare/v2.9.0...v3.0.0
