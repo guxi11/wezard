@@ -44,6 +44,7 @@ assert.equal(pasted.length, 1, "闲了投进去");
 // 投进去后没交代就要结束 → 拦一次; 再停仍没交代 → 放行 + 系统行 (只一条)
 const r1 = hub.onStop(A);
 assert.ok(r1.block?.includes(q.row.id) && /chat_reply/.test(r1.block), "拦住并点名: " + r1.block);
+assert.ok(/有新事实 .*才 status:"progress"/.test(r1.block ?? "") && /status:"need" 点名对方/.test(r1.block ?? "") && !/还在做就/.test(r1.block ?? ""), "STOP_TEXT: progress 只给新事实, 等人 / 同伴用 need, 没有「还在做就 progress」");
 assert.equal(sys(q.row.id).length, 0, "拦的那一下不告状");
 assert.deepEqual(hub.onStop(A), {}, "同一条 duty 只拦一次 —— 不会无限 block");
 assert.equal(sys(q.row.id).length, 1, "拦过仍没交代 → 系统行");

@@ -22,6 +22,7 @@ import type { WakeTail } from "./notices.js";
 import type { RoomStore } from "./rooms.js";
 import type { DeliveryBatch, ShortIdLog } from "./short-id-log.js";
 import { sleep } from "../shared/std.js";
+import { STATUS_GUIDE } from "../shared/room-overdue.js";
 
 /** gone = 目标没有任何会话绑定 (stop_wizard end / /kill 丢掉了它): 重试也贴不进去, 要有人重生或改派。 */
 export type PasteResult = "ok" | "uncertain" | "failed" | "gone";
@@ -75,7 +76,7 @@ export const REMIND_TEXT = (ids: readonly string[]): string =>
 
 /** Stop hook 拦截时给模型的话 (同一轮里接着做, 不是新的一轮)。 */
 export const STOP_TEXT = (ids: readonly string[]): string =>
-  "[wezard] 结束这一轮之前: 唤醒你的 " + ids.join(", ") + " 还没交代 —— 终句不会送到任何人那里。现在用 chat_reply({re, text, status}) 交代 (还在做就 status:\"progress\", 要对方补信息就 \"need\"; 不需要答就 chat_reply({re}) 记 passed), 然后再结束。";
+  "[wezard] 结束这一轮之前: 唤醒你的 " + ids.join(", ") + " 还没交代 —— 终句不会送到任何人那里。现在用 chat_reply({re, text, status}) 交代 (" + STATUS_GUIDE + "; 不需要答就 chat_reply({re}) 记 passed), 然后再结束。";
 
 export const createRoomHub = (p: HubPorts) => {
   const now = (): number => p.now?.() ?? Date.now();
@@ -495,12 +496,17 @@ export const createRoomHub = (p: HubPorts) => {
 
   /** 派活工具缺省的 `for` (血缘): 本轮唤醒它、且仍由它持有未关的那一条 duty 的 msg id。
    *  「唤醒」= 本轮贴进来的行里有这条 duty 的 msg, 或有一条 re 指向它的 trigger (overdue-remind / after 补唤醒);
+   *  **传递**: 本轮唤醒它的是它所派子件 C 的 reply (C 的 author 是它、C.for = D), 而 D 仍由它持有且开着 —— D 也算
+   *  (lead 在子件 reply 唤醒的那一轮再派活, 这一轮本身没有它自己的 duty 被点名, 血缘全靠这条传递);
    *  恰好一条才返回, 零条 / 多条 → undefined —— 多条有歧义, 不猜。 */
   const defaultFor = (uid: string): string | undefined => {
     const t = turns.get(uid);
     if (!t?.msgs.size) return undefined;
     const who: Who = { kind: "wizard", id: uid };
     const ids = new Set<string>();
+    const stateOfMsg = (msg: string): RoomState | undefined => {
+      try { const room = p.store.roomOfMsg(msg); return room ? state(room) : undefined; } catch { return undefined; }
+    };
     for (const room of t.rooms) {
       let s: RoomState | undefined;
       try { s = state(room); } catch { continue; }
@@ -513,23 +519,43 @@ export const createRoomHub = (p: HubPorts) => {
         .filter((d) => d.kind !== "join-req" && sameWho(holderOf(s!, d), who) && woke(d.msg))
         .forEach((d) => ids.add(d.msg));
     }
+    // 传递: 本轮贴进来的 reply → 它答的子件 C (我派的) → C.for = D (我持有且开着)。
+    for (const id of t.msgs) {
+      const reply = stateOfMsg(id)?.byId.get(id);
+      if (reply?.kind !== "reply") continue;
+      for (const cid of reply.re ?? []) {
+        const child = stateOfMsg(cid)?.byId.get(cid);
+        if (!child?.for || !sameWho(child.author, who)) continue;
+        const ds = stateOfMsg(child.for);
+        if (ds && openDuties(ds).some((d) => d.msg === child.for && d.kind !== "join-req" && sameWho(holderOf(ds, d), who))) ids.add(child.for);
+      }
+    }
     return ids.size === 1 ? [...ids][0] : undefined;
   };
 
-  /** 派活工具的 for: 显式给的那条必须仍是**开着的** duty 才算血缘 —— 关掉的 / 写错的 id 挂不上
-   *  任何下游 (buildOpenChildDuties / buildDescendantActivity 都按 msg id 索引), 结果就是子件在干活、
-   *  上游却在自己名下被反复催; 这种 for 当没给, 回落到 defaultFor。 */
-  const resolveFor = (uid: string, explicit?: string): string | undefined => {
+  /** 派活工具的 for 是「你在为哪条**你持有的** duty 派活」: 显式给的那条必须是调用者自己持有、仍开着的 duty 才算血缘。
+   *  关掉的 / 写错的 id 挂不上任何下游 (buildOpenChildDuties / buildDescendantActivity 都按 msg id 索引);
+   *  指向「自己问出去的件」(线程语义: 模型把 for 当 re 用) 更糟 —— 子件在干活、上游却被反复催。
+   *  这两种都当没给, 回落到 defaultFor, 并带一句 note 让回包告诉模型。 */
+  const resolveForEx = (uid: string, explicit?: string): { for?: string; note?: string } => {
     const want = shortToFull(uid, (explicit ?? "").toString().trim());
-    if (!want) return defaultFor(uid);
+    if (!want) return { for: defaultFor(uid) };
+    const who: Who = { kind: "wizard", id: uid };
     const room = p.store.roomOfMsg(want);
     const s = room ? state(room) : undefined;
-    if (s && openDuties(s).some((d) => d.msg === want)) return want;
-    p.log?.info({ uid, for: want }, "room: 显式 for 指向的 duty 已不在开着, 按本轮唤醒重算血缘");
-    return defaultFor(uid);
+    const open = s ? openDuties(s).filter((d) => d.msg === want && d.kind !== "join-req") : [];
+    if (open.some((d) => sameWho(holderOf(s!, d), who))) return { for: want };
+    const fallback = defaultFor(uid);
+    const thread = open.some((d) => sameWho(d.asker, who));
+    p.log?.info({ uid, for: want, thread }, "room: 显式 for 不是调用者持有的开着的 duty, 按本轮唤醒重算血缘");
+    return {
+      ...(fallback ? { for: fallback } : {}),
+      note: `for=${want} ${thread ? "是你自己问出去的件" : open.length ? "不在你名下" : "已关账或不存在"} —— for 写「你在为哪条你持有的 duty 派活」, 已${fallback ? "改挂 " + fallback : "忽略 (没有唯一的本轮 duty 可挂)"}`,
+    };
   };
+  const resolveFor = (uid: string, explicit?: string): string | undefined => resolveForEx(uid, explicit).for;
 
-  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, pending, isBoundRoom, reconcileAfter, turnRooms, msgRoomsOfSeq };
+  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, resolveForEx, pending, isBoundRoom, reconcileAfter, turnRooms, msgRoomsOfSeq };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

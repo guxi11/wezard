@@ -429,6 +429,8 @@ export const ConfigSchema = z.object({
     overdue: z.object({
       remindMin: z.number().int().min(0).default(60).describe("duty 距最后一次活动超过这么多分钟仍未关: daemon 提醒处理人一次 (它必须交代); 0 = 关这一级"),
       groupMin: z.number().int().min(0).default(120).describe("超过这么多分钟仍无动静: 在 duty 所在 room 记一行, 非绑定 room 再通知处理人 (退到提问者) 的 home 群让人看见; 0 = 关这一级"),
+      backoff: z.number().min(1).default(2).describe("提醒退避倍数: 同一条 duty 自上一条非 progress 实质行以来, 每催一次只换来 progress, 下一次提醒的间隔 = remindMin × backoff^已催次数 (60→120→240); 1 = 不退避"),
+      maxReminds: z.number().int().min(0).default(2).describe("连续催了这么多次仍只换来 progress 后, 不再唤醒处理人, 改在 room 记一次「球可能不在 .X 手里」(非绑定 room 同样转 home 群); 0 = 不设上限"),
     }).default({}).describe("duty 逾期两级提醒 (每次看门狗间隔现读; 不自动 canceled)"),
     replyHint: z.object({
       window: z.number().int().min(0).default(10).describe("唤醒文本里「你要交代: <id> (…)」后面那半句用法提示 (「—— 用 chat_reply({re, text, status}) 交代。」) 的节流窗口, 单位 = 该 wizard 最近成功投递的唤醒批次数 (跨 room 同批算一次): 窗口内它写过任何 chat_reply 就不再附; 批次不足该数 (新 wizard) 或窗口内没写过就附; 0 = 每次都附。id 短形始终保留; 不影响轮终 / Stop hook 的欠账提醒"),

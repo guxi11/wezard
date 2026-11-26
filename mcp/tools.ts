@@ -148,7 +148,7 @@ const INTERRUPT_DOC =
   "true = 先 Esc 打断对方当前这一轮再投本条 (不拆 pane)。限权: 只有对方的直属 parent、本 room 的 host、或人能用, 其余 403; 计入本 room 的回合预算 (10 分钟 20 次), 超了 409。被打断那一轮的 duty 不关 —— 它下次被唤醒时按游标重投, 只是那一轮白付。";
 
 const FOR_DOC =
-  "这件活为你欠着的**哪一笔**派的: 写提问方的名字, 或那条消息的 id。只作血缘记录, 不参与关账 (完成只认 status); 缺省 = 本轮唤醒你的那一条, 通常不用给。";
+  "你在为哪条**你持有的** duty 派这件活: 写那条 duty 的消息 id (不是你自己问出去的件, 不是线程回指)。只作血缘记录, 不参与关账 (完成只认 status); 它让子件的动静算作这条 duty 的活动、并让提醒先落在子件上。缺省 = 本轮唤醒你的那一条 (子件 reply 唤醒你时是它所属的那一条), 通常不用给; 写了不是你持有的开着的 duty 会被忽略并在回包 forNote 里说明。";
 
 const STATUS_DOC =
   "done = 做完了 · passed = 无需答复 · canceled = 不做了 (这三者关账) · need = 反问, 等提问方补信息 (提问方是人时, 在人名下开一条 duty, 人回话会叫醒你) · progress = 中间进展 (后两者不关账)。";
@@ -411,7 +411,7 @@ export const createWezardServer = (): McpServer => {
       title: "Close (or field) a duty — the only completion signal",
       description:
         "答一条或多条 duty。room 由 `re` 定 —— 消息 id 全机唯一, 自带 room, 不用给。status: " + STATUS_DOC +
-        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问用 need, 长活中间报一句用 progress。绑定 room 里同伴说的话人已经看见 —— 关账只补人还不知道的 (commit / 取舍 / 下一步), 别把同伴说过的结论再复述一遍; dm / adhoc 里人看不见, 结论要带回主 room。**频道 room 里 re 到一条评论 = 评论回原帖下面** (要新开一帖用 chat_say); 帖子 room 里一律评论回根帖。",
+        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问 / 等人用 need; progress 只在有新事实 (commit / 产物 / 结论) 时用, 没新事实别报。绑定 room 里同伴说的话人已经看见 —— 关账只补人还不知道的 (commit / 取舍 / 下一步), 别把同伴说过的结论再复述一遍; dm / adhoc 里人看不见, 结论要带回主 room。**频道 room 里 re 到一条评论 = 评论回原帖下面** (要新开一帖用 chat_say); 帖子 room 里一律评论回根帖。",
       inputSchema: currentAddressSchema({
         re: z.union([z.string(), z.array(z.string())]).describe("要答的那些消息 id (信封 / 注入的未读行头部的 `[<id>]`)。"),
         text: z.string().optional().describe("答复正文; 不给 (且你是处理人) = passed。"),
@@ -946,7 +946,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Who could take this task",
       description:
-        "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 delegate，同一验收目标的续篇用 chat_ask 的 \`for\\` 指回原活。",
+        "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 delegate，同一验收目标的续篇直接 chat_ask 原来接活的那个。",
       inputSchema: {
         task: z.string().describe("这件活及验收目标, 原话或一句概括都行。文件名 / 模块名 / 函数名帮助找线索; 公共规则文件、同工作区和关键词重叠不证明是同一任务。"),
         cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),

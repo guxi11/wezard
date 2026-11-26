@@ -8,7 +8,7 @@ import { openRoomStore } from "../daemon/rooms.js";
 import { createRoomHub } from "../daemon/room-hub.js";
 import { createOverdueScan } from "../daemon/room-overdue.js";
 import { applyOp, DAEMON, type MsgRow, type Who } from "../shared/room.js";
-import { buildDescendantActivity, buildOpenChildDuties, groupSysOf, overdueDue } from "../shared/room-overdue.js";
+import { buildClosedDone, buildDescendantActivity, buildOpenChildDuties, groupSysOf, overdueDue } from "../shared/room-overdue.js";
 import { room as mkRoom, say, uid, W } from "./room-fixture.js";
 
 const MIN = 60_000;
@@ -51,7 +51,9 @@ const seen = (s: S, who: Who, seq: number): void => { applyOp(s, { op: "seen", a
   assert.deepEqual(levels(s, 999 * MIN), [], "两级都给过 (daemon 行不重置计时)");
   say(s, { author: B, kind: "reply", re: [ask.id], status: "progress", statusGiven: true, text: "在做" }, { now: 200 * MIN });
   assert.deepEqual(levels(s, 259 * MIN), [], "progress 重新计时");
-  assert.deepEqual(levels(s, 260 * MIN), ["2:remind"], "新一段空闲会再给");
+  assert.deepEqual(levels(s, 260 * MIN), [], "退避: 上次催了只换来 progress, 间隔翻倍到 120 分钟");
+  assert.deepEqual(levels(s, 319 * MIN), [], "还差 1 分钟");
+  assert.deepEqual(levels(s, 320 * MIN), ["2:remind"], "新一段空闲 (翻倍后) 会再给");
 }
 // ④ 按 holder 算: B 的 progress 不重置 C; 提醒 to 不含 C 不算给过 C
 {
@@ -362,5 +364,97 @@ assert.deepEqual(await mkScan().scan(), Z, "新实例不重复");
   say(orphan, { author: B, kind: "task", to: [C], for: ask2.id, text: "孤儿" }, { now: 1 * MIN });
   assert.equal(buildOpenChildDuties([s2, orphan])(ask2.id), true);
   assert.equal(buildOpenChildDuties([s2, orphan], (u) => u !== C.id)(ask2.id), false, "处理人不在册 → 不算拦住");
+}
+// ── P2 球在别处 (ballElsewhere) / P3 退避 + 上限 ─────────────────────────────
+const need = { kind: "reply" as const, status: "need" as const, statusGiven: true, origin: "tool" as const };
+const prog = (s: S, ask: MsgRow, at: number): void => { say(s, { author: B, kind: "reply", re: [ask.id], status: "progress", statusGiven: true, text: "在做" }, { now: at * MIN }); };
+// 对 wizard 提问者的 need: 球在提问者手里, 不催 remind; group 照旧 (防互 need 死锁); 提问者回话后球回到 holder, 照催
+{
+  const { s, ask } = mk();
+  say(s, { author: B, ...need, re: [ask.id], text: "要你补一个信息" }, { now: 5 * MIN });
+  assert.deepEqual(levels(s, 66 * MIN), [], "最后一句是 need、提问者没回 → 不催 remind");
+  assert.deepEqual(levels(s, 124 * MIN), [], "group 还没到 groupMs (距 need 120 分钟)");
+  assert.deepEqual(levels(s, 125 * MIN), ["2:group"], "group 照旧按 groupMs: 防两个 wizard 互 need 静默死锁");
+  daemonRow(s, groupSysOf(B.id), 126 * MIN, ask.id);
+  assert.deepEqual(levels(s, 999 * MIN), [], "group 给过不再给, 也始终没有 remind");
+  say(s, { author: A, kind: "say", re: [ask.id], text: "补上了" }, { now: 130 * MIN });
+  assert.deepEqual(levels(s, 189 * MIN), [], "提问者回话是活动: 重新计时");
+  assert.deepEqual(levels(s, 190 * MIN), ["2:remind"], "球回到 holder → 照催");
+}
+// 前置 after 未满足: holder 还没轮到, 不催 remind; 满足后照催
+{
+  const s = mkRoom("adhoc:x", [A, B, C]);
+  const ask1 = say(s, { author: A, kind: "ask", to: [C], text: "前置" }, { now: 0 });
+  const ask2 = say(s, { author: A, kind: "ask", to: [B], after: [ask1.id], text: "等前置" }, { now: 0 });
+  const lv = (now: number, done: boolean) => overdueDue(s, now, O, undefined, undefined, undefined, () => done).filter((h) => h.duty.msg === ask2.id).map((h) => h.level);
+  assert.deepEqual(lv(70 * MIN, false), [], "after 未满足 → 不催");
+  assert.deepEqual(lv(70 * MIN, true), ["remind"], "after 满足 → 照催");
+  assert.equal(buildClosedDone([s])(ask1.id), false);
+  say(s, { author: C, kind: "reply", re: [ask1.id], status: "done", statusGiven: true, text: "好" }, { now: 10 * MIN });
+  assert.equal(buildClosedDone([s])(ask1.id), true, "buildClosedDone 认 done 关账");
+}
+// P3 退避: 催一次只换来 progress → 间隔翻倍 (60→120→240); 到 maxReminds (2) 后不再 remind, 落一次 group (exhausted)
+{
+  const { s, ask } = mk();
+  daemonRow(s, "overdue-remind", 61 * MIN, ask.id, [B]);
+  prog(s, ask, 62);
+  assert.deepEqual(levels(s, 62 * MIN + 119 * MIN), [], "第 2 次间隔 = 60×2");
+  assert.deepEqual(levels(s, 62 * MIN + 120 * MIN), ["2:remind"]);
+  daemonRow(s, "overdue-remind", 183 * MIN, ask.id, [B]);
+  prog(s, ask, 184);
+  const hits = (now: number) => overdueDue(s, now, O);
+  assert.deepEqual(hits(184 * MIN + 239 * MIN).filter((h) => h.level === "remind"), [], "连催 2 次只换来 progress → 不再 remind (哪怕过了 240 分钟)");
+  assert.deepEqual(hits(184 * MIN + 119 * MIN), [], "group 还没到 min(groupMs, 下次间隔)");
+  const g = hits(184 * MIN + 120 * MIN);
+  assert.deepEqual(g.map((h) => h.level + ":" + h.exhausted + ":" + h.reminds), ["group:true:2"], "改落一次 group, 标 exhausted");
+  daemonRow(s, groupSysOf(B.id), 305 * MIN, ask.id);
+  prog(s, ask, 310); // 又一句 progress 把 last 往后推, 但 group 去重按锚点: 不再落第二行
+  assert.deepEqual(hits(310 * MIN + 999 * MIN), [], "到上限后只落一次 (progress 不重开)");
+  // 实质行 (提问者补充 / holder 的 need) 重置锚点: 又从 remindMin 起算
+  say(s, { author: A, kind: "say", re: [ask.id], text: "换个方向" }, { now: 400 * MIN });
+  assert.deepEqual(levels(s, 459 * MIN), []);
+  assert.deepEqual(levels(s, 460 * MIN), ["2:remind"], "锚点重置 → 第 1 次间隔 = remindMin");
+}
+// 配置: backoff 1 = 不退避; maxReminds 0 = 不设上限; backoff 3 = 60→180
+{
+  const { s, ask } = mk();
+  daemonRow(s, "overdue-remind", 61 * MIN, ask.id, [B]);
+  prog(s, ask, 62);
+  daemonRow(s, "overdue-remind", 123 * MIN, ask.id, [B]);
+  prog(s, ask, 124);
+  assert.deepEqual(levels(s, 124 * MIN + 60 * MIN, { ...O, backoff: 1, maxReminds: 0 }), ["2:remind"], "backoff 1 + maxReminds 0 = 老行为: 每次 progress 后 remindMin 再催");
+  assert.deepEqual(levels(s, 124 * MIN + 60 * MIN, { ...O, backoff: 1 }), ["2:group"], "backoff 1 但 maxReminds 2: 已催 2 次 → 不再 remind, 改落 group (min(groupMs, 下次间隔 60))");
+  assert.deepEqual(levels(s, 124 * MIN + 540 * MIN, { ...O, backoff: 3, maxReminds: 0 }), ["2:remind"], "maxReminds 0: 无上限, backoff 3 的第 3 次间隔 = 540");
+  assert.deepEqual(levels(s, 124 * MIN + 539 * MIN, { ...O, backoff: 3, maxReminds: 0 }), [], "还差 1 分钟 (60×3²=540)");
+}
+// daemon 扫描: 催满 maxReminds 次后落一行「球可能不在 .b 手里」(非绑定 room 同样转 home 群), 不唤醒
+{
+  const r = "adhoc:bk";
+  store.ensure(r, { at: 1, kind: "adhoc", by: DAEMON });
+  hub.write(r, [
+    { op: "join", at: 1, room: r, who: A, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: r, who: B, ord: 2, via: "spawn", by: A },
+  ]);
+  const k = hub.append(r, { author: A, kind: "ask", to: [B], text: "退避账" });
+  assert.ok(k.ok);
+  const kid = k.ok ? k.row.id : "";
+  const sc = mkScan({ remindMin: 3 });
+  let pn = 0; // 同作者同正文会被 judge 判重, 每句不同
+  const progress = () => hub.append(r, { author: B, kind: "reply", re: [kid], status: "progress", statusGiven: true, text: "做着 " + ++pn });
+  const homeBefore = store.get("chat:wrG")!.msgs.filter((m) => m.sys === "overdue-group").length;
+  clock += 3 * MIN; assert.equal((await sc.scan()).remind, 1, "第 1 次: remindMin");
+  progress(); clock += 5 * MIN; assert.equal((await sc.scan()).remind, 0, "第 2 次间隔翻倍 (6), 5 分钟不到");
+  clock += 1 * MIN; assert.equal((await sc.scan()).remind, 1, "第 2 次: 6 分钟");
+  progress(); clock += 11 * MIN; assert.deepEqual(await sc.scan(), Z, "已催 2 次: 不再 remind, group 也还没到 min(120, 12)");
+  clock += 1 * MIN;
+  assert.deepEqual(await sc.scan(), { ...Z, group: 1, mirrored: 1 });
+  const gx = store.get(r)!.msgs.find((m) => m.sys?.startsWith("overdue-group") && m.text.includes("球可能不在"))!;
+  assert.match(gx.text, /球可能不在 \.b 手里: .* 已提醒 2 次, 每次只回了 progress/);
+  assert.deepEqual(gx.wake, [], "不唤醒 holder");
+  assert.equal(store.get("chat:wrG")!.msgs.filter((m) => m.sys === "overdue-group").length, homeBefore + 1, "转 home 群让人看见");
+  progress(); clock += 999 * MIN;
+  await sc.scan(); // 别的 room 的老账也会在这么久后落自己的行, 只看本 room
+  assert.equal(remindsIn(r), 2, "再久也不再 remind");
+  assert.equal(store.get(r)!.msgs.filter((m) => m.sys?.startsWith("overdue-group")).length, 1, "到上限只落一次 group");
 }
 console.log("room-overdue ok");

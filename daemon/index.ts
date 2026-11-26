@@ -1802,7 +1802,7 @@ const main = async (): Promise<void> => {
       if (afterRefs.error) { json(res, 400, { ok: false, reason: afterRefs.error }); return; }
       const after = afterRefs.ids!;
       // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。显式给的已关账 → 同样回落。
-      const forOf = hub.resolveFor(me.id, b.for);
+      const { for: forOf, note: forNote } = hub.resolveForEx(me.id, b.for);
       const v = hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
         ...(after.length ? { after } : {}), ...(forOf ? { for: forOf } : {}),
         ...((b.planId ?? "").toString().trim() ? { planId: (b.planId ?? "").toString().trim() } : {}),
@@ -1812,7 +1812,7 @@ const main = async (): Promise<void> => {
       const names = v.ok
         ? (v.row.to ?? []).map((w) => w.kind === "wizard" ? peerAddress(cfg, wizards.byUid(w.id)?.target ?? w.id) : w.id).filter(Boolean)
         : [];
-      roomReply(res, v, names.length === 1 ? { name: names[0], names } : names.length ? { names } : {});
+      roomReply(res, v, { ...(names.length === 1 ? { name: names[0], names } : names.length ? { names } : {}), ...(forNote ? { forNote } : {}) });
     });
     http.register("POST /room/reply", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2657,7 +2657,7 @@ const main = async (): Promise<void> => {
     // 就这一轮不催; 下游还有未关 duty 时只催下游 (递归式, 见 shared/room-overdue)。
     const overdue = createOverdueScan({
       log: roomLog, now: () => Date.now(),
-      thresholds: () => ({ remindMin: cfg.rooms?.overdue?.remindMin ?? 60, groupMin: cfg.rooms?.overdue?.groupMin ?? 120 }),
+      thresholds: () => ({ remindMin: cfg.rooms?.overdue?.remindMin ?? 60, groupMin: cfg.rooms?.overdue?.groupMin ?? 120, backoff: cfg.rooms?.overdue?.backoff, maxReminds: cfg.rooms?.overdue?.maxReminds }),
       rooms: roomStore.ids, stateOf: roomState, append: (room, d, extra) => hub.append(room, d, extra),
       wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
       externalOf: (w) => {
@@ -3771,7 +3771,7 @@ const main = async (): Promise<void> => {
         if (target.error || !target.room) return { status: target.status ?? 400, body: { ok: false, reason: target.error ?? target.reason ?? "" } };
         // lead 的层级规矩随正文带 (宪章是出生快照, 打法只这一件活用得上)。
         const body2 = lead ? text + "\n\n" + renderReminder({ wezard: "lead" }, wizards.byUid(who.id)?.lead ? renderLeadPlaybook() : renderLead()) : text;
-        const forOf = hub.resolveFor(me.id, (b.for ?? "").toString());
+        const { for: forOf, note: forNote } = hub.resolveForEx(me.id, (b.for ?? "").toString());
         const draft = { author: me, kind: "task" as const, text: body2, to: [who], origin: "tool" as const,
           ...(forOf ? { for: forOf } : {}),
           ...(planId ? { planId } : {}) };
@@ -3782,6 +3782,7 @@ const main = async (): Promise<void> => {
         if (!placed.ok) return { status: placed.status, body: { ok: false, reason: placed.reason } };
         const v = placed.verdict;
         return { status: 200, body: { ok: true, room: v.row.room, id: v.row.id, event: v.row.id, name: peerAddress(cfg, wizards.byUid(who.id)?.target ?? who.id), queued: true,
+          ...(forNote ? { forNote } : {}),
           receipt: "已持久化排队; 结论经 chat_reply({re, text, status}) 交代" } };
       };
       if (d.kind === "existing" && !to && d.row?.target) {

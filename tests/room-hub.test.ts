@@ -234,6 +234,52 @@ const settle = () => hub.pump();
   assert.equal(hub.resolveFor(A, freshId), freshId, "指向还开着的那条 duty → 照用");
   await hub.onIdle(A);
 }
+// defaultFor 传递 (P1a): 本轮唤醒 lead 的是它所派子件 C 的 reply、C.for = D、D 仍由 lead 持有且开着 → D 进候选;
+// resolveFor (P1b): 显式 for 指向「自己问出去的件」(线程语义) 按没给处理, 回落 defaultFor, 回包带 note
+{
+  const roomT = "chat:wrT";
+  store.ensure(roomT, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(roomT, [
+    { op: "join", at: 1, room: roomT, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON },
+    { op: "join", at: 2, room: roomT, who: { kind: "wizard", id: B }, ord: 2, via: "spawn", by: { kind: "wizard", id: A } },
+  ]);
+  const D = hub.append(roomT, { author: { kind: "wizard", id: B }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: A }], text: "整件活 D" });
+  assert.ok(D.ok);
+  const dId = D.ok ? D.row.id : "";
+  await settle();
+  assert.equal(hub.defaultFor(A), dId, "直接被 D 唤醒 → D");
+  await hub.onIdle(A);
+  // A 派子件 C (for=D), B 交代 → A 被 C 的 reply 唤醒; 这一轮没有 D 自己被点名
+  const C = hub.append(roomT, { author: { kind: "wizard", id: A }, kind: "task", origin: "tool", to: [{ kind: "wizard", id: B }], for: dId, text: "子件 C" });
+  assert.ok(C.ok);
+  const cId = C.ok ? C.row.id : "";
+  await settle();
+  hub.append(roomT, { author: { kind: "wizard", id: B }, kind: "reply", origin: "tool", re: [cId], status: "need", statusGiven: true, text: "C 要你补一个信息" });
+  await settle();
+  assert.equal(hub.defaultFor(A), dId, "被子件 C 的 reply 唤醒 → 传递到 C.for = D (仍由 A 持有且开着)");
+  assert.equal(hub.resolveFor(A, undefined), dId);
+  // 线程式 for: 指向自己问出去的 C (持有者是 B) → 按没给处理, 回落 D, 带 note
+  const th = hub.resolveForEx(A, cId);
+  assert.equal(th.for, dId, "for=自己问出去的件 → 回落 defaultFor");
+  assert.match(th.note ?? "", /自己问出去的件/);
+  assert.equal(hub.resolveFor(A, cId), dId);
+  assert.equal(hub.resolveForEx(A, dId).note, undefined, "指向自己持有的开着的 duty → 照用, 无 note");
+  assert.equal(hub.resolveForEx(A, dId).for, dId);
+  // B 看 D: D 是 B 问给 A 的 (B 是 asker 不是 holder) → 同样是线程式; B 本轮唤醒的 C 才是它持有的
+  assert.equal(hub.resolveFor(B, dId), cId, "B 把 for 指向自己问出去的 D → 回落到本轮唤醒它的 C");
+  // C 关账、D 仍开着: 子件 done 唤醒 A 时仍传递到 D
+  await hub.onIdle(A);
+  hub.append(roomT, { author: { kind: "wizard", id: B }, kind: "reply", origin: "tool", re: [cId], text: "C 完了" });
+  await settle();
+  assert.equal(hub.defaultFor(A), dId, "子件 done 的 reply 唤醒 → 仍传递到 D");
+  // 歧义: A 同时持有两条被唤醒 → 不猜
+  const D2 = hub.append(roomT, { author: { kind: "wizard", id: B }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: A }], text: "另一件 D2" });
+  assert.ok(D2.ok);
+  await settle();
+  assert.equal(hub.defaultFor(A), undefined, "传递出 D、直接唤醒 D2 → 两条, 有歧义留空");
+  await hub.onIdle(A);
+  await hub.onIdle(B);
+}
 // 绑定 room 里同伴的 done 回复人已经看见: 向人关账的「你要交代」点明这一点, 不让 host 复述
 {
   const roomR = "chat:wrR";
