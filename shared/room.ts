@@ -95,6 +95,24 @@ export const roomMark = (room: string): RoomMark =>
 /** 标记 → 这一行真的进不进企微 (与 isBoundRoom 同口径, 但读的是注入头里的标记)。 */
 export const markIsBound = (m: RoomMark): boolean => m === "群" || m === "单";
 
+/** 工具侧短 id 补全: 注入块里行 id 只写 seq (hash 段在块头), 模型照抄回来时按「本轮唤醒它的
+ *  room」补成全 id。纯 seq 且恰好一个 room 才补; 0 个 = 原样 (交原解析报不认识); 多个 = 歧义。 */
+export const expandMsgRef = (id: string, rooms: readonly string[]): { id?: string; error?: string } => {
+  const raw = (id ?? "").trim();
+  if (!/^\d+$/.test(raw)) return { id: raw };
+  if (rooms.length > 1) return { error: "本轮被多个 room 唤醒, 短 id 认不出是哪一条 —— 请用完整 id (hash8.seq): " + raw };
+  return { id: rooms.length === 1 ? msgIdOf(rooms[0]!, Number(raw)) : raw };
+};
+export const expandMsgRefs = (ids: readonly string[], rooms: readonly string[]): { ids?: string[]; error?: string } => {
+  const out: string[] = [];
+  for (const id of ids) {
+    const r = expandMsgRef(id, rooms);
+    if (r.error) return { error: r.error };
+    out.push(r.id!);
+  }
+  return { ids: out };
+};
+
 // ── 账本行 ─────────────────────────────────────────────────────────────
 
 export type JoinVia = "founder" | "invite" | "approve" | "mention" | "spawn" | "transfer" | "inbound" | "migrate";
@@ -889,19 +907,28 @@ const statusTag = (m: MsgRow): string => (m.status ? " [" + m.status + "]" : "")
 /** 行正文的读法: 人话行 (origin inbound) 曾把提醒尾巴一起写进 text, 老行不改写、读侧剥掉 (见 stripLegacyTail);
  *  新行只存原话, 剥一遍是空操作。只有 inbound 行带过尾巴, 别的来源的 text 原样返回。 */
 export const rowText = (m: Pick<MsgRow, "text" | "origin">): string => (m.origin === "inbound" ? stripLegacyTail(m.text) : m.text);
-export const renderMsgLine = (m: MsgRow, n: RenderNames, max = 500): string => {
+/** 行 id 的短形: 同一个 room 的块里 hash 段每行都重复, 只留 seq (块头已有 #hash8)。
+ *  `hash` = 本块的 roomHash; 给了且 id 的前缀正好是它才短 —— 老路径 / 跨 room 一律全形。 */
+const shortId = (hash: string | undefined, id: string): string | undefined =>
+  hash && id.startsWith(hash + ".") ? id.slice(hash.length + 1) : undefined;
+/** id 列表的紧凑形: 每一个都在本块 → `re=118,119`; 有一个不在 → 退回全形 `(re a,b)` (可解析)。 */
+const reTag = (hash: string | undefined, re: readonly string[] | undefined): string => {
+  if (!re?.length) return "";
+  const shorts = re.map((id) => shortId(hash, id));
+  return shorts.every((x): x is string => !!x) ? " re=" + shorts.join(",") : " (re " + re.join(",") + ")";
+};
+export const renderMsgLine = (m: MsgRow, n: RenderNames, max = 500, hash?: string): string => {
+  const id = shortId(hash, m.id) ?? m.id;
   // monitor 的 activate 判决是系统行为, 不是 monitor 发言 (§2.2): 输出系统形态, 不以 monitor 名义出现。
   // 只精确匹配 sys:"activate"; 其他 trigger (after-wake / overdue / 定时任务) 照旧按消息行渲染 (author 是 wezard, 带正文)。
   if (m.kind === "trigger" && m.sys === "activate") {
-    const re = m.re?.length ? " (re " + m.re.join(",") + ")" : "";
     const targets = (m.to ?? []).filter((t) => t.kind === "wizard").map(n.nameOf).join(", ");
-    return "[" + m.id + "] [" + n.nameOf(DAEMON) + "] monitor 判决: " + (targets ? "交给 " + targets + " 回应" : "不回应") + re;
+    return "[" + id + "] [" + n.nameOf(DAEMON) + "] monitor 判决: " + (targets ? "交给 " + targets + " 回应" : "不回应") + reTag(hash, m.re);
   }
   const to = m.to?.length ? " → " + m.to.map(n.nameOf).join(", ") : "";
-  const re = m.re?.length ? " (re " + m.re.join(",") + ")" : "";
   const body = rowText(m).replace(/\s+/g, " ").trim();
   const files = m.files?.length ? " 📎" + m.files.map((f) => f.name).join(",") : "";
-  return "[" + m.id + "] " + n.nameOf(m.author) + to + re + statusTag(m) + ": " + (body.length > max ? body.slice(0, max) + "…(+" + (body.length - max) + ")" : body) + files;
+  return "[" + id + "] " + n.nameOf(m.author) + to + reTag(hash, m.re) + statusTag(m) + ": " + (body.length > max ? body.slice(0, max) + "…(+" + (body.length - max) + ")" : body) + files;
 };
 
 /** who 的游标之后、别人说的行数 (不含自己) —— rolepage 的未读角标; 与 unreadFor 同一口径, 不装预算。 */

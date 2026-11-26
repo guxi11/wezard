@@ -47,7 +47,8 @@ const ask = async (room = R1): Promise<{ id: string; text: string }> => {
   return { id: v.ok ? v.row.id : "", text: pasted.at(-1)! };
 };
 const USAGE = /用 chat_reply\(\{re, text, status\}\) 交代/;
-const SHORT = (id: string) => new RegExp("你要交代: " + id.replace(".", "\\.") + " \\(ask, 来自 \\.a\\)$", "m");
+/** 交代行里的 id 是本块短形 (seq 部分) —— 同一 room 的块不重复 hash。 */
+const SHORT = (id: string) => new RegExp("你要交代: " + id.split(".")[1] + " \\(ask, 来自 \\.a\\)$", "m");
 
 // 新 wizard (< N 批) 每次都附
 const first = await ask();

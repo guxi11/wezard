@@ -47,7 +47,7 @@ assert.match(first.text, USAGE, "首次带用法半句");
 // ② 同一 uid 第二次投递: 不再附, 但 id 短形与「你要交代」照旧
 const second = await ask();
 assert.doesNotMatch(second.text, USAGE, "同一 uid 第二次投递不再带用法半句");
-assert.match(second.text, new RegExp("你要交代: " + second.id.replace(".", "\\.") + " \\(ask, 来自 \\.a\\)$", "m"));
+assert.match(second.text, new RegExp("你要交代: " + second.id.split(".")[1] + " \\(ask, 来自 \\.a\\)$", "m"));
 // ③ 换一个 uid 不受影响
 t += 1000;
 const v3 = hub.append(R, { author: WB, kind: "ask", origin: "tool", to: [WA], text: "反过来 " + t });

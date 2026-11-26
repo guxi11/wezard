@@ -98,7 +98,8 @@ const humanRow = (s: ReturnType<typeof withMonitor>, text = "谁来接") => {
   await hub.pump();
   const text = pasted.get("chat:t#" + A.id.slice(-4)) ?? "";
   assert.ok(text.includes("这个怎么弄"), "注入含人的原话: " + text);
-  assert.ok(text.includes("你要交代: " + msgId + " (human, 来自 u1)"), "owe 行归属人: " + text);
+  // 行 id / owe 行在同一个 room 块里用短形 (hash 段在块头): 全形 msgId 的 seq 部分。
+  assert.ok(text.includes("你要交代: " + msgId.split(".")[1] + " (human, 来自 u1)"), "owe 行归属人: " + text);
   assert.ok(!text.includes(".mon") && !text.includes("monitor"), "注入里没有任何 monitor 痕迹: " + text);
   assert.equal(store.get("chat:t")!.msgs.filter((m) => m.kind === "trigger").length, 0, "账本里没有判决行");
 }

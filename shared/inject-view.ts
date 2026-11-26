@@ -15,7 +15,7 @@
 import { EXT_LABEL_PREFIX } from "./external.js";
 
 export interface InjectLine {
-  /** 账本行 id ([d2581c34.7])。 */
+  /** 账本行 id —— 全形 (`d2581c34.7`) 或同块短形 (`7`, 新格式块; 用 expandIds 补全)。 */
   id: string;
   /** 行里写的作者名 (原样, 可能带 .); "" = 这一行认不出作者。 */
   author: string;
@@ -79,8 +79,11 @@ const parseLine = (line: string): InjectLine | undefined => {
   const st = rest.match(/\s\[([a-z]+)\]$/);
   if (st && STATUSES.has(st[1]!)) { status = st[1]; rest = rest.slice(0, st.index).trimEnd(); }
   let re: string[] = [];
-  const rm = rest.match(/\s\(re ([^)]*)\)$/);
-  if (rm) { re = rm[1]!.split(",").map((s) => s.trim()).filter(Boolean); rest = rest.slice(0, rm.index).trimEnd(); }
+  // 紧凑形 ` re=118,119` (同块短形) 与旧全形 ` (re a,b)` 都认; 顺序 = status → re。
+  const cm = rest.match(/\sre=([0-9a-z.]+(?:,[0-9a-z.]+)*)$/);
+  const rm = cm ? undefined : rest.match(/\s\(re ([^)]*)\)$/);
+  if (cm) { re = cm[1]!.split(","); rest = rest.slice(0, cm.index).trimEnd(); }
+  else if (rm) { re = rm[1]!.split(",").map((s) => s.trim()).filter(Boolean); rest = rest.slice(0, rm.index).trimEnd(); }
   const arrow = rest.lastIndexOf(" → ");
   const author = arrow < 0 ? rest : rest.slice(0, arrow);
   const to = arrow < 0 ? [] : rest.slice(arrow + 3).split(",").map((s) => s.trim()).filter(Boolean);
@@ -91,6 +94,15 @@ const parseLine = (line: string): InjectLine | undefined => {
     id: id.trim(), author: author.trim(), to, re, ...(status ? { status } : {}),
     text: fm ? text.slice(0, fm.index).trimEnd() : text, files,
   };
+};
+
+/** 短 id 补全: 新格式块里每行只写 seq (`[120]` / `re=118` / `你要交代: 120`), hash 段在块头。
+ *  展开成全形 (hash8.seq) 供回账本查 / owe 比对; 旧格式块 (没有 roomHash) 原样返回。 */
+export const expandIds = (b: InjectBlock): InjectBlock => {
+  const hash = b.roomHash;
+  if (!hash) return b;
+  const full = (id: string): string => (/^\d+$/.test(id) ? hash + "." + id : id);
+  return { ...b, lines: b.lines.map((l) => ({ ...l, id: full(l.id), re: l.re.map(full) })), owe: b.owe.map(full) };
 };
 
 /** 一个注入块的 room 全 id: 旧格式直接有; 新格式只有 hash, 反查由调用方注入 (shared 保持纯)。 */
@@ -142,7 +154,7 @@ const isHumanAuthor = (author: string): boolean =>
  *  作者认形状: 行里 wizard 写作 `.名字`、daemon 写作 `wezard`, 其余就是人 (nameOf 对人渲染 userid)。
  *  人话信封删了之后, 重载接回这一轮的出处只剩这一处 —— 与 parseInjection 读同一个唤醒头 / 行头。 */
 export const humanOpening = (raw: string): { room: string; roomHash?: string; mark?: string; speaker: string } | undefined => {
-  const blocks = parseInjection(raw) ?? [];
+  const blocks = (parseInjection(raw) ?? []).map(expandIds);
   const lines = blocks.flatMap((b) => b.lines.map((l) => ({ block: b, line: l, owed: b.owe.includes(l.id) })));
   const pool = lines.some((x) => x.owed) ? lines.filter((x) => x.owed) : lines;
   const hit = pool.filter((x) => isHumanAuthor(x.line.author)).at(-1);

@@ -16,7 +16,7 @@ import type { Logger } from "pino";
 import {
   DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, hasMonitor, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
   renderMsgLine, replyHintDue, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
-  isDirectParent, roomHash, roomMark,
+  isDirectParent, msgIdOf, roomHash, roomMark,
 } from "../shared/room.js";
 import type { WakeTail } from "./notices.js";
 import type { RoomStore } from "./rooms.js";
@@ -245,11 +245,12 @@ export const createRoomHub = (p: HubPorts) => {
       const s = state(room)!;
       const u = unreadFor(s, who, triggers.map((t) => t.id));
       const label = p.roomLabel(room);
+      const h8 = roomHash(room);
       // 房头: 默认 #hash8 + 一个字标记 (群 / 单 / 私 / 临) —— 全 id 47 字符太贵; 只在 hash 撞车时
       // 退回全 id (反查、寻址、账本一律仍用全 id, 这里只是渲染)。
-      const ref = p.store.hashAmbiguous(roomHash(room)) ? "(" + room + ")" : "#" + roomHash(room) + " " + roomMark(room);
+      const ref = p.store.hashAmbiguous(h8) ? "(" + room + ")" : "#" + h8 + " " + roomMark(room);
       const head = "【" + label + "】" + ref + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
-      const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500));
+      const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500, h8));
       const held = openDuties(s).filter((d) => sameWho(holderOf(s, d), who));
       const owe = held.filter((d) => triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));
       // 绑定 room 里同伴说的每一行都真的进了企微 (mirrors) —— 人已经看见。它手上还欠着人的话时,
@@ -265,10 +266,12 @@ export const createRoomHub = (p: HubPorts) => {
         : "";
       // 它反问过人、人另发一条新话 (不带引用) 作答: 原 duty 没被本批触发行碰到, 但答复很可能就在上面 —— 附在后面提醒一并关掉 (只是提示, 不改 seen / turns)。
       const answered = held.filter((d) => !owe.includes(d) && d.last?.status === "need" && d.asker.kind === "human" && triggers.some((t) => sameWho(t.author, d.asker)));
+      // 交代行里的 id 也用本块短形 (都是本 room 的账) —— 模型照抄回来的短 id 由 daemon 补全。
+      const shortMsg = (id: string): string => (id.startsWith(h8 + ".") ? id.slice(h8.length + 1) : id);
       const oweLine = owe.length || answered.length
         ? "你要交代: " + [
-          ...owe.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")"),
-          ...answered.map((d) => d.msg + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + " · 你反问过, 对方的答复可能就在上面)"),
+          ...owe.map((d) => shortMsg(d.msg) + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + ")"),
+          ...answered.map((d) => shortMsg(d.msg) + " (" + d.kind + ", 来自 " + p.nameOf(d.asker) + " · 你反问过, 对方的答复可能就在上面)"),
         ].join("; ") + usage : "";
       // 派活方用 `for` 指一条消息 id、人话本身在 task 里不复述时, 接活者得真读得到那条:
       // 它不在本批未读里 (早已读过 / 被游标推过) 就补一行引用 —— 只补本 room 的, trigger 不算。
@@ -277,7 +280,7 @@ export const createRoomHub = (p: HubPorts) => {
         const r = s.byId.get(d.for);
         return r && r.kind !== "trigger" && !sameWho(r.author, who) ? [[r.id, r] as [string, MsgRow]] : [];
       })).values()];
-      const refLines = refRows.length ? ["派活指向的原话: " + refRows.map((r) => renderMsgLine(r, names, 300)).join(" / ")] : [];
+      const refLines = refRows.length ? ["派活指向的原话: " + refRows.map((r) => renderMsgLine(r, names, 300, h8)).join(" / ")] : [];
       if (oweLine && usage) hintGiven = true;
       parts.push([head, ...lines, ...refLines, ...(humanHint ? [humanHint] : []), ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
@@ -465,6 +468,15 @@ export const createRoomHub = (p: HubPorts) => {
     return rooms.length === 1 ? { room: rooms[0], many: rooms } : { many: rooms };
   };
 
+  /** 本轮唤醒它的 room (工具侧短 id 补全的唯一依据; 恰好一个才补)。 */
+  const turnRooms = (uid: string): string[] => [...(turns.get(uid)?.rooms ?? [])];
+  /** 短形消息 id (纯 seq) → 本轮唯一唤醒 room 的 `hash8.seq`; 多个 room / 不是短形 = 原样。 */
+  const shortToFull = (uid: string, id: string): string => {
+    if (!/^\d+$/.test(id)) return id;
+    const rooms = turnRooms(uid);
+    return rooms.length === 1 ? msgIdOf(rooms[0]!, Number(id)) : id;
+  };
+
   /** 派活工具缺省的 `for` (血缘): 本轮唤醒它、且仍由它持有未关的那一条 duty 的 msg id。
    *  「唤醒」= 本轮贴进来的行里有这条 duty 的 msg, 或有一条 re 指向它的 trigger (overdue-remind / after 补唤醒);
    *  恰好一条才返回, 零条 / 多条 → undefined —— 多条有歧义, 不猜。 */
@@ -492,7 +504,7 @@ export const createRoomHub = (p: HubPorts) => {
    *  任何下游 (buildOpenChildDuties / buildDescendantActivity 都按 msg id 索引), 结果就是子件在干活、
    *  上游却在自己名下被反复催; 这种 for 当没给, 回落到 defaultFor。 */
   const resolveFor = (uid: string, explicit?: string): string | undefined => {
-    const want = (explicit ?? "").toString().trim();
+    const want = shortToFull(uid, (explicit ?? "").toString().trim());
     if (!want) return defaultFor(uid);
     const room = p.store.roomOfMsg(want);
     const s = room ? state(room) : undefined;
@@ -501,7 +513,7 @@ export const createRoomHub = (p: HubPorts) => {
     return defaultFor(uid);
   };
 
-  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, pending, isBoundRoom, reconcileAfter };
+  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, pending, isBoundRoom, reconcileAfter, turnRooms };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

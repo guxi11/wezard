@@ -12,7 +12,7 @@
 import { escHtml, hashStr, renderCutMark, renderTurnGroup, splitReminders, turnUsageChips, type HandoffDeco, type HandoffStatus, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { blockRoom, parseInjection } from "./inject-view.js";
+import { blockRoom, expandIds, parseInjection } from "./inject-view.js";
 import { allMessages, inSpan, marksOf, SYSTEM, teammateOf, unwrapMates, type Directory, type Msg, type SessionSpan } from "./role-view.js";
 import type { MemberNote, RoomMsg } from "./room-view.js";
 import { whoKey, type MsgRow, type Who } from "./room.js";
@@ -246,7 +246,8 @@ export const wizardStream = (
    *  与作者都从注入头和行里解析, 不落回「系统 → home 群」。原文块挂在每块第一条上
    *  (点开看注入原文),「你要交代」挂在每块最后一条。 */
   const injectionRows = (m: Msg): StreamRow[] => {
-    const blocks = parseInjection(m.turn.userQuery ?? "");
+    // 新格式块的短 id 先补成全形 —— 回账本取全文 / re / owe 比对都靠它 (原文仍用块原文)。
+    const blocks = parseInjection(m.turn.userQuery ?? "")?.map(expandIds);
     if (!blocks) return [];
     const rows = blocks.flatMap((b) => b.lines.map((ln): StreamRow => {
       const led = q.lookup?.(ln.id);

@@ -75,7 +75,8 @@ let pre: MsgRow, dep: MsgRow;
   const toC = pasted.slice(before).filter((x) => x.target === "chat:wrG#c");
   assert.equal(toC.length, 1, "C 被唤醒一次");
   assert.match(toC[0]!.text, /表建好后写迁移脚本/, "原 ask 正文随 trigger 带到 (它在游标之前)");
-  assert.match(toC[0]!.text, new RegExp("你要交代: " + dep.id.replace(".", "\\.") + " \\(task, 来自 \\.lead\\)"), "「你要交代」指回原 ask");
+  // 交代行里是块内短形 (seq), 不是全 id。
+  assert.match(toC[0]!.text, new RegExp("你要交代: " + dep.id.split(".")[1] + " \\(task, 来自 \\.lead\\)"), "「你要交代」指回原 ask");
   assert.ok(store.get(room)!.members.get("wizard:" + C)!.seen > cSeen);
   // 被 trigger 叫醒、这一轮没交代 → 轮终提醒指向原 ask (onIdle 认 trigger 行的唤醒)
   const n = pasted.length;

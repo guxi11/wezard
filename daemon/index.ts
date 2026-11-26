@@ -64,7 +64,7 @@ import { ensureMeRoom, isMeRoom, meChannelSay, meRoomId, meRowMirror, meUserOf, 
 import { autoAdhocTarget } from "./room-auto-adhoc.js";
 import { checkRoomTarget, seatThenAppend, type SeatResult } from "./room-spawn.js";
 import {
-  DAEMON, adhocRoomId, bubbleSourceOf, canRename, dmPeers, dmRoomId, findPairAdhoc, hasMonitor, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, outboundSourceOf, perceptronCandidates, planDm, planOutbound, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, bubbleSourceOf, canRename, dmPeers, dmRoomId, expandMsgRefs as sharedExpandRefs, findPairAdhoc, hasMonitor, holderOf, idList, isUid, judgeActivate, judgeNotice, leaveOps, dutiesHeldBy, outboundSourceOf, perceptronCandidates, planDm, planOutbound, quotedRowIds, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type Duty, type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -1629,6 +1629,12 @@ const main = async (): Promise<void> => {
       if (base && base !== raw && roomState(base)) return { room: base };
       return { error: "认不出这个 room: " + raw };
     };
+    /** 短 id 补全的调用口: 本轮唤醒它的 room (room-hub 的 turns) + shared 的纯判定。 */
+    const expandMsgRefs = (self: string, ids: readonly string[]): { ids?: string[]; error?: string } => {
+      const uid = wizards.get(self)?.uid;
+      return sharedExpandRefs(ids, uid ? hub.turnRooms(uid) : []);
+    };
+
     /** 名字 (带不带 .) / uid / human:<id> → Who。 */
     const whoRefOf = (ref: string): Who | undefined => {
       const raw = stripSigil((ref ?? "").trim());
@@ -1789,7 +1795,9 @@ const main = async (): Promise<void> => {
       const target = roomTargetOf(me, to.who, b.room, { autoAdhoc: { interrupt: !!b.interrupt } });
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       if (refuseReception(res, "POST /room/ask", self, { rooms: [target.room] })) return;
-      const after = idList(b.after);
+      const afterRefs = expandMsgRefs(self, idList(b.after));
+      if (afterRefs.error) { json(res, 400, { ok: false, reason: afterRefs.error }); return; }
+      const after = afterRefs.ids!;
       // for 缺省 = 本轮唤醒它的那一条欠账 (血缘; 逾期计时靠它把子件的活动算进来)。显式给的已关账 → 同样回落。
       const forOf = hub.resolveFor(me.id, b.for);
       const v = hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
@@ -1809,7 +1817,9 @@ const main = async (): Promise<void> => {
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { re?: string[] | string; text?: string; status?: string };
-      const re = idList(b.re);
+      const refs = expandMsgRefs(self, idList(b.re));
+      if (refs.error) { json(res, 400, { ok: false, reason: refs.error }); return; }
+      const re = refs.ids!;
       if (!re.length) { json(res, 400, { ok: false, reason: "re required: 要答的那条 (或那几条) 消息 id" }); return; }
       const rooms = [...new Set(re.map((id) => roomStore.roomOfMsg(id)))];
       if (rooms.some((x) => !x)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re.filter((id) => !roomStore.roomOfMsg(id)).join(", ") }); return; }
@@ -1867,7 +1877,9 @@ const main = async (): Promise<void> => {
       const target = roomTargetOf(me, undefined, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
       if (refuseReception(res, "POST /room/file", self, { rooms: [target.room] })) return;
-      const re = idList(b.re);
+      const fileRefs = expandMsgRefs(self, idList(b.re));
+      if (fileRefs.error) { json(res, 400, { ok: false, reason: fileRefs.error }); return; }
+      const re = fileRefs.ids!;
       const text = [b.title, b.caption, b.description].map((x) => (x ?? "").toString().trim()).filter(Boolean).join(" — ");
       roomReply(res, hub.append(target.room, { author: me, kind: "file", text, origin: "tool",
         files: [{ path, kind, name: basename(path) }], ...(re.length ? { re } : {}) }));
@@ -1985,7 +1997,9 @@ const main = async (): Promise<void> => {
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { re?: string; accept?: boolean; history?: unknown };
-      const re = (b.re ?? "").toString().trim();
+      const approveRef = expandMsgRefs(self, [(b.re ?? "").toString().trim()]);
+      if (approveRef.error) { json(res, 400, { ok: false, reason: approveRef.error }); return; }
+      const re = approveRef.ids![0] ?? "";
       const roomId = re ? roomStore.roomOfMsg(re) : undefined;
       const s = roomId ? roomState(roomId) : undefined;
       const row = s?.byId.get(re);
@@ -2081,7 +2095,9 @@ const main = async (): Promise<void> => {
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { re?: string | string[]; to?: string | string[]; reason?: unknown };
-      const re = idList(b.re);
+      const actRefs = expandMsgRefs(self, idList(b.re));
+      if (actRefs.error) { json(res, 400, { ok: false, reason: actRefs.error }); return; }
+      const re = actRefs.ids!;
       if (re.length !== 1) { json(res, 400, { ok: false, reason: "re 只收一条 (最后一条人话的消息 id)" }); return; }
       const roomId = roomStore.roomOfMsg(re[0]!);
       const s = roomId ? roomState(roomId) : undefined;
@@ -4109,7 +4125,9 @@ const main = async (): Promise<void> => {
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
       // 按件号撤回自己派的那一件 (room 模型): daemon 代写一条 canceled reply 关掉 duty,
       // 它此刻正在做的就是这件才按 Esc —— 被打断那一轮的其余 duty 不关 (§3b), 下次唤醒重投。
-      const turn = (b.turn ?? "").toString().trim();
+      const turnRef = expandMsgRefs(self, [(b.turn ?? "").toString().trim()]);
+      if (turnRef.error) { json(res, 400, { ok: false, reason: turnRef.error }); return; }
+      const turn = turnRef.ids![0] ?? "";
       if (!end && turn) {
         const roomId = roomStore.roomOfMsg(turn);
         const s = roomId ? roomState(roomId) : undefined;

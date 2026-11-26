@@ -43,6 +43,8 @@ const needReply = (room: string, re: string): void => {
   assert.ok(hub.append(room, { author: WA, kind: "reply", origin: "tool", status: "need", statusGiven: true, re: [re], text: "要哪个?" } as never).ok);
 };
 const oweOf = (text: string): string => text.split("\n").find((l) => l.startsWith("你要交代:")) ?? "";
+/** 交代行里的 id 是同一 room 块的短形 (只留 seq)。 */
+const seq = (id: string): string => id.split(".")[1]!;
 
 // (1) 人话 A → need → 人新话 B (不引用) → 交代同时含 B 与 A, A 带标注, B 在前
 {
@@ -51,8 +53,8 @@ const oweOf = (text: string): string => text.split("\n").find((l) => l.startsWit
   needReply(room, a);
   const b = await human(room, T1, "看 main 分支");
   const line = oweOf(pasted.at(-1)!);
-  assert.ok(line.includes(b + " (human") && line.includes(a + " (human, 来自 T1 · 你反问过"), line);
-  assert.ok(line.indexOf(b) < line.indexOf(a), "原有条目在前, 追加在后");
+  assert.ok(line.includes(seq(b) + " (human") && line.includes(seq(a) + " (human, 来自 T1 · 你反问过"), line);
+  assert.ok(line.indexOf(seq(b)) < line.indexOf(seq(a)), "原有条目在前, 追加在后");
 }
 // (2) 别的人发话不带出 A
 {
@@ -60,7 +62,7 @@ const oweOf = (text: string): string => text.split("\n").find((l) => l.startsWit
   const a = await human(room, T1, "帮我看下 x");
   needReply(room, a);
   await human(room, T2, "无关的话");
-  assert.ok(!oweOf(pasted.at(-1)!).includes(a), oweOf(pasted.at(-1)!));
+  assert.ok(!oweOf(pasted.at(-1)!).includes(seq(a) + " "), oweOf(pasted.at(-1)!));
 }
 // (3) A 已 done 后不再列
 {
@@ -70,7 +72,7 @@ const oweOf = (text: string): string => text.split("\n").find((l) => l.startsWit
   t += 1000;
   assert.ok(hub.append(room, { author: WA, kind: "reply", origin: "tool", status: "done", statusGiven: true, re: [a], text: "好了" } as never).ok);
   await human(room, T1, "谢谢");
-  assert.ok(!oweOf(pasted.at(-1)!).includes(a), oweOf(pasted.at(-1)!));
+  assert.ok(!oweOf(pasted.at(-1)!).includes(seq(a) + " "), oweOf(pasted.at(-1)!));
 }
 // (4) 带引用的老行为不变: 引用 A → 只列被引用那条, 无标注
 {
@@ -79,7 +81,7 @@ const oweOf = (text: string): string => text.split("\n").find((l) => l.startsWit
   needReply(room, a);
   const b = await human(room, T1, "看 main", [a]);
   const line = oweOf(pasted.at(-1)!);
-  assert.ok(line.includes(a) && !line.includes("你反问过"), line);
+  assert.ok(line.includes(seq(a) + " ") && !line.includes("你反问过"), line);
   void b;
 }
 console.log("room-hub-need-answered ok");
