@@ -390,6 +390,8 @@ while :; do
   case "$DECISION" in
     allow) emit "allow" "$REASON" "$UPDATED" ;;
     deny|ask) emit "$DECISION" "$REASON" ;;
+    # daemon 在, 但机器人断线没有审批人: 与 daemon 够不着同口径, 不答复交还 CLI。
+    pass) passthrough ;;
     *) bridge_down "unknown decision: $DECISION" ;;
   esac
 done

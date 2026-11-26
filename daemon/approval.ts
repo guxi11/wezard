@@ -1789,7 +1789,8 @@ interface ApproveReq {
 interface ApproveResp {
   // "retry" 只发给 hook, 不是 Claude Code 的合法 permissionDecision:
   // 语义是「daemon 正在重启, 带上 req_id 稍后重来」, hook 自己消化掉。
-  decision: "allow" | "deny" | "ask" | "retry";
+  // "pass" 同理只发给 hook: 「我没有审批人, 什么都不答」(见 botDown)。
+  decision: "allow" | "deny" | "ask" | "retry" | "pass";
   reason?: string;
   req_id?: string;
   /** allow 时替换工具入参 (hook 拼进 hookSpecificOutput.updatedInput) —— askq 用它交答案。 */
@@ -1808,7 +1809,7 @@ const BYPASS_MODES = new Set(["bypassPermissions", "fullAccess"]);
 // 用户自己配的 askRules 在 daemon 挂掉时反而失效。
 //
 // `.claude/**` 守卫虽然不进 mustCard, 但在**错误面**也要走同一条降级: 正常出口靠
-// settleGuard 事后按框, 而这几条 (no_approver / approver_timeout; 机器人断线见 botDown)
+// settleGuard 事后按框, 而这几条 (no_approver / approver_timeout; 机器人断线走 botDown, 同样不放行)
 // 要么没有 approver 可按、要么 pane 早已在等框 —— 静默 allow 就是把死锁原样放回来。
 // 所以调用点传的是 `mustCard || guardActive`。
 const fallback = (cfg: Config, reason: string, forceSingle?: unknown): ApproveResp => ({
@@ -1816,12 +1817,12 @@ const fallback = (cfg: Config, reason: string, forceSingle?: unknown): ApproveRe
   reason: forceSingle ? `${reason}:force_single` : reason,
 });
 
-// 机器人连不上时保留各后端既有降级；Codex native PermissionRequest 必须拒绝，
-// 因为它没有本地二次确认 fallback，allow 会直接绕过原生权限确认。
-const botDown = (reason: string, guardActive: boolean, nativePermission = false): ApproveResp =>
-  nativePermission ? { decision: "deny", reason: `${reason}:native_permission_unavailable` }
-    : guardActive ? { decision: "ask", reason: `${reason}:guard` }
-      : { decision: "allow", reason: `${reason}:auto_allow` };
+// 机器人连不上 (企微 WS 断开, 或卡因断线没发出去) = 没有审批人: 与「hook 够不着 daemon」
+// 同口径 —— 什么都不答, 交回 CLI 自己的权限流程, 绝不 allow (危险名单 / askRules /
+// `.claude/**` 守卫也一样)。"pass" 由 hook 译成「无输出退出」(claude / codebuddy: 允许规则命中就跑,
+// 否则弹本地原生框); codex 的 PreToolUse 没有 ask, codexHookOutput 把它落成 deny,
+// PermissionRequest 落成原生提示。曾经这里直接 allow = 断线期间静默放出全部权限, 而人还以为在被审批。
+export const botDown = (reason: string): ApproveResp => ({ decision: "pass", reason: `${reason}:no_auto_allow` });
 
 interface ApprovalDeps {
   cfg: Config;
@@ -2448,7 +2449,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
     if (!canReach(client, approver)) {
       log.warn("ws not connected");
-      json(res, 200, botDown("ws_disconnected", guardActive, nativePermission) satisfies ApproveResp);
+      json(res, 200, botDown("ws_disconnected") satisfies ApproveResp);
       return;
     }
 
@@ -2555,9 +2556,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       }
       log.warn({ err: (e as Error).message, reqId }, "approval timed out");
       const failure = (e as Error).message?.startsWith("send_card_fail:") ? (e as Error).message : "approver_timeout";
-      // 卡没发出去且此刻机器人确实断着 → 同上放行; 连接好好的发送失败 / 没人点的超时仍走 fallback。
+      // 卡没发出去且此刻机器人确实断着 → 同上不答; 连接好好的发送失败 / 没人点的超时仍走 fallback。
       json(res, 200, (failure !== "approver_timeout" && !canReach(client, approver)
-        ? botDown(failure, guardActive, nativePermission)
+        ? botDown(failure)
         : fallback(cfg, failure, mustCard || guardActive)) satisfies ApproveResp);
       return;
     }

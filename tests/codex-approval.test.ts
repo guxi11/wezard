@@ -101,7 +101,8 @@ try {
   assert.ok(client.updates >= 2, "card callbacks update the resolved card");
   client.isConnected = false;
   const disconnected = await runHook(input);
-  assert.equal(disconnected.hookSpecificOutput.decision.behavior, "deny", "native permission fails closed when WeCom disconnects");
+  assert.equal(disconnected.hookSpecificOutput, undefined, "WeCom disconnected: native permission falls back to Codex's own prompt, never granted");
+  assert.match(disconnected.systemMessage ?? "", /ws_disconnected/);
   const before = client.sent.length;
   const pre = await runHook({ ...input, hook_event_name: "PreToolUse" });
   assert.deepEqual(pre, {}, "ordinary approval emits a successful no-op");

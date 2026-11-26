@@ -400,7 +400,7 @@ wezard ext status · rotate <名字>              # 诊断 / 换口令 (需要 d
 
 执行 `wezard reload` 后，`/new` 起的就是 Codex。会话从 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 发现（支持 `CODEX_HOME`）；新会话由 Codex 自带的临时 `app-server` 创建 / 恢复 / 克隆，不发初始化消息、不产生模型请求，随后立即开 tmux pane 跑 `codex resume <id>`。镜像支持用户消息、助手回复、工具调用与结果、公开的思考摘要。wezard 启动的 Codex 会话自动带上 wezard MCP 与宪章（`developer_instructions`），不写全局 TOML；Codex 的缺省档位模型留空交给 CLI，effort 是 low / medium / medium / high / xhigh。
 
-**Codex 审批**：`PreToolUse` 走 wezard 的审批策略，`PermissionRequest`（沙箱 / 网络权限请求）转成单独的确认卡，不沿用普通工具的窗口或跳过开关，`denyRules` 仍生效。daemon 断线或超时后，普通工具请求被拒绝，沙箱权限请求回到 Codex 自己的本地审批界面；Codex 的交互提问仍需在终端处理。
+**Codex 审批**：`PreToolUse` 走 wezard 的审批策略，`PermissionRequest`（沙箱 / 网络权限请求）转成单独的确认卡，不沿用普通工具的窗口或跳过开关，`denyRules` 仍生效。daemon / 机器人断线或超时后，普通工具请求被拒绝，沙箱权限请求回到 Codex 自己的本地审批界面；Codex 的交互提问仍需在终端处理。
 
 手工启动 Codex 时，在配置里加同步目标并执行 `wezard sync`：
 
