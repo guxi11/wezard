@@ -20,6 +20,7 @@ import {
 } from "../shared/room.js";
 import type { WakeTail } from "./notices.js";
 import type { RoomStore } from "./rooms.js";
+import type { DeliveryBatch, ShortIdLog } from "./short-id-log.js";
 import { sleep } from "../shared/std.js";
 
 /** gone = 目标没有任何会话绑定 (stop_wizard end / /kill 丢掉了它): 重试也贴不进去, 要有人重生或改派。 */
@@ -27,6 +28,8 @@ export type PasteResult = "ok" | "uncertain" | "failed" | "gone";
 
 export interface HubPorts {
   store: RoomStore;
+  /** 最近投递记录 (短 id 补全的依据; 轮终 / reload 后仍有效)。不给 = 短 id 只能走可行动报错。 */
+  deliveryLog?: ShortIdLog;
   log?: Logger;
   now?: () => number;
   /** uid → 现在的 target 与名字 (投递 / 渲染那一刻现查)。 */
@@ -231,12 +234,19 @@ export const createRoomHub = (p: HubPorts) => {
   };
 
   /** 渲染一次唤醒: 每个 room 一段 (游标之后没看过的行, 触发行全文), 末尾列出它要交代的 duty。 */
-  const render = (uid: string, rooms: Map<string, MsgRow[]>): { text: string; seen: Array<{ room: string; seq: number }>; msgs: string[]; hintGiven: boolean } => {
+  const render = (uid: string, rooms: Map<string, MsgRow[]>): { text: string; seen: Array<{ room: string; seq: number }>; msgs: string[]; hintGiven: boolean; shown: Array<{ room: string; seqs: number[] }> } => {
     const who: Who = { kind: "wizard", id: uid };
     const names = { nameOf: p.nameOf, roomLabel: p.roomLabel };
     const parts: string[] = [];
     const seen: Array<{ room: string; seq: number }> = [];
     const msgs: string[] = [];
+    // 这一批真的写进注入文本的行号 (含补引用的原话) —— 投递成功后记进 deliveryLog, 短 id 靠它反查。
+    const shown = new Map<string, Set<number>>();
+    const noteShown = (room: string, rows: readonly MsgRow[]): void => {
+      const set = shown.get(room) ?? new Set<number>();
+      rows.forEach((x) => set.add(x.seq));
+      shown.set(room, set);
+    };
     const again = uncertain.get(uid);
     // 用法半句是教学不是事实: 它最近 N 批唤醒里自己回过 chat_reply 就不再重复 (id 与「这是你的 duty」照旧给)。
     const usage = !replyHintGiven.has(uid) && replyHintDue(roomsOf(uid), uid, p.replyHintWindow?.() ?? 0) ? " —— 用 chat_reply({re, text, status}) 交代。" : "";
@@ -251,6 +261,7 @@ export const createRoomHub = (p: HubPorts) => {
       const ref = p.store.hashAmbiguous(h8) ? "(" + room + ")" : "#" + h8 + " " + roomMark(room);
       const head = "【" + label + "】" + ref + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
       const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500, h8));
+      noteShown(room, u.rows);
       const held = openDuties(s).filter((d) => sameWho(holderOf(s, d), who));
       const owe = held.filter((d) => triggers.some((t) => t.id === d.msg || (t.re ?? []).includes(d.msg)));
       // 绑定 room 里同伴说的每一行都真的进了企微 (mirrors) —— 人已经看见。它手上还欠着人的话时,
@@ -281,12 +292,13 @@ export const createRoomHub = (p: HubPorts) => {
         return r && r.kind !== "trigger" && !sameWho(r.author, who) ? [[r.id, r] as [string, MsgRow]] : [];
       })).values()];
       const refLines = refRows.length ? ["派活指向的原话: " + refRows.map((r) => renderMsgLine(r, names, 300, h8)).join(" / ")] : [];
+      if (refRows.length) noteShown(room, refRows);
       if (oweLine && usage) hintGiven = true;
       parts.push([head, ...lines, ...refLines, ...(humanHint ? [humanHint] : []), ...(oweLine ? [oweLine] : [])].join("\n"));
       seen.push({ room, seq: s.seq });
       msgs.push(...triggers.map((t) => t.id));
     }
-    return { text: parts.join("\n\n"), seen, msgs, hintGiven };
+    return { text: parts.join("\n\n"), seen, msgs, hintGiven, shown: [...shown].map(([room, s]) => ({ room, seqs: [...s] })) };
   };
 
   const deliver = async (uid: string, rooms: Map<string, MsgRow[]>): Promise<void> => {
@@ -307,13 +319,15 @@ export const createRoomHub = (p: HubPorts) => {
       await p.interrupt(w.target); // 先 Esc 打断再投, 不拆 pane (§3b I-1); 被打断那一轮的 duty 不关
     }
     busyNoted.delete(uid);
-    const { text, seen, msgs, hintGiven } = render(uid, rooms);
+    const { text, seen, msgs, hintGiven, shown } = render(uid, rooms);
     const res = await p.paste(w.target, text, p.tailOf?.(w.target, [...rooms.values()].flat()));
     if (res === "ok") {
       for (const [room, rows] of rooms) for (const t of rows)
         p.log?.info({ room, msgId: t.id, target: w.target, lagMs: now() - t.at }, "room: delivered"); // O3: 账本行 at → 注入成功 (msgId 同上, 避开 pino 的 msg 键)
       const batchAt = now(); // 同一批跨 room 共用一个 at: 「最近 N 批」按它去重
       for (const { room, seq } of seen) p.store.append(room, [{ op: "seen", at: batchAt, room, who: { kind: "wizard", id: uid }, seq, batch: true }]);
+      // 投递事实落盘: 轮终 / reload 之后短 id 还要能反查到是哪一批的哪一行。
+      p.deliveryLog?.record(uid, { at: batchAt, rooms: shown });
       uncertain.delete(uid);
       if (hintGiven) replyHintGiven.add(uid);
       const t: TurnWake = turns.get(uid) ?? { rooms: new Set(), msgs: new Set(), replied: new Set(), at: now() };
@@ -468,12 +482,14 @@ export const createRoomHub = (p: HubPorts) => {
     return rooms.length === 1 ? { room: rooms[0], many: rooms } : { many: rooms };
   };
 
-  /** 本轮唤醒它的 room (工具侧短 id 补全的唯一依据; 恰好一个才补)。 */
+  /** 本轮唤醒它的 room (resolveFor 的血缘口径用; 短 id 补全已改按投递记录, 见 msgRoomsOfSeq)。 */
   const turnRooms = (uid: string): string[] => [...(turns.get(uid)?.rooms ?? [])];
-  /** 短形消息 id (纯 seq) → 本轮唯一唤醒 room 的 `hash8.seq`; 多个 room / 不是短形 = 原样。 */
+  /** 短 id 的候选 room: 最近投递记录里渲染过这个 seq 的 room (轮终 / reload 不影响)。 */
+  const msgRoomsOfSeq = (uid: string, seq: number): string[] => p.deliveryLog?.roomsOfSeq(uid, seq) ?? [];
+  /** 短形消息 id (纯 seq) → 唯一候选 room 的 `hash8.seq`; 多个 / 0 个候选 / 不是短形 = 原样。 */
   const shortToFull = (uid: string, id: string): string => {
     if (!/^\d+$/.test(id)) return id;
-    const rooms = turnRooms(uid);
+    const rooms = msgRoomsOfSeq(uid, Number(id));
     return rooms.length === 1 ? msgIdOf(rooms[0]!, Number(id)) : id;
   };
 
@@ -513,7 +529,7 @@ export const createRoomHub = (p: HubPorts) => {
     return defaultFor(uid);
   };
 
-  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, pending, isBoundRoom, reconcileAfter, turnRooms };
+  return { append, write, pump, kick, onIdle, onStop, defaultRoom, defaultFor, resolveFor, pending, isBoundRoom, reconcileAfter, turnRooms, msgRoomsOfSeq };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

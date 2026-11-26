@@ -51,6 +51,7 @@ import {
 } from "./claim.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { BindGateClosed, openRoomStore, resolveHashRef } from "./rooms.js";
+import { openShortIdLog } from "./short-id-log.js";
 import { bindCandidates, planBind, planChannelBackfill, planFork, planUnbind, pendingFirstTouches, sourceRoomOf } from "./room-bind.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { repairStewardInstances, unspawnedStewards } from "./steward-repair.js";
@@ -1456,6 +1457,8 @@ const main = async (): Promise<void> => {
     const roomLog = log.child({ mod: "room" });
     const hub = createRoomHub({
       store: roomStore, log: roomLog,
+      // 短 id 补全的依据: 每一批成功投递过哪些行, 落 stateDir (轮终 / reload 后仍能反查)。
+      deliveryLog: openShortIdLog(join(expandHome(cfg.daemon.stateDir), "short-id-deliveries.json")),
       wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
       mirror: roomMirror,
       live: (target) => m.paneAliveFor(target),
@@ -1629,10 +1632,10 @@ const main = async (): Promise<void> => {
       if (base && base !== raw && roomState(base)) return { room: base };
       return { error: "认不出这个 room: " + raw };
     };
-    /** 短 id 补全的调用口: 本轮唤醒它的 room (room-hub 的 turns) + shared 的纯判定。 */
+    /** 短 id 补全的调用口: 候选 room 来自「最近投递记录」(轮终 / reload 后仍在, 见 daemon/short-id-log)。 */
     const expandMsgRefs = (self: string, ids: readonly string[]): { ids?: string[]; error?: string } => {
       const uid = wizards.get(self)?.uid;
-      return sharedExpandRefs(ids, uid ? hub.turnRooms(uid) : []);
+      return sharedExpandRefs(ids, (id) => (uid && /^\d+$/.test(id) ? hub.msgRoomsOfSeq(uid, Number(id)) : []));
     };
 
     /** 名字 (带不带 .) / uid / human:<id> → Who。 */

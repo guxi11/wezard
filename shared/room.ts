@@ -95,22 +95,23 @@ export const roomMark = (room: string): RoomMark =>
 /** 标记 → 这一行真的进不进企微 (与 isBoundRoom 同口径, 但读的是注入头里的标记)。 */
 export const markIsBound = (m: RoomMark): boolean => m === "群" || m === "单";
 
-/** 工具侧短 id 补全: 注入块里行 id 只写 seq (hash 段在块头), 模型照抄回来时按「本轮唤醒它的
- *  room」补成全 id。纯 seq 且恰好一个 room 才补; 多个 = 歧义; 0 个 (daemon 刚重载, 内存里的本轮
- *  唤醒记录没了) = 给可行动的报错 —— 模型手里正有块头 #hash8 和行号, 能自己拼全形。 */
+/** 工具侧短 id 补全: 注入块里行 id 只写 seq (hash 段在块头), 模型照抄回来时按「最近投递过
+ *  这个 seq 的 room」补成全 id (候选由调用方从持久投递记录取 —— 轮终 / reload 后仍有效)。
+ *  纯 seq 且恰好一个候选 room 才补; 多个 = 歧义; 0 个 = 可行动报错 (模型手里有块头 #hash8 和行号)。 */
 export const expandMsgRef = (id: string, rooms: readonly string[]): { id?: string; error?: string } => {
   const raw = (id ?? "").trim();
   if (!/^\d+$/.test(raw)) return { id: raw };
-  if (rooms.length > 1) return { error: "本轮被多个 room 唤醒, 短 id 认不出是哪一条 —— 请用完整 id (hash8.seq): " + raw };
+  if (rooms.length > 1) return { error: "这个短 id 在多个 room 都投递过, 认不出是哪一条 —— 请用完整 id (hash8.seq): " + raw };
   if (!rooms.length) {
-    return { error: "短 id " + raw + " 认不出: 本轮没有已登记的 room (daemon 可能刚重载) —— 请用完整 id = 注入块头的 #hash8 拼行号, 例: <hash8>." + raw };
+    return { error: "短 id " + raw + " 认不出: 最近的投递记录里没有它 (批次更早 / 已出窗) —— 请用完整 id = 注入块头的 #hash8 拼行号, 例: <hash8>." + raw };
   }
   return { id: msgIdOf(rooms[0]!, Number(raw)) };
 };
-export const expandMsgRefs = (ids: readonly string[], rooms: readonly string[]): { ids?: string[]; error?: string } => {
+/** 每条 id 的候选各算各的 (不同 seq 可能投递在不同 room)。 */
+export const expandMsgRefs = (ids: readonly string[], roomsOf: (id: string) => readonly string[]): { ids?: string[]; error?: string } => {
   const out: string[] = [];
   for (const id of ids) {
-    const r = expandMsgRef(id, rooms);
+    const r = expandMsgRef(id, roomsOf(id));
     if (r.error) return { error: r.error };
     out.push(r.id!);
   }

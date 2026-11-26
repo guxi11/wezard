@@ -5,6 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRoomStore } from "../daemon/rooms.js";
+import { openShortIdLog } from "../daemon/short-id-log.js";
 import { createRoomHub } from "../daemon/room-hub.js";
 import { expandIds, parseInjection } from "../shared/inject-view.js";
 import { DAEMON, expandMsgRef, expandMsgRefs, openDuties, renderMsgLine, roomHash, type MsgRow, type Who } from "../shared/room.js";
@@ -76,8 +77,8 @@ const NAMES = { nameOf: (w: Who) => (w.kind === "wizard" ? "." + w.id : w.id), r
   const amb = expandMsgRef("120", [R, "chat:wrH"]);
   assert.ok(amb.error && amb.error.includes("请用完整 id (hash8.seq)"), "多 room: 明确报歧义: " + amb.error);
   assert.deepEqual(expandMsgRef(h + ".120", [R, "chat:wrH"]), { id: h + ".120" }, "全形永远直通 (跨 room 也行)");
-  assert.deepEqual(expandMsgRefs(["1", "2"], [R]), { ids: [h + ".1", h + ".2"] });
-  assert.ok(expandMsgRefs(["1", "2"], [R, "chat:wrH"]).error);
+  assert.deepEqual(expandMsgRefs(["1", "2"], () => [R]), { ids: [h + ".1", h + ".2"] }, "每个 id 各算各的候选");
+  assert.ok(expandMsgRefs(["1", "2"], () => [R, "chat:wrH"]).error);
 }
 
 // ── 端到端 (hub 真路径): 贴出去的短 id 被抄回来 → 补全 → 关账 ──────────
@@ -87,8 +88,10 @@ const NAMES = { nameOf: (w: Who) => (w.kind === "wizard" ? "." + w.id : w.id), r
   const A = uid(1), B = uid(2);
   const WA: Who = { kind: "wizard", id: A }, WB: Who = { kind: "wizard", id: B };
   const pasted: string[] = [];
+  const logFile = join(dir, "short-id-deliveries.json");
+  let at = 10_000;
   const hub = createRoomHub({
-    store, now: () => 10_000,
+    store, now: () => at, deliveryLog: openShortIdLog(logFile, { now: () => at }),
     wizardOf: (u) => (u === A ? { target: "chat:wrA", name: "a" } : u === B ? { target: "chat:wrB", name: "b" } : undefined),
     nameOf: (w: Who) => (w.kind === "wizard" ? (w.id === A ? ".a" : ".b") : w.id),
     roomLabel: (r) => r,
@@ -111,10 +114,9 @@ const NAMES = { nameOf: (w: Who) => (w.kind === "wizard" ? "." + w.id : w.id), r
   const seq = ask.ok ? ask.row.id.split(".")[1]! : "";
   assert.ok(text.includes("[" + seq + "] .a → .b: 看下日志"), "行 id 短形: " + text);
   assert.ok(text.includes("你要交代: " + seq + " (ask, 来自 .a)"), "交代行短形: " + text);
-  // 模型照抄短 id 回来: 与 daemon 的 /room/reply 同一条补全口 (expandMsgRefs + turnRooms)
-  const rooms = hub.turnRooms(B);
-  assert.deepEqual(rooms, [R], "B 本轮只被这一个 room 唤醒");
-  const refs = expandMsgRefs([seq], rooms);
+  // 模型照抄短 id 回来: 与 daemon 的 /room/reply 同一条补全口 (expandMsgRefs + 投递记录)
+  assert.deepEqual(hub.msgRoomsOfSeq(B, Number(seq)), [R], "投递记录里能反查到这一行");
+  const refs = expandMsgRefs([seq], (id) => hub.msgRoomsOfSeq(B, Number(id)));
   assert.ok(refs.ids);
   const v = hub.append(R, { author: WB, kind: "reply", origin: "tool", re: refs.ids!, text: "好了", status: "done", statusGiven: true });
   assert.ok(v.ok && v.row.status === "done");
