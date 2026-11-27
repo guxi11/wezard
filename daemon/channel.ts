@@ -14,7 +14,7 @@ import { generateReqId, type WSClient, type WsFrame } from "@wecom/aibot-node-sd
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { sleep } from "../shared/std.js";
-import { addressedElsewhere } from "../shared/mention-filter.js";
+import { BUILTIN_BOT_NAMES, leadsWithName, mentionedOthers } from "../shared/mention-filter.js";
 import { learnChannel, learnChannelPost, topicRoomOf } from "./channel-posts.js";
 import { parseTopicRoomId } from "../shared/topic-room.js";
 import { expandHome } from "../shared/paths.js";
@@ -523,13 +523,18 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
   /** 落一行人话; 没有 ingest (旧接线 / 测试桩) 就只记日志 —— 静默丢话是不允许的。 */
   const ingest = (e: ChannelHuman, rawContent = ""): void => {
     // 非 @ 机器人的帖子 / 评论里 @ 了别人 → 不是说给我们的, 在落行 (= 进 perceptron / 催生 topic room) 之前丢掉,
-    // 只记一条 info; 频道历史 (record) 照记。topic_at_bot 的兜底行带 mention:"bot", 不判。`${inline_mention}` 结构化
-    // 标记 (cleanContent 里已剥) 说不清点的是机器人还是别人, 有标记就放行 (fail-open, 无真实载荷样本)。判据与放行条件见
-    // shared/mention-filter.ts (`wrc.botNames` 没配也放行)。
-    if (e.mention !== "bot" && !new RegExp(MENTION_RE.source).test(rawContent)) {
-      const others = addressedElsewhere(cfg.wrc.botNames, e.text);
+    // 只记一条 info; 频道历史 (record) 照记。topic_at_bot 的兜底行带 mention:"bot", 不判。
+    // 判据不 fail-open: 机器人名 = 内置名 + `wrc.botNames`, 后者没配也照样拦 (没人叫得出名字就不是冲我们来的)。
+    // 开头点了 `.name` 放行; `@` 后是路径 / 扩展名形状 / 代码里的 @ 由 mentionedOthers 自己剔掉。
+    // 频道正文里的 `${inline_mention:…}` 结构化标记 (cleanContent 已剥成空) 说不清点的是谁: 只带标记、正文没点
+    // 机器人的一律按「@ 了别人」丢弃 (@ 机器人恒有 topic_at_bot 帧, 走 mention:"bot")。
+    if (e.mention !== "bot" && !leadsWithName(e.text)) {
+      const structured = new RegExp(MENTION_RE.source).test(rawContent);
+      const others = structured
+        ? ["<inline_mention>"]
+        : mentionedOthers([...BUILTIN_BOT_NAMES, ...(cfg.wrc.botNames ?? [])], e.text);
       if (others.length) {
-        log.info({ room: e.room, msgid: e.msgid, others }, "channel: @ 了别人而非本机器人, 不进 monitor (丢弃)");
+        log.info({ room: e.room, msgid: e.msgid, others, structured }, "channel: @ 了别人而非本机器人, 不进 monitor (丢弃)");
         return;
       }
     }

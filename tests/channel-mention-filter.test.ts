@@ -1,5 +1,6 @@
 // 频道的非 @ 帖子 / 评论 (topic_event / topic_reply_event) 里 @ 了别人而非本机器人 → ingest 前丢弃。
-// 放行: 没配 botNames、艾特了本机器人、只有路径、`${inline_mention}` 结构化标记、topic_at_bot 兜底行。
+// 放行: 开头点 .name、艾特了本机器人 (内置名 + botNames)、只有路径 / 扩展名形状、代码里的 @、topic_at_bot 兜底行。
+// 不 fail-open: botNames 没配也拦; 只有 `${inline_mention}` 结构化标记 (正文被剥空) 也拦。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -50,7 +51,10 @@ for (const kind of ["post", "reply"] as const) {
   assert.equal((await run(B, ["@张三 看下", "@张三 @src/foo.ts"], kind)).length, 0, kind + ": 艾特别人 → 不落行");
   assert.equal((await run(B, ["@weSingapore 看下", "@张三 @weSingapore 一起", "@src/foo.ts 看下", "看下", "```java\n@Override\n```", "`@Component` 注解"], kind)).length, 6,
     kind + ": 机器人 / 机器人+别人 / 只有路径 / 无艾特 / 代码块里的 @ → 放行");
-  assert.equal((await run([], ["@张三 看下"], kind)).length, 1, kind + ": botNames 未配 → fail-open");
-  assert.equal((await run(B, ["请 ${inline_mention:u1} 看下"], kind)).length, 1, kind + ": 结构化 @ 标记 → 放行 (分不清点的是谁)");
+  assert.equal((await run([], ["@张三 看下"], kind)).length, 0, kind + ": botNames 未配也拦 (不 fail-open)");
+  assert.equal((await run(B, ["请 ${inline_mention:u1} 看下"], kind)).length, 0, kind + ": 只有结构化 @ 标记 → 丢弃");
+  assert.equal((await run([], ["请 ${inline_mention:u1} 看下"], kind)).length, 0, kind + ": botNames 未配 + 只有结构化标记 → 丢弃");
+  assert.equal((await run([], ["看下"], kind)).length, 1, kind + ": botNames 未配且无 @ → 放行");
+  assert.equal((await run([], ["@src/foo.ts 看下", "@wezard 看下"], kind)).length, 2, kind + ": botNames 未配, 只有路径 / 内置机器人名 → 放行");
 }
 console.log("channel mention filter ok");
