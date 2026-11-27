@@ -188,13 +188,11 @@
     if (ns.length === 2) return ns.join(' ↔ ');
     return ns.slice(0, 3).join('·') + (ns.length > 3 ? ' 等' + ns.length + '人' : '');
   };
-  // 频道名: 人起的名字 (chatNames['chat:<topic_id>']) > 服务端给的 > id 前 8 位 (服务端没名字时回落成 `chat:<id>` 原串, 不当名字用); 与 shared/topic-room.ts topicRoomLabel 同口径。
+  // 图上的频道名: 只认服务端真名 (channels[].name / 频道 room 的人起 title), 没有就退回 id 前 8 位。
+  // 不回落 chatNames —— 那里可能是从 cwd 派生的自动名 (仓目录名), 图上比一串 id 更误导。
+  // 侧栏 / 会话列表仍走 chatNames 那套口径, 不受影响。
   var channelName = function (id, name) {
-    // 服务端给的真名 (channels[].name / room.channel.name, 即 wrc.channel.name) 优先:
-    // chatNames 里可能只是从 cwd 派生的自动名 (仓目录名), 不该盖掉真频道名。
-    var real = name && name !== 'chat:' + id ? name : '';
-    var n = W.chatNames['chat:' + id] || '';
-    return real || (n && n !== 'chat:' + id ? n : String(id).slice(0, 8));
+    return name && name !== 'chat:' + id ? name : String(id).slice(0, 8);
   };
   // 帖子 room 的帖号尾 6 位: 新 id `topic:<T>/<P>` 从 id 读, 旧 `chat:<opk>` 帖子 room 用服务端给的 rootPost。
   var postTail = function (r) {
@@ -406,7 +404,9 @@
       return f;
     };
     (W.channels || []).forEach(function (c) { touch(c.id, c.name, c.host); });
-    rooms.forEach(function (r) { if (r.channel && r.channel.id) touch(r.channel.id, r.channel.name, r.channel.host).rooms.push(r.id); });
+    // room.channel.name 是读时算的 (可能已掺进 chatNames 的 cwd 自动名): 只把频道**自己那个 room 的人起 title**
+    // 当名字用 (room_name 过的才算人起的名字); 帖子 room 的 title 是帖子名, 不能拿来命名频道。
+    rooms.forEach(function (r) { if (r.channel && r.channel.id) touch(r.channel.id, r.kind === 'channel' ? r.title : '', r.channel.host).rooms.push(r.id); });
     return order.sort().map(function (id) { var f = by[id]; f.name = channelName(f.cid, f.name); return f; });
   };
   // 文字宽的估值 (12px 粗体): 汉字 / 全角 12.5, emoji 15, 其余 7。
