@@ -1,10 +1,10 @@
 // 频道框的演示数据 (纯假名, 不含任何真实人名 / 群名 / 票据): 给 room-graph.dom.mjs 断言用, 也给 serve-channel-fixture.mjs 截图用。
 //
 //   .HostDemo 绑在「Demo 频道」(3 个 topic room + 1 个旧帖子 room + 1 个存档频道 room);
-//   「空频道 Demo」没绑 host 也没有任何 room (只剩标题的空框, 标题显示「未绑 host」);
+//   「空频道 Demo」没绑 host 也没有任何 room: 窗口内没有 room → 整个框 (连标题) 都不出, 用来断言这一条;
 //   帖子名 = 首条人话缩略 firstAsk: a1b2c3 / d4e5f6 同一句 (撞名, 追加「· 帖xxxxxx」消歧), 另两个没有 (退回「帖 xxxxxx」)。
 //   外加一个普通群与一个 wizard 两人 dm, 都在框外。
-// 多框 / 绑了 host 的空框 / 窗口外 room 等变体由 room-graph.dom.mjs 在这份基础上改。
+// 多框 / 绑了 host 的频道 / 窗口外 room 等变体由 room-graph.dom.mjs 在这份基础上改。
 // 形状与 /api/world 一致 (shared/room-view.ts buildChannelFacts / shared/world.ts)。
 const uid = (n) => "w" + String(n).padStart(12, "0");
 const who = (kind, id) => ({ kind, id });

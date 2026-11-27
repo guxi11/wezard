@@ -192,17 +192,17 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
 }
 
 // 频道框 (docs/evolve/channel-topic-rooms.md §P2): 一个频道一个框, 框内含它名下的 room 节点 (topic room / 旧帖子 room / 存档频道 room 都算),
-// 空频道也有框, 框外的节点 (人 / 别的 room / 别的框) 不压进框里, 框内 room 互不重叠, 不再有指向「频道 room」的弱连线。
+// 只为窗口内真有 room 的频道出框 (空频道整框不出), 框外的节点 (人 / 别的 room / 别的框) 不压进框里, 框内 room 互不重叠, 不再有指向「频道 room」的弱连线。
 for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 390, h: 640 }]]) {
   const world = demoChannelWorld();
   const L = load(world, panel);
   const m = model(L, world);
-  assert.deepEqual(m.frames.map((f) => f.cid), world.channels.map((c) => c.id).sort(), `${label}: 一个频道一个框 (含空频道)`);
+  assert.deepEqual(m.frames.map((f) => f.cid), [world.channels[0].id], `${label}: 只为窗口内真有 room 的频道出框 (空频道 ${world.channels[1].id} 不出)`);
   const by = Object.fromEntries(m.frames.map((f) => [f.cid, f]));
   const c1 = world.channels[0], c2 = world.channels[1];
   assert.equal(c1.rooms.length, 5, "demo: 频道 1 名下 3 个 topic room + 1 个旧帖子 room + 1 个存档频道 room");
   assert.deepEqual(by[c1.id].rooms.slice().sort(), c1.rooms.slice().sort(), `${label}: 框内 = 频道名下全部 room (含存档 room、旧帖子 room)`);
-  assert.deepEqual(by[c2.id].rooms, [], `${label}: 空频道的框里没有 room, 但框在`);
+  assert.ok(!by[c2.id], `${label}: 空频道没有框 (整个隐藏, 不留空框)`);
   assert.ok(!m.links.some((l) => l.chan), `${label}: 频道弱连线 (chan) 已由框取代`);
   const ids = new Set(m.nodes.map((n) => n.id));
   assert.ok(m.links.every((l) => ids.has(l.a) && ids.has(l.b)), `${label}: 不留指向不存在节点的线`);
@@ -236,10 +236,8 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
     if (Math.abs(a.x - b.x) < A[0] + B[0] - 0.5 && Math.abs(a.y - b.y) < A[1] + B[1] - 0.5) roomOverlap++;
   }
   assert.equal(roomOverlap, 0, `${label}: 框把 room 节点挤到互相重叠`);
-  const empty = rects.find((r) => r.f.cid === c2.id).b;
-  assert.ok(empty.x1 - empty.x0 >= L.frameTitle(by[c2.id]).w && Number.isFinite(empty.y0), `${label}: 空框要装得下标题`);
   rects.forEach(({ f, b }) => assert.ok(b.x1 - b.x0 <= panel.w - 12, `${label}: 框「${f.name}」比画布还宽`));
-  assert.ok(L.frameTitle(by[c2.id]).tail.includes("未绑 host") && L.frameTitle(by[c1.id]).tail.includes("🎩 HostDe"), `${label}: 标题 = 频道名 + 🎩 host / 未绑 host`);
+  assert.ok(L.frameTitle(by[c1.id]).tail.includes("🎩 HostDe"), `${label}: 标题 = 频道名 + 🎩 host`);
   console.log(`graph-layout ${label} 频道框: ${g.frames.length} 个框 · ${rs.length} 个 room · 框内 ${by[c1.id].nodes.length} 个`);
 }
 

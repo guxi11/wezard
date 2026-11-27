@@ -996,7 +996,7 @@ try {
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
   }
 
-  // ── 频道框 (docs/evolve/channel-topic-rooms.md P2): 一个频道一个虚线框, 框住名下全部 room (topic room / 旧帖子 room / 存档频道 room), 空频道也有框; 桌面与 390 宽都不溢出 ──
+  // ── 频道框 (docs/evolve/channel-topic-rooms.md P2): 一个频道一个虚线框, 框住名下全部 room (topic room / 旧帖子 room / 存档频道 room), 窗口内没有 room 的频道不出框; 桌面与 390 宽都不溢出 ──
   {
     const demo = demoChannelWorld();
     const C1 = demo.channels[0], C2 = demo.channels[1];
@@ -1030,18 +1030,17 @@ try {
           frameBounds: frames.map((f) => [Math.round(f.rect.x0), Math.round(f.rect.x1)]),
         };
       }, C1.id);
-      assert.equal(r.frames.length, 2, `${label}: 一个频道一个框 (含空频道): ` + JSON.stringify(r.frames.map((f) => f.id)));
-      assert.deepEqual(r.frames.map((f) => f.id).sort(), [C1.id, C2.id].sort());
+      assert.equal(r.frames.length, 1, `${label}: 只为窗口内真有 room 的频道出框: ` + JSON.stringify(r.frames.map((f) => f.id)));
+      assert.deepEqual(r.frames.map((f) => f.id), [C1.id]);
       assert.equal(r.chan, 0, `${label}: 没有频道弱连线`);
       assert.equal(r.hubNodes, 0, `${label}: 布局用的 hub 节点不进 DOM`);
       const inside = C1.rooms.filter((id) => r.inFrame[id]);
       assert.deepEqual(inside.sort(), C1.rooms.slice().sort(), `${label}: 框内含频道名下全部 5 个 room (3 topic + 旧帖子 + 存档): ` + JSON.stringify(r.inFrame));
       assert.equal(r.inFrame["chat:wrDemoGroup"], false, `${label}: 普通群不在频道框里: ` + JSON.stringify({ f: r.f1.rect, g: r.rooms["chat:wrDemoGroup"].box, svgW: r.svgW }));
       assert.equal(r.pplInside, 0, `${label}: 人 / wizard 不压进框里`);
-      assert.equal(r.f1.cls.includes("empty"), false);
-      assert.ok(r.frames.find((f) => f.id === C2.id).cls.includes("empty"), `${label}: 没有 room 的频道是空框`);
+      assert.equal(r.frames.some((f) => f.id === C2.id), false, `${label}: 窗口内没有 room 的频道整个不出框`);
       assert.ok(r.titles.some((t) => t.text.includes("Demo 频道") && t.text.includes("🎩")), `${label}: 标题 = 频道名 + 🎩 host: ` + JSON.stringify(r.titles.map((t) => t.text)));
-      assert.ok(r.titles.some((t) => t.text.includes("空频道") && t.text.includes("未绑 host")), `${label}: 没绑 host 显示「未绑 host」`);
+      assert.equal(r.titles.some((t) => t.text.includes("空频道")), false, `${label}: 空频道连标题一起隐藏`);
       assert.equal(r.titleInFrame, true, `${label}: 标题不溢出框`);
       assert.deepEqual(Object.values(r.rooms).filter((v) => v.arch).map((v) => v.text.includes("存档")), [true], `${label}: 存档频道 room 标「存档」且是弱化样式`);
       assert.ok(r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text.includes("帮我看看"), `${label}: topic room 在框内显示首条人话缩略 (不带频道名): ` + r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text);
