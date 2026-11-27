@@ -25,7 +25,8 @@ import { sleep } from "../shared/std.js";
 import { STATUS_GUIDE } from "../shared/room-overdue.js";
 import { parseTopicRoomId } from "../shared/topic-room.js";
 
-/** gone = 目标没有任何会话绑定 (stop_wizard end / /kill 丢掉了它): 重试也贴不进去, 要有人重生或改派。 */
+/** gone = 目标没有任何会话绑定 (stop_wizard end / /kill 丢掉了它): 重试也贴不进去, 要有人重生或改派。
+ *  唯一例外是先过 coldStart (帖子 / 频道 room 只落记录的实例, 第一次唤醒时由它起会话)。 */
 export type PasteResult = "ok" | "uncertain" | "failed" | "gone";
 
 export interface HubPorts {
@@ -49,6 +50,13 @@ export interface HubPorts {
   interrupt: (target: string) => Promise<void>;
   /** `tail` = 这次唤醒要挂的提醒尾巴 (见 tailOf); pane 放行之后才由 injectText 渲染。 */
   paste: (target: string, text: string, tail?: WakeTail) => Promise<PasteResult>;
+  /** `paste` 拿到 gone 之后的一次冷启动 (帖子 / 频道 room 的实例只落记录、不预起 pane —— 第一次被
+   *  唤醒时由它起会话)。返回:
+   *   "started"  = 会话已起好 (newSession 已返回), 立刻重投这一批;
+   *   "birthing" = 已经在起了 (出生窗口), 这次不重复 spawn, 也不写 undelivered 行, 30s 后重投;
+   *   "declined" = 不该替它重生 (有过会话 / 被显式结束), 照旧按 gone 处理。
+   *  不给 = 老行为 (gone 就是 gone)。 */
+  coldStart?: (uid: string, target: string) => Promise<"started" | "birthing" | "declined">;
   /** 唤醒时才挂的提醒尾巴 (管家自查 / 点名提示): 按「被唤醒的 target + 触发它的行」现算, 不写进账本行。
    *  只对人话触发行挂 (见 wake-tail.ts); 没有就不挂。 */
   tailOf?: (target: string, triggers: readonly MsgRow[]) => WakeTail | undefined;
@@ -354,7 +362,22 @@ export const createRoomHub = (p: HubPorts) => {
     busySince.delete(uid);
     escalated.delete(uid);
     const { text, seen, msgs, hintGiven, shown } = render(uid, rooms);
-    const res = await p.paste(w.target, text, p.tailOf?.(w.target, [...rooms.values()].flat()));
+    const tail = p.tailOf?.(w.target, [...rooms.values()].flat());
+    let res = await p.paste(w.target, text, tail);
+    // 帖子 / 频道 room 的实例不预起 pane: 第一次唤醒由这里冷启动, 起好再投一次。
+    // revived = 这次 gone 不是「没有会话」的终态 (起上了 / 正在起) —— 不写 undelivered 系统行。
+    let revived = false;
+    if (res === "gone" && p.coldStart) {
+      const cold = await p.coldStart(uid, w.target);
+      if (cold !== "declined") {
+        revived = true;
+        if (cold === "started") {
+          // 起好但这一贴仍没落 (绑定还没齐 / pane 还没就绪): 当可重试, 不当「已被结束」。
+          const again = await p.paste(w.target, text, tail);
+          res = again === "gone" ? "failed" : again;
+        } else res = "failed";
+      }
+    }
     if (res === "ok") {
       for (const [room, rows] of rooms) for (const t of rows)
         p.log?.info({ room, msgId: t.id, target: w.target, lagMs: now() - t.at }, "room: delivered"); // O3: 账本行 at → 注入成功 (msgId 同上, 避开 pino 的 msg 键)
@@ -382,8 +405,8 @@ export const createRoomHub = (p: HubPorts) => {
     }
   };
 
-  /** 目标没有会话 (被 stop_wizard 结束): 它名下被这批行唤醒的 duty 各给提问者写一条系统行 ——
-   *  不然 chat_ask 只落在账本里, 提问方以为对方在做, 泵每 30s 静默重试到天荒地老。
+  /** 目标没有会话 (被 stop_wizard 结束 / 冷启动也起不来): 它名下被这批行唤醒的 duty 各给提问者
+   *  写一条系统行 —— 不然 chat_ask 只落在账本里, 提问方以为对方在做, 泵每 30s 静默重试到天荒地老。
    *  游标不推: 之后同名 spawn_wizard 重生的它照样读得到这些行。账本里有即不重复 (同 escalate)。 */
   const reportGone = (uid: string, rooms: Map<string, MsgRow[]>): number => {
     const who: Who = { kind: "wizard", id: uid };

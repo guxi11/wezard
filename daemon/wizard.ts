@@ -113,6 +113,10 @@ export interface WizardRecord {
    *  归谁管 (预算、回收); forkOf 是上下文从哪来。克隆自己时两者是同一个, 不重复记。 */
   forkOf?: string;
   bornAt: number;
+  /** 上次会话被显式结束 (stop_wizard mode=end) 的时刻 —— 记录留着 (名字 / 身份在), 但它是「有过
+   *  会话、被人结束了」: 泵不许替它冷启动 (那不是「从没起过」, 是人的明确动作)。重新 spawn / 冷启动
+   *  成功时清掉。档 / 家谱字段判不出这个 (帖 room 的实例记录与起过会话的实例记录同形)。 */
+  endedAt?: number;
   /** 当前档位 (models.backends.<backend>.tiers 的键, 聪明度只认它): spawn / clone 时按落地的档位记,
    *  之后 set_model 换模型 / effort 时 daemon 按同一张表反查更新; 反查不出就清掉 (不认识这个模型, 不猜)。 */
   tier?: string;

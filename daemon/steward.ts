@@ -199,3 +199,22 @@ export const markGlobalSteward = (store: WizardStore, home: string): { marked: b
   store.upsert(h, { kind: "global-steward" });
   return { marked: true, target: h };
 };
+
+/** 泵投递拿到 gone 后能不能替这条记录冷启动。记录形态一律: 帖 room 的实例记录与起过会话的实例
+ *  记录长得一样 (openInstance 只继承身份级字段), 所以只看「有没有过会话的证据」:
+ *   - endedAt 在 → stop_wizard 显式结束过 (人的动作), 不替它重生;
+ *   - parent / clonedFrom / forkOf / tier 在 → 当年是 spawn / clone 出来的, 有过会话;
+ *   - 它在本机任何 room 里发过言 → 有过会话;
+ *   - 现在已有绑定 → 不是 gone。
+ *  判据不齐时宁可不重生 (误重生 = 白花一次 spawn 并复活一个被人收掉的会话; 漏判只是这一条晚点到)。 */
+export const coldStartVerdict = (a: {
+  rec: WizardRecord | undefined;
+  spoke: boolean;
+  hasBinding: boolean;
+  spawning: boolean;
+}): "yes" | "declined" | "birthing" =>
+  a.rec && a.rec.endedAt === undefined
+    && !a.rec.parent && !a.rec.clonedFrom && !a.rec.forkOf && !a.rec.tier
+    && !a.spoke && !a.hasBinding
+    ? (a.spawning ? "birthing" : "yes")
+    : "declined";

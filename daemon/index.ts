@@ -90,7 +90,7 @@ import { baseOfKey, bindTagLinker, headed, ownHead, isInternalKey, keyOf, linkTa
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import { chatBaseOf, chatNameOf, chatPolicyOf, listChatNames, peerAddress, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { appointedSteward, isStewardTarget, localManifestation, markGlobalSteward, STEWARD_KINDS, stewardIdentityOf, stewardRoute, stewardsAt } from "./steward.js";
+import { appointedSteward, coldStartVerdict, isStewardTarget, localManifestation, markGlobalSteward, STEWARD_KINDS, stewardIdentityOf, stewardRoute, stewardsAt } from "./steward.js";
 import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
   anchorOf,
@@ -337,6 +337,8 @@ const main = async (): Promise<void> => {
   let roomOfHashHook: (hash: string) => string | undefined = () => undefined;
   /** room 泵注入成功的 touch (看门狗活动时钟; 同上, room 块里回填)。 */
   let roomActivityTouch: (target: string) => void = () => undefined;
+  /** 泵投递拿到 gone 后的冷启动 (房间块里回填; 见 coldStartSession)。 */
+  let coldStartSession: ((uid: string, target: string) => Promise<"started" | "birthing" | "declined">) | undefined;
   /** 新群引导在 room 模型里的两个接线点 (见 inbound.ts InboundOpts): room 块里回填 —— 只有它持有 hub。 */
   let guideInboundHook: InboundOpts["guideInbound"];
   let guideSettleHook: InboundOpts["guideSettle"];
@@ -694,7 +696,8 @@ const main = async (): Promise<void> => {
         (r) => r.ok ? { what: "频道 " + r.topicId + " 换绑到 ." + r.className, self, byHuman: true } : undefined,
       );
       if (!out.ok) { json(res, 400, out); return; }
-      // 帖子 room 的实例只落记录、不预起 pane: 第一次被唤醒时泵会冷启动它 (每帖一个常驻 pane 会顶到上限)。
+      // 帖子 room 的实例只落记录、不预起 pane: 第一次被唤醒时泵会冷启动它 (每帖一个常驻 pane 会顶到上限);
+      // 被 stop_wizard 显式结束过的记录 (endedAt) 不重生 —— 那是人的动作, 照旧报没有会话。
       roomLog.info({ ...out }, "channel: rebind");
       json(res, 200, { ...out, charter: await note });
     });
@@ -939,7 +942,8 @@ const main = async (): Promise<void> => {
           const token = randomUUID();
           // 新生的记录一律是**自由 wizard** (临时 worker / 分身): 明确清掉从复用的冷记录上
           // 可能带过来的类归属 —— 克隆一个管家出来是独立的人, 不是那个类的实例。
-          wizards.upsert(target, { name: candidate, spawning: BOOT_ID, birthToken: token, identity: target, ordinal: undefined });
+          // endedAt 清掉: 复用的冷记录可能被人结束过 —— 这一条重生是新的开始。
+          wizards.upsert(target, { name: candidate, spawning: BOOT_ID, birthToken: token, identity: target, ordinal: undefined, endedAt: undefined });
           return { ok: true, target, name: candidate, token };
         };
         const clash = asked ? wizards.byName(asked) : undefined;
@@ -1514,6 +1518,9 @@ const main = async (): Promise<void> => {
         if (r.ok) roomActivityTouch(target); // 注入成功 = 该 wizard 有新事件, 看门狗的 stale 窗口重置
         return r.ok ? "ok" : r.uncertain ? "uncertain" : r.gone ? "gone" : "failed";
       },
+      // 帖子 / 频道 room 的实例、perceptron 只落记录、不预起 pane: 泵第一次唤醒它时报 gone 时
+      // 在这里冷启动 (该不该起由 coldStartSession 判 —— 被 stop_wizard 显式结束过的不许重生)。
+      coldStart: async (uid, target) => (coldStartSession ? coldStartSession(uid, target) : "declined"),
     });
     // 外部 agent (CoC) 接入: 每个调用方一间 adhoc room, 请求 = 一条 ask 行, 状态从账本现算。
     // 路由只挂在控制面 socket (视图口按规则 410); 口令按调用方一个文件, boot / 配置热载时补齐。
@@ -2758,21 +2765,57 @@ const main = async (): Promise<void> => {
       roomLog.info({ room, guide: a.guide, msgId: v.row.id }, "onboarding: 人话进了引导 room");
       return { ok: true };
     };
-    /** 管家实例的 pane: 记录在、pane 没有就起一个, 起来后踢一脚泵 (否则要等 30s 重踢)。
-     *  群落定 (guideSettleRoom) 与频道落定 / boot 兜底共用这一个口子 —— spawning 去重 (同一轮里
-     *  先 guideSettleRoom 再 settleBoundChannel 不会起两次)。**记录在、pane 没有**正是「已被结束」
-     *  的来源: monitor 唤醒时探活 gone (人 2026-11-23 现场)。 */
+    /** 管家实例的会话: 记录在、绑定没有就起一个 (newSession 返回 = 绑定已落)。返回 false = 已经有
+     *  绑定 / 正在起 (出生窗口), 不重复 spawn。群落定 (guideSettleRoom)、频道落定、boot 兜底与
+     *  泵的首次唤醒冷启动 (coldStartSession) 共用这一个口子。 */
     const stewardSpawning = new Set<string>();
+    const ensureStewardSession = async (target: string): Promise<boolean> => {
+      if (!target) return false;
+      if (m.hasMirrorTarget(target)) return true;
+      if (stewardSpawning.has(target) || channelGuideSpawning.has(target)) return false;
+      stewardSpawning.add(target);
+      const name = settleName(wizards, chatNameOf(cfg, target), target) || target;
+      try {
+        const r = await m.newSession(target, name, { silent: true });
+        if (!r.ok) { roomLog.warn({ target, reason: r.reason }, "room: 管家会话起不来"); return false; }
+        return true;
+      } finally { stewardSpawning.delete(target); }
+    };
+    /** 落定路径的起 pane: 起上了踢一脚泵 (否则要等 30s 重踢)。 */
     const spawnStewardPane = (target: string): void => {
       if (!target) return;
       if (m.hasMirrorTarget(target)) { hub.kick(); return; }
       if (stewardSpawning.has(target) || channelGuideSpawning.has(target)) return;
-      stewardSpawning.add(target);
-      const name = settleName(wizards, chatNameOf(cfg, target), target) || target;
-      void m.newSession(target, name, { silent: true })
-        .then(() => hub.kick())
-        .catch((e: unknown) => roomLog.warn({ target, err: errText(e) }, "room: 管家 pane 起不来 (有唤醒时泵会再试)"))
-        .finally(() => stewardSpawning.delete(target));
+      void ensureStewardSession(target)
+        .then((ok) => { if (ok) hub.kick(); })
+        .catch((e: unknown) => roomLog.warn({ target, err: errText(e) }, "room: 管家 pane 起不来 (有唤醒时泵会再试)"));
+    };
+    /** 泵投递拿到 gone 后的冷启动 (room-hub 的 coldStart 口子; 帖子 / 频道 room 的实例与 perceptron
+     *  只落记录、不预起 pane, 第一次被唤醒时在这里起会话)。
+     *  只对「**从没**有过会话」的记录做 —— 记录形同一律, 判据只看「有没有过会话的证据」
+     *  (见 steward.coldStartVerdict): endedAt (被显式结束) / parent·clonedFrom·forkOf·tier (当年是
+     *  spawn 出来的) / 在任何 room 里发过言 / 现在已有绑定, 任一条成立就不替它重生。判据不齐时宁可
+     *  不重生 (误重生 = 白花一次 spawn 并复活一个被人收掉的会话; 漏判只是这一条晚点到, 系统行照旧
+     *  提示人 spawn / 改派)。老记录若被结束过又没有任何记号 (从来没发过言), 判不出来 —— 这之后所有
+     *  stop_wizard end 都会写 endedAt。 */
+    coldStartSession = async (uid: string, target: string): Promise<"started" | "birthing" | "declined"> => {
+      try {
+        const spoke = roomStore.ids().some((r) => {
+          try { return roomState(r)?.msgs.some((m) => m.author.kind === "wizard" && m.author.id === uid) ?? false; } catch { return false; }
+        });
+        const verdict = coldStartVerdict({
+          rec: wizards.get(target), spoke,
+          hasBinding: m.hasMirrorTarget(target),
+          spawning: stewardSpawning.has(target) || channelGuideSpawning.has(target),
+        });
+        if (verdict !== "yes") return verdict;
+        if (!(await ensureStewardSession(target))) return "declined"; // 起不来 (内存闸 / spawn 失败): 照旧报没有会话
+        roomLog.info({ target, uid }, "room: 首次唤醒冷启动 (记录在、会话没有)");
+        return "started";
+      } catch (e) {
+        roomLog.warn({ target, uid, err: errText(e) }, "room: 冷启动失败 (照旧报没有会话)");
+        return "declined";
+      }
     };
     /** 引导所在的 room 们 (引导化身是成员的): 群 = [群 room]; 频道键 = 该频道每个 topic room 里引导在座的
      *  (一个频道一条引导可同时住几个 topic room), 加上旧版留下的存档频道 room (若引导还坐在里面)。 */
@@ -4009,9 +4052,10 @@ const main = async (): Promise<void> => {
         // 不拷的话它开局就没有, /clear 或交接重开后更是彻底没了。标上来源; 已经是继承来的不再套一层。
         ...(inherit ? { memory: (wizards.get(source)?.memory ?? []).map((x) => x.startsWith("(继承自 ") ? x : `(继承自 ${displayName(source)}) ${x}`) } : {}),
         tier: pick.tier,
-        // 显式写 undefined: 复用的冷记录可能当过 lead。
+        // 显式写 undefined: 复用的冷记录可能当过 lead / 被人结束过。
         lead: b.lead === true ? true : undefined,
         leadOf: undefined,
+        endedAt: undefined,
         // 生完才清; 这个进程中途没了, 下次开机由 sweepUnborn 认出并收掉。
         spawning: BOOT_ID,
       });
@@ -4135,6 +4179,8 @@ const main = async (): Promise<void> => {
         if (b.forget && childrenOf(wizards.all(), cold.target).length) { json(res, 409, { ok: false, reason: "end child wizards before forgetting their parent" }); return; }
         const forgotten = b.forget ? forgetWizard(cold.target) : false;
         if (b.forget && !forgotten) { const again = planRetirementBlock(cold.target); json(res, again?.status ?? 409, { ok: false, reason: again?.reason ?? "wizard retirement is blocked" }); return; }
+        // 记录留着 = 「有过身份、被人明确结束」: 泵不许再替它冷启动 (room-hub 的 coldStart 判据)。
+        if (!forgotten) wizards.upsert(cold.target, { endedAt: Date.now() });
         json(res, 200, { ok: true, target: cold.target, name: cold.name, mode: "end", forgotten, note: "它本来就没有会话在跑" });
         return;
         } finally { retiringWizardTargets.delete(cold.target); }
@@ -4192,6 +4238,8 @@ const main = async (): Promise<void> => {
       if (wizards.get(target)?.birthToken !== victimRec?.birthToken) { json(res, 409, { ok: false, target, reason: "wizard identity changed during stop; identity cleanup withheld" }); return; }
       const forgotten = end && b.forget ? forgetWizard(target) : false;
       if (end && b.forget && !forgotten) { const blocked = planRetirementBlock(target); json(res, blocked?.status ?? 409, { ok: false, target, reason: blocked?.reason ?? "wizard retirement is blocked" }); return; }
+      // 记录留着 = 「被人明确结束」: endedAt 让泵的冷启动判据认出它 (不许自动重生)。
+      if (end && !forgotten && wizards.get(target)) wizards.upsert(target, { endedAt: Date.now() });
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
       if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name || target, by: displayName(self), ...(b.forget ? { why: "forgotten" } : {}) }, subjectOf(victimRec));
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!forgotten, ...(canceled ? { canceled } : {}) });
