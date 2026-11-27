@@ -96,6 +96,55 @@ const readTailUntil = <T>(
   return walk(Math.min(TAIL_BYTES, ceiling));
 };
 
+// ── 尾读缓存 ────────────────────────────────────────────────────────
+// 名册 / 派活要给几百个 wizard 各读一遍 transcript 尾巴 (lastExchange / 模型 / ctx / 缓存 TTL / 材料),
+// 全是**同步**读 + JSON.parse, 本机实测 3.4s 一趟, 期间整个 daemon 主线程停摆 (回环超时的根因)。
+// 而这些函数都是 (路径, 参数, 文件内容) 的纯函数, 文件没动结果就不会变 —— 所以按 mtimeMs+size 记住:
+//   · 命中 = 一次 statSync, 不读不解析; 文件一追加 (size / mtime 任一变) 立刻失效重算。
+//   · stat 在读**之前**取: 读的过程中文件又长了, 存下的是旧戳配新内容, 下一次 stat 对不上就重算 (宁可多算, 不陈旧)。
+//   · 容量有界 (LRU): 本机 3.7GB, 缓存只许是几百条小字符串 / 小数组, 不许无限涨。
+//   · 路径不存在 (stat 抛) 不缓存, 直接算 (调用方各自处理「没有 transcript」)。
+export interface StatMemoStats { hits: number; misses: number; size: number }
+
+export const makeStatMemo = <T>(max: number) => {
+  const cache = new Map<string, { stamp: string; value: T }>();
+  const stats = { hits: 0, misses: 0 };
+  const stampOf = (path: string): string | undefined => {
+    try { const st = statSync(path); return `${st.mtimeMs}:${st.size}`; } catch { return undefined; }
+  };
+  return {
+    get: (key: string, path: string, compute: () => T): T => {
+      const stamp = stampOf(path);
+      if (stamp === undefined) return compute();
+      const hit = cache.get(key);
+      if (hit && hit.stamp === stamp) {
+        stats.hits += 1;
+        // 命中就挪到队尾: Map 的插入序 = 最近使用序。
+        cache.delete(key);
+        cache.set(key, hit);
+        return hit.value;
+      }
+      stats.misses += 1;
+      const value = compute();
+      cache.delete(key);
+      cache.set(key, { stamp, value });
+      while (cache.size > max) cache.delete(cache.keys().next().value as string);
+      return value;
+    },
+    clear: (): void => { cache.clear(); stats.hits = 0; stats.misses = 0; },
+    stats: (): StatMemoStats => ({ ...stats, size: cache.size }),
+  };
+};
+
+// 标量 / 一行字符串: 便宜, 给宽一点; 材料清单是对象数组, 每份可到几十 KB, 给窄一点。
+const scalarMemo = makeStatMemo<unknown>(2048);
+const materialsMemo = makeStatMemo<ContextMaterial[]>(256);
+const memoed = <T>(name: string, path: string, args: string, compute: () => T): T =>
+  scalarMemo.get(`${name}|${path}|${args}`, path, compute as () => unknown) as T;
+/** 测试 / 排障: 清空并读命中计数。 */
+export const peersMemoClear = (): void => { scalarMemo.clear(); materialsMemo.clear(); };
+export const peersMemoStats = (): { scalar: StatMemoStats; materials: StatMemoStats } => ({ scalar: scalarMemo.stats(), materials: materialsMemo.stats() });
+
 /** Native Codex lifecycle survives tool waits and dimmed/hidden spinner footers. */
 export const codexTurnBusy = (jsonlPath: string, since = 0): boolean | undefined =>
   readTailUntil(jsonlPath, (raw) => raw.split("\n").reverse().reduce<boolean | undefined>((busy, line) => {
@@ -379,26 +428,33 @@ const stripMd = (s: string): string => s.replace(/[`*_~|]/g, "").replace(/\s+/g,
 /** One-line "what is this session doing" preview, for list rendering. */
 export const summarizeTail = (jsonlPath: string, n = 3, per = 80): string => {
   if (!existsSync(jsonlPath)) return "(新会话 · 暂无对话)";
-  const turns = talkTurns(jsonlPath, n);
-  if (turns.length === 0) return "(暂无对话)";
-  // 截了就得看得出截了: 裸 slice 出来的半句话, 读的人会当成它就说了这么多。
-  return turns.map((t) => `${t.role === "user" ? "你" : "AI"}: ${truncate(stripMd(t.text), per)}`).join(" · ");
+  return memoed("summarizeTail", jsonlPath, `${n}|${per}`, () => {
+    const turns = talkTurns(jsonlPath, n);
+    if (turns.length === 0) return "(暂无对话)";
+    // 截了就得看得出截了: 裸 slice 出来的半句话, 读的人会当成它就说了这么多。
+    return turns.map((t) => `${t.role === "user" ? "你" : "AI"}: ${truncate(stripMd(t.text), per)}`).join(" · ");
+  });
 };
 
 /** 最近一个来回, 压成一行: `▸ 问话 ◂ 它最新的一句`。名册用它 —— 读名册的是另一个
  *  wizard, summarizeTail 的「你:」在它眼里指的是它自己; 这里用 peek_peer 同款的
  *  箭头, 不指代任何人。没有对话 = ""。 */
-export const lastExchange = (jsonlPath: string, per = 80): string => {
-  const round = talkRounds(jsonlPath, 1).at(-1);
-  if (!round) return "";
-  const line = (t: Turn): string => truncate(stripMd(t.text), per);
-  return [`▸ ${line(round[0]!)}`, ...(round.length > 1 ? [`◂ ${line(round.at(-1)!)}`] : [])].join(" ");
-};
+export const lastExchange = (jsonlPath: string, per = 80): string =>
+  memoed("lastExchange", jsonlPath, `${per}`, () => {
+    const round = talkRounds(jsonlPath, 1).at(-1);
+    if (!round) return "";
+    const line = (t: Turn): string => truncate(stripMd(t.text), per);
+    return [`▸ ${line(round[0]!)}`, ...(round.length > 1 ? [`◂ ${line(round.at(-1)!)}`] : [])].join(" ");
+  });
+
+/** 这个会话最近 `n` 个来回里人 / 同伴对它说的话 (旧的在前) —— 派活的证据之一。缓存同上。 */
+export const recentAsks = (jsonlPath: string, n = 12): string[] =>
+  memoed("recentAsks", jsonlPath, `${n}`, () => talkTurns(jsonlPath, n).filter((t) => t.role === "user").map((t) => t.text)).slice();
 
 /** 这个会话最近一次应答用的模型 —— transcript 里记的是真正跑的那个, 而绑定里的
  *  `model` 只在有人显式选过时才有 (用 CLI 默认模型的会话那里是空的)。 */
 export const lastModel = (jsonlPath: string): string =>
-  readTailUntil(jsonlPath, (raw) => pickModel(jsonlPath, raw), (v) => v !== "");
+  memoed("lastModel", jsonlPath, "", () => readTailUntil(jsonlPath, (raw) => pickModel(jsonlPath, raw), (v) => v !== ""));
 
 const pickModel = (jsonlPath: string, raw: string): string => {
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
@@ -592,7 +648,7 @@ export const renderStewardHint = (): string =>
  *  the tail; 0 when no usage is on record yet. Drives the "session size" note
  *  and route-candidate wake-cost estimates. */
 export const lastContextTokens = (jsonlPath: string): number =>
-  readTailUntil(jsonlPath, (raw) => pickContextTokens(jsonlPath, raw), (v) => v > 0);
+  memoed("lastContextTokens", jsonlPath, "", () => readTailUntil(jsonlPath, (raw) => pickContextTokens(jsonlPath, raw), (v) => v > 0));
 
 const pickContextTokens = (jsonlPath: string, raw: string): number => {
   if (!raw) return 0;
@@ -623,7 +679,7 @@ const pickContextTokens = (jsonlPath: string, raw: string): number => {
  *  0 = no tiered write on record (backend without the split, or no turn yet) —
  *  the caller falls back to config. */
 export const cacheTtlSec = (jsonlPath: string): number =>
-  readTailUntil(jsonlPath, (raw) => pickCacheTtl(jsonlPath, raw), (v) => v > 0);
+  memoed("cacheTtlSec", jsonlPath, "", () => readTailUntil(jsonlPath, (raw) => pickCacheTtl(jsonlPath, raw), (v) => v > 0));
 
 const pickCacheTtl = (jsonlPath: string, raw: string): number => {
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
@@ -647,7 +703,7 @@ const pickCacheTtl = (jsonlPath: string, raw: string): number => {
  *  local command that sends nothing) — older = colder, the safe side.
  *  0 = no request on record — the caller falls back to mtime. */
 export const cacheTouchMs = (jsonlPath: string): number =>
-  readTailUntil(jsonlPath, (raw) => pickCacheTouch(jsonlPath, raw), (v) => v > 0);
+  memoed("cacheTouchMs", jsonlPath, "", () => readTailUntil(jsonlPath, (raw) => pickCacheTouch(jsonlPath, raw), (v) => v > 0));
 
 const pickCacheTouch = (jsonlPath: string, raw: string): number => {
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
@@ -805,7 +861,10 @@ const commandSucceeded = (output: string): boolean => {
 };
 
 /** Latest real task only, after compact and within a bounded tail; never execute transcript code. */
-export const contextMaterials = (jsonlPath: string): ContextMaterial[] => {
+export const contextMaterials = (jsonlPath: string): ContextMaterial[] =>
+  materialsMemo.get(jsonlPath, jsonlPath, () => contextMaterialsUncached(jsonlPath)).slice();
+
+const contextMaterialsUncached = (jsonlPath: string): ContextMaterial[] => {
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
   const raw = readTailBytes(jsonlPath, CONTEXT_FILES_BYTES);
   const truncated = fileSize(jsonlPath) > CONTEXT_FILES_BYTES;

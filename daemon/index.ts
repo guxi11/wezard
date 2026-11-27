@@ -133,7 +133,7 @@ import {
 } from "./wizard.js";
 import { faceRefusal } from "./tool-face.js";
 import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
-import { cacheTouchMs, cacheTtlSec, contextMaterials, firstStamp, lastContextTokens, lastExchange, lastModel, talkTurns } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, contextMaterials, firstStamp, lastContextTokens, lastExchange, lastModel, recentAsks } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { expandTask, TemplateError, type ExpandedTask } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -3440,7 +3440,9 @@ const main = async (): Promise<void> => {
           alive: p.paneAlive,
           self: p.self,
           lastActivity: p.lastActivity,
-          summary: p.summary,
+          // 名册一律在 enrich 里换成 lastExchange (按行惰性取), 这里不碰 p.summary: 它会触发
+          // summarizeTail, 而那份摘要在名册里从来用不上。
+          summary: "",
           ...kinOf(self, all, p.target),
         };
       });
@@ -3619,13 +3621,23 @@ const main = async (): Promise<void> => {
         if (!uid) return "";
         return heldDuties({ kind: "wizard", id: uid }).map(dutyLine).join(" · ");
       };
-      const enrich = (r: (typeof all)[number]) => ({
-        ...r,
-        duty: dutiesOf(r.target),
-        model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
-        summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80) : "",
-        contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
-      });
+      // 惰性: 这几项都要读 transcript 尾巴 (同步), 而渲染只会碰最终列出来的那几行 —— L0 最多 10 行且不带摘要,
+      // L2 一个都不碰, L1 至多 40 行。以前对全机几百行各读一遍 (本机 3.4s 堵死事件循环)。getter 只在
+      // 被读到时算一次; 读过的文件还有 peers.ts 的 stat 缓存兜着。
+      const once = <T,>(f: () => T): (() => T) => { let done = false; let v: T; return () => (done ? v : ((done = true), (v = f()))); };
+      const enrich = (r: (typeof all)[number]) => {
+        const duty = once(() => dutiesOf(r.target));
+        const model = once(() => r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""));
+        const summary = once(() => (r.jsonlPath ? lastExchange(r.jsonlPath, 80) : ""));
+        const contextTokens = once(() => (r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0));
+        return {
+          ...r,
+          get duty() { return duty(); },
+          get model() { return model(); },
+          get summary() { return summary(); },
+          get contextTokens() { return contextTokens(); },
+        };
+      };
       const census = rosterCensus(all);
       const now = Date.now();
       const layer: "L0" | "L1" | "L2" = degraded ? "L0" : b.scope === "all" ? "L2" : b.chat ? "L1" : "L0";
@@ -3683,7 +3695,7 @@ const main = async (): Promise<void> => {
             model: live ? lastModel(live) || r.model : r.model,
             materials,
             files: [...new Set(materials.filter((m) => m.confirmed && m.kind === "read").map((m) => m.path))],
-            asks: live ? talkTurns(live, 12).filter((t) => t.role === "user").map((t) => t.text) : [],
+            asks: live ? recentAsks(live, 12) : [],
             summary: live ? lastExchange(live, 80) : "",
           };
         });

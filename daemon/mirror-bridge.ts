@@ -6599,6 +6599,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const pane = paneOf(target);
     return !!pane && (await tmuxPaneAlive(pane)) && (idleVerdict(target) === false || await paneBusy(pane));
   };
+  /** 调用方刚探过 pane 活着: 不再重复 display-message (isBusy + paneBusy 各问一遍, 一个 pane 白白多 spawn 两次)。 */
+  const isBusyKnownAlive = async (target: string, pane: string): Promise<boolean> =>
+    idleVerdict(target) === false || paneIsBusy(await capturePaneTail(pane, 12));
 
   // 「它这一轮结束了、可以投了」。注册表认得这个 pane 时以它为准: status 在整轮里
   // (工具调用之间、PreToolUse 审批 hook 挂着时) 一直是 busy, 只在轮结束那一刻翻成
@@ -6774,16 +6777,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // 一个 target 的完整画像。本 chat 的兄弟和外 chat 的 peer 走同一条,只有
   // `self` / `address` 因观察者而异 —— 地址本来就是相对调用方说的话。
-  const peerInfoOf = async (t: string, self: string): Promise<PeerInfo> => {
+  // `probe:false` = 不碰 tmux (alive / busy 按冷处理): 给超出探活上限的那些用, 见 foreignPeers。
+  const peerInfoOf = async (t: string, self: string, probe = true): Promise<PeerInfo> => {
     const a = byTarget.get(t);
     const rec = deps.store.get(t);
     const jsonlPath = jsonlOf(t);
     const pane = paneOf(t);
-    const paneAlive = pane ? await tmuxPaneAlive(pane) : false;
+    const paneAlive = pane && probe ? await tmuxPaneAlive(pane) : false;
     const tag = tagOfKey(t);
     const name = displayName(t);
     let lastActivity = 0;
     try { if (jsonlPath) lastActivity = statSync(jsonlPath).mtimeMs; } catch { /* not written yet */ }
+    // 摘要是惰性的: 名册 (最大的调用方) 有自己的一行摘要 (lastExchange) 不读这个, 以前每次全量 summarizeTail
+    // 几百份 transcript 只为了被覆盖。真有人读 (rolepage 世界快照 / peers 列表) 才算, 且 summarizeTail 自带缓存。
+    let summary: string | undefined;
     return {
       target: t,
       tag,
@@ -6798,9 +6805,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxPane: pane,
       attached: !!a,
       paneAlive,
-      busy: paneAlive ? await isBusy(t) : false,
+      busy: paneAlive ? await isBusyKnownAlive(t, pane) : false,
       lastActivity,
-      summary: jsonlPath ? summarizeTail(jsonlPath, 3, 80) : "(未绑定会话)",
+      get summary(): string {
+        return (summary ??= jsonlPath ? summarizeTail(jsonlPath, 3, 80) : "(未绑定会话)");
+      },
       self: t === self,
     };
   };
@@ -6816,7 +6825,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const selfBase = baseOfKey(self);
     // 只列活着的 / 有身份的 —— 冷绑定可能有几百个, 每个探活是两次 tmux。
     const foreign = allTargets().filter((k) => baseOfKey(k) !== selfBase && (byTarget.has(k) || !!wizardStore()?.get(k)));
-    return (await Promise.all(foreign.map((t) => peerInfoOf(t, self)))).sort(byRecent);
+    // 与 worldPeers 同一道闸: 有 pane 的才要探活 (没 pane 的 peerInfoOf 本来就不 spawn tmux), 其中按 transcript
+    // mtime 最近的前 WORLD_PROBE 个探、并发 WORLD_CONC; 其余照旧列出, 只是 alive / busy 按冷处理。
+    // 以前这里是全量 Promise.all —— 几百个绑定一次几百个 tmux spawn。
+    const mtimeOf = (t: string): number => {
+      const jp = jsonlOf(t);
+      if (!jp) return 0;
+      try { return statSync(jp).mtimeMs; } catch { return 0; }
+    };
+    const paned = foreign.filter((t) => !!paneOf(t)).sort((a, b) => mtimeOf(b) - mtimeOf(a));
+    const probed = new Set(paned.slice(0, WORLD_PROBE));
+    return (await mapLimit(foreign, WORLD_CONC, (t) => peerInfoOf(t, self, !paneOf(t) || probed.has(t)))).sort(byRecent);
   };
 
   // peerInfoOf 每个 target 要两次 tmux (pane 存活 + capture tail)。跑了几个月的
