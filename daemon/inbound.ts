@@ -27,6 +27,7 @@ import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guid
 import { isApprentice } from "./apprentice.js";
 import { ensureMeWizard, meWorkspaceOf, ME_TAG } from "./me-room.js";
 import { truncate } from "../shared/std.js";
+import { mentionedOthers } from "../shared/mention-filter.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
@@ -628,6 +629,17 @@ export const installInboundRouter = (
   // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
   const botNames = [...BUILTIN_BOT_NAMES, ...cfg.wrc.botNames.filter(Boolean)];
   const stripAt = (msg: BaseMessage, text: string): string => maybeStripMentions(botNames, msg, text);
+  /** 群里这句 @ 了别人而没 @ 本机器人 → 不是说给我们的, 在任何 gate / room / monitor 之前丢掉 (只记一条 info,
+   *  不回话、不开 room)。判据见 shared/mention-filter.ts。三种情形放行: ① 机器人名没配 (`wrc.botNames` 空 ——
+   *  本机器人叫什么消息里没有字段, 认不出「是不是我」就不拦, 否则 @ 真名的话会被当成别人); ② 频道原生
+   *  帧 (企微只为 @ 机器人的那句发, 本就冲着我们); ③ 开头点了 `.name` (显式寻址 wizard, 正文里 @ 谁只是提及)。 */
+  const addressesOthersOnly = (msg: BaseMessage, raw: string): boolean => {
+    if (!isGroup(msg) || sourceOf(msg) === "channel" || !cfg.wrc.botNames.some(Boolean) || parseTag(raw).tag) return false;
+    const others = mentionedOthers(botNames, raw);
+    if (!others.length) return false;
+    log.info({ msgid: msg.msgid, chat: chatPrincipal(msg), from: msg.from?.userid, others }, "inbound: @ 了别人而非本机器人, 不进 monitor (丢弃)");
+    return true;
+  };
 
   // Render /pwd output from the live attachment + persisted store (bridge.getCwd).
   const renderPwd = (who: string): string => bridge.getCwd(who).runningCwd;
@@ -1288,6 +1300,7 @@ export const installInboundRouter = (
     const msg = frame.body;
     if (!msg) return;
     const raw = msg.text?.content ?? "";
+    if (addressesOthersOnly(msg, raw)) return;
     if (await guideGate(frame, msg, stripAt(msg, raw))) return;
     const { text, tag, promoted, who, spoken } = route(msg, stripAt(msg, raw));
     const known = bridge.hasMirrorTarget(who);
@@ -1332,6 +1345,7 @@ export const installInboundRouter = (
       .filter((it) => it.msgtype === "text")
       .map((it) => (it as { text?: { content?: string } }).text?.content ?? "")
       .join("\n");
+    if (addressesOthersOnly(msg, rawText)) return;
     if (await guideGate(frame, msg, stripAt(msg, rawText))) return;
     const { tag, who } = route(msg, stripAt(msg, rawText));
     const { stop } = await gate(frame, msg, "", who, tag);
