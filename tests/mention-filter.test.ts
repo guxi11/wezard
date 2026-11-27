@@ -1,6 +1,6 @@
 // 群消息「艾特了别人」判定 (shared/mention-filter.ts): 有 @ 但没一个冲着本机器人、且剩下的不是资源 → 拦。
 import assert from "node:assert/strict";
-import { addressesOthers, looksLikeResource, mentionedOthers } from "../shared/mention-filter.js";
+import { addressedElsewhere, addressesOthers, leadsWithName, looksLikeResource, mentionedOthers } from "../shared/mention-filter.js";
 
 const BOT = ["wezard", "weSingapore"];
 const others = (t: string): boolean => addressesOthers(BOT, t);
@@ -47,6 +47,11 @@ assert.equal(others("见 https://medium.com/@someone/post"), false, "URL 里的 
 assert.equal(others("https://user:pw@host/x"), false, "URL 凭据");
 assert.equal(others("发给 bob@example.com 并 @张三"), true, "邮箱不算, 但同句真的艾特了别人");
 
+// 代码块 / 行内代码里的 @ (注解) 不算艾特
+assert.equal(others("```java\n@Override\n```"), false, "围栏代码块");
+assert.equal(others("加上 `@Component` 注解"), false, "行内代码");
+assert.equal(others("```\n@Override\n``` 然后 @张三 看下"), true, "代码块之外的 @ 仍算");
+
 // 资源判据
 assert.equal(looksLikeResource("src/foo.ts"), true);
 assert.equal(looksLikeResource("foo.ts"), true);
@@ -57,6 +62,14 @@ assert.equal(looksLikeResource("alice"), false);
 
 // 机器人名未知 (空表) 时判定本身仍把任何人名当「别人」—— 调用方在 botNames 为空时不得拦 (见 inbound)
 assert.equal(addressesOthers([], "@weSingapore 看下"), true);
+
+// 共用门 addressedElsewhere: botNames 没配 → 不拦; 开头 .name → 不拦
+assert.deepEqual(addressedElsewhere([], "@张三 看下"), [], "botNames 空: fail-open");
+assert.deepEqual(addressedElsewhere(["weSingapore"], "@张三 看下"), ["张三"]);
+assert.deepEqual(addressedElsewhere(["weSingapore"], "@wezard @张三"), [], "内置 wezard 恒生效");
+assert.deepEqual(addressedElsewhere(["weSingapore"], ".fix 请 @张三 看下"), [], "开头 .name 放行");
+assert.equal(leadsWithName(".fix 请看"), true);
+assert.equal(leadsWithName("请 .fix 看"), false, "不在开头只是提及");
 
 console.log("mention-filter ok");
 

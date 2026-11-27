@@ -27,7 +27,7 @@ import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guid
 import { isApprentice } from "./apprentice.js";
 import { ensureMeWizard, meWorkspaceOf, ME_TAG } from "./me-room.js";
 import { truncate } from "../shared/std.js";
-import { mentionedOthers } from "../shared/mention-filter.js";
+import { addressedElsewhere } from "../shared/mention-filter.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
@@ -634,8 +634,8 @@ export const installInboundRouter = (
    *  本机器人叫什么消息里没有字段, 认不出「是不是我」就不拦, 否则 @ 真名的话会被当成别人); ② 频道原生
    *  帧 (企微只为 @ 机器人的那句发, 本就冲着我们); ③ 开头点了 `.name` (显式寻址 wizard, 正文里 @ 谁只是提及)。 */
   const addressesOthersOnly = (msg: BaseMessage, raw: string): boolean => {
-    if (!isGroup(msg) || sourceOf(msg) === "channel" || !cfg.wrc.botNames.some(Boolean) || parseTag(raw).tag) return false;
-    const others = mentionedOthers(botNames, raw);
+    if (!isGroup(msg) || sourceOf(msg) === "channel") return false;
+    const others = addressedElsewhere(cfg.wrc.botNames, raw);
     if (!others.length) return false;
     log.info({ msgid: msg.msgid, chat: chatPrincipal(msg), from: msg.from?.userid, others }, "inbound: @ 了别人而非本机器人, 不进 monitor (丢弃)");
     return true;
