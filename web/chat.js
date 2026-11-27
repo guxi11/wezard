@@ -641,7 +641,10 @@
         if (p.hub || p.fx != null || f.set[p.id]) return;
         var b = gBox(p), cy = p.y + b[2], l = p.x - b[0] * ik, r = p.x + b[0] * ik, t = cy - b[1] * ik, d = cy + b[1] * ik;
         if (r <= R.x0 || l >= R.x1 || d <= R.y0 || t >= R.y1) return;
-        var ex = [r - R.x0, R.x1 - l, d - R.y0, R.y1 - t], k = ex.indexOf(Math.min.apply(null, ex)), m = (ex[k] + 10) * s;   // +10: 出框后留一点空隙, 不贴着虚线 (按屏幕尺寸判, 见上面的 ik)
+        // 只推到框边 (m = 穿透), 不额外加固定 10px 空隙: 加了它会每帧过冲 —— 这一帧被推出框 10px, 下一帧 gCollide
+        // 把邻居推回来又被整段推出 20px, 60fps 下就是 +-10~20px 的抖动 (拖动时最明显)。不阻尼: 阻尼会让被两个
+        // 约束夹住的人停在框内十几到几十像素 (实测 q50 12px), 全推反而每帧停在框边上 (实测 q50 1px)。
+        var ex = [r - R.x0, R.x1 - l, d - R.y0, R.y1 - t], k = ex.indexOf(Math.min.apply(null, ex)), m = ex[k] * s;
         if (k === 0) p.x -= m; else if (k === 1) p.x += m; else if (k === 2) p.y -= m; else p.y += m;
       });
     });
