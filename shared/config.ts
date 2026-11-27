@@ -231,7 +231,19 @@ const Danger = z.object({
   commandPatterns: z.array(z.string()).default([]).describe("危险 Bash 命令正则 (大小写不敏感)"),
   toolPatterns: z.array(z.string()).default([]).describe("危险工具名正则"),
   pathPatterns: z.array(z.string()).default([]).describe("危险路径正则"),
-  allowPatterns: z.array(z.string()).default([]).describe("豁免正则, 优先级最高"),
+  allowPatterns: z.array(z.string()).default([]).describe("豁免正则, 优先级最高 (整条调用放行, 粗粒度: 任一命令匹配则这次调用的所有危险规则一并豁免 —— 只想放行凭据文件的读 / 拷贝请用 credentialAllow)"),
+  credentialAllow: z.array(z.union([
+    z.string(),
+    z.object({
+      path: z.string().describe("路径 glob"),
+      verbs: z.array(z.enum(["copy", "read-masked", "list"])).optional().describe("只放行这几类操作; 省略 = 三类全放"),
+    }),
+  ])).default([]).describe(
+    "凭据文件白名单 (默认空): 只豁免内置「凭据文件」这一条规则, SSH 密钥 / 提权 / 强杀 / 删除等其他规则不受影响; 写入 (重定向 / tee / sed -i / cp 到凭据文件)、外发 (scp / curl -d @ / nc / host:) 与脚本直读永远照拦。"
+    + "条目 = 路径 glob 字符串 (支持 ~ 与 $HOME; ** 跨目录, * 不跨 /; 相对路径按该次调用的会话 cwd 解析; 命令里带 $VAR / $(…) 的路径解析不出, 不命中), 如 \"**/.wt/*/.env\"; 或对象 {path, verbs}, verbs ⊆ copy (cp / mv 到任意本机位置, 含改名与 /tmp, 不含 host:) / read-masked (cat·grep 等读出内容, 但须接 cut·sed·awk·wc 等下游或赋给变量, 不原样回显; 守护进程验证不了下游参数) / list (元数据类, 默认已放行, 此值只为显式声明)。"
+    + "优先级: denyRules > askRules > 内置危险规则 > credentialAllow (命中 askRules / denyRules 的调用不因白名单而免卡); allowPatterns 仍是整条放行。"
+    + "热生效: 经 config_set 改立即生效; 手改配置文件要 reload 才被守护进程读到。Read / Write / Edit 工具直接碰凭据文件不受白名单影响。改它属放权项, 走人点卡。"
+  ),
 });
 
 const Approval = z.object({

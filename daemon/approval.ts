@@ -2247,7 +2247,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 是「出厂自带的 askRules」—— 所以它必须和用户写的 askRules 站在同一层, 排在
     // allowRules 之前。放在后面的话, 一条 `Bash(git *)` 这样的宽 allow 规则 (尤其
     // 是从 Claude settings.json 批量导入来的) 就能让整份危险名单失效。
-    const danger: DangerHit | undefined = selfWrite ?? dangerOf(cfg, toolName, toolInput);
+    const danger: DangerHit | undefined = selfWrite ?? dangerOf(cfg, toolName, toolInput, { cwd });
     if (danger) log.info({ toolName, sessionId, rule: danger.rule }, "danger hit — forcing single approval");
 
     // 必发卡 = 危险名单 或 askRules 命中。这两者的语义是「每次都要人单独看一眼」,

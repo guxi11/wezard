@@ -149,6 +149,9 @@ export const scrubCommand = (src: string): string => {
       if (c === "$" && src.startsWith("$((", i)) { out += "$(("; push("arith", "))", t); i += 3; continue; }
       if (c === "$" && src[i + 1] === "(") { out += "$("; push("cmd", ")", t); i += 2; continue; }
       if (c === "`") { out += c; push("cmd", "`", t); i++; continue; }
+      // 只是字样的引号串里, `$VAR` 展开后仍是内容: 名字留着 (`echo "$U"` 的 $U 会把读到的值回显), 其余字样照抹。
+      const ref = t.quiet && c === "$" ? /^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)/.exec(src.slice(i, i + 80)) : null;
+      if (ref) { out += ref[0]; i += ref[0].length; continue; }
       if (!t.quiet) out += c;
       i++;
       continue;

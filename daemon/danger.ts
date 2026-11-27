@@ -9,7 +9,8 @@
 // 纯函数, 只做匹配; 所有副作用留在 approval.ts。
 import type { Config } from "../shared/config.js";
 import { COMMAND_KEYS, replBashCommands, replFallbackCommands } from "../shared/repl-script.js";
-import { WRAPPER_NAMES, scrubCommand, shellWords } from "./danger-scrub.js";
+import { posix } from "node:path";
+import { WRAPPER_NAMES, leadWords, scrubCommand, shellWords } from "./danger-scrub.js";
 
 export interface DangerHit {
   /** 人类可读的规则名, 直接渲染到卡片上 — 用户要知道「哪一条」判定它危险。 */
@@ -170,46 +171,256 @@ const PATH_RULES: readonly Rule[] = [
   ["家目录根/根目录", /^\s*(~|\/|\$HOME)\/?\s*$/],
 ];
 
-// ── 凭据文件: 只拦会泄露内容的读法 / 拷出 / 写入 (人 2026-11-25 E「在使用侧限制」) ─────────
+// ── 凭据文件: 只拦会泄露内容的读法 / 拷出 / 写入 (人 2026-11-25 E「在使用侧限制」; 2026-11-27 再收窄 + 白名单) ─────
 // 放行: ls / stat / md5 / ln -s / file / wc / test / chmod / rm / `source .env && psql` /
-//   `docker run --env-file .env` / `grep -c KEY .env` (只数不露) / `cat .env | cut -d= -f1` (打码)。
-// 拦: cat·head·tail·less·无打码 grep·sed·awk 等把内容读出来; cp·mv·scp·rsync·tar·curl -d @ 等拷出;
+//   `docker run --env-file .env` / `grep -c KEY .env` (只数不露) / `cat .env | cut -d= -f1` (打码) /
+//   `cp ../x/.env .env` (同名拷贝: 名字不变, 事后读它仍会被本规则认出) / `ls -a | grep "^\.env"` (模式不是文件) /
+//   `U=$(grep ^DB_URL .env …)` 且之后没把 $U 原样回显 / `cmp·diff -q` (只报「相同与否」)。
+// 拦: cat·head·tail·less·无打码 grep·sed·awk 等把内容读出来; cp·mv 改名或拷到公开目录 / host:, scp·rsync·tar·curl -d @ 等拷出;
 //   重定向 / tee / sed -i / cp 写入; python·node 等脚本里直接 open 它; ssh 远端的同类读法。
+// 白名单 `approval.danger.credentialAllow` 只豁免这一条规则里的「读 (打码) / 同机拷贝 / 元数据」, 写入、外发永远拦。
 const CRED_NAME = String.raw`(?:\.env(?!\.(?:example|sample|template|dist|defaults?)(?![\w-]))(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|\.aws(?:\/\S*)?|\.gnupg(?:\/\S*)?|credentials(?:\.\w+)?|secrets?\.(?:json|ya?ml|env))`;
 const CRED_ARG = String.raw`(?<![\w.-])(?:[^\s"'|;&<>()=]*\/)?${CRED_NAME}(?![\w-])`;
 const PRINTERS = String.raw`cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|hexdump|strings|base64|sed|awk|gawk|cut|sort|uniq|paste|column|diff|cmp|comm|grep|egrep|fgrep|zgrep|rg|ag|ack|jq|yq`;
 const MOVERS = String.raw`cp|mv|scp|rsync|tar|zip|7z|gzip|bzip2|xz|dd|install|tee|curl|wget|nc|ncat|socat|pbcopy|xclip|xsel|python[\d.]*|node|nodejs|ruby|perl|php|tsx|deno|bun`;
 const VERB = String.raw`(?:[^\s"'|;&<>()]*\/)?(${PRINTERS}|${MOVERS})\b`;
-const CRED_READ = new RegExp(`${CMD_HEAD}\\\\?${VERB}[^\\n;&|)]*?${CRED_ARG}`, "dg");
+// 只找「命令词位置的动词」; 它的文件操作数里有没有凭据, 交给 verbLeaks 按引号感知的段落判 (旧写法的 `[^;&|)]*?` 在引号里的 `|` `)` 处就断了)。
+const CRED_VERB = new RegExp(`${CMD_HEAD}\\\\?${VERB}`, "dg");
 // 脚本解释器的参数是引号里的一整段代码 (`python -c "import os; open('.env')"`), 里面的 `;` `)`
 // 不是命令分隔符 —— 一律扫到行尾 (代价: `node build.js && ls .env` 这种并列句也会中, 可接受)。
 const CRED_INTERP = new RegExp(`${CMD_HEAD}\\\\?(?:[^\\s"'|;&<>()]*\\/)?(?:python[\\d.]*|node|nodejs|ruby|perl|php|tsx|deno|bun)\\b[^\\n]*?${CRED_ARG}`);
-const CRED_REMOTE = new RegExp(String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[^\n;&|]*?\b(?:${PRINTERS}|${MOVERS})\b[^\n;&|)]*?${CRED_ARG}`);
+// 远端形态: ssh / exec 之后的动词不在命令词位置 (前面是主机名), 单独找; 找到的动词照样走下面同一套逐动词判定。
+const CRED_REMOTE = new RegExp(String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[^\n;&|]*?\b(${PRINTERS}|${MOVERS})\b[^\n;&|)]*?${CRED_ARG}`, "d");
 const CRED_WRITE = new RegExp(String.raw`\d*>>?\|?[ \t]*["']?(?:[^\s"'|;&<>()]*\/)?${CRED_NAME}(?![\w-])`);
 const CRED_FIND = new RegExp(String.raw`\bfind\b[^\n;&|]*${CRED_ARG}[^\n;&|]*-exec(?:dir)?\s+(?:${PRINTERS}|${MOVERS})\b`);
 const CRED_XARGS = new RegExp(String.raw`${CRED_ARG}[^\n;&|]*\|\s*xargs\s+(?:-\S+\s+)*(?:${PRINTERS}|${MOVERS})\b`);
 const COUNT_ONLY = /(?:^|\s)-[a-zA-Z]*[clLq][a-zA-Z]*(?=\s|$)|--(?:count|files-with-matches|files-without-match|quiet|silent)\b/;
-const MASKED_PIPE = /^\|\s*(?:cut\b[^|]*(?:-d\s*['"]?=|-f\s*1\b)|sed\b[^|]*\bs(.)[^\n|]*=|awk\b[^|]*-F\s*['"]?=|wc\b)/;
 const PRINT_ONLY = new RegExp(`^(?:${PRINTERS})$`);
+const GREP_VERB = /^(?:e?grep|fgrep|zgrep|rg|ag|ack)$/;
 const IN_PLACE = /(?:^|\s)(?:-[a-zA-Z]*i|--in-place)\b/;
+const CRED_TOKEN = new RegExp(CRED_ARG);
 
-export const credentialAccess = (text: string): boolean => {
-  const read = [...text.matchAll(CRED_READ)].some((m) => {
+// ── 下游「已打码」判定 ──────────────────────────────────────────────────
+// sed 替换段里带 `*` 或 REDACT/MASK 字样才算打码 (`s/=.*/=***/`、`s#//[^@]*@#//***@#`)。
+const SED_SUBST = /(?<![\w-])s([^\w\s\\'"])((?:\\.|(?!\1).)*)\1((?:\\.|(?!\1).)*)\1/g;
+const sedMasks = (stage: string): boolean =>
+  [...stage.matchAll(SED_SUBST)].some((m) => /\*|redact|mask|hidden|xxx/i.test(m[3] ?? ""));
+const KEYS_ONLY_CUT = /\bcut\b(?=[^|]*-d\s*['"]?=)(?=[^|]*-f\s*1(?![\d,-]))/;
+const KEYS_ONLY_AWK = /\bawk\b(?=[^|]*-F\s*['"]?=)[^|]*\{\s*print\s+\$1\s*\}/;
+const HASH_ONLY = /^(?:md5sum|md5|sha\d*sum|shasum|cksum)\b/;
+const chainHas = (rest: string): boolean =>
+  [...(/^(?:&\d+\s*)?(?:\|(?!\|)[^|\n;&)]*)+/.exec(rest)?.[0] ?? "").matchAll(/\|\s*(cut|sed|g?awk)\b/g)].length > 0;
+/** `rest` 是命令段之后的文本: 紧跟的管道下游第一段是否把内容打了码 / 只留了键名 / 只数行 / 只出摘要。 */
+const maskedPipe = (rest: string, loose = false): boolean => {
+  const stage = /^\|(?!\|)\s*([^|\n]*)/.exec(rest.replace(/^&\d+\s*/, ""))?.[1]?.trimStart() ?? ""; // `2>&1 | …` 的 `&1` 不挡管道
+  if (!stage) return false;
+  return (
+    /^wc\b/.test(stage) || HASH_ONLY.test(stage) ||
+    (/^cut\b/.test(stage) && KEYS_ONLY_CUT.test(stage)) ||
+    (/^(?:g?awk)\b/.test(stage) && KEYS_ONLY_AWK.test(stage)) ||
+    (/^sed\b/.test(stage) && sedMasks(stage)) ||
+    (/^(?:e?grep|fgrep|rg)\b/.test(stage) && COUNT_ONLY.test(stage)) ||
+    // 白名单里的 read-masked: 管道链上任一段是 cut/sed/awk 就信它是在打码 (守护进程验证不了这几段的参数)。
+    (loose && chainHas(rest))
+  );
+};
+
+// `VAR=$(… 读凭据 …)`: 读出来的值进了变量, 不回显给模型就不泄露。回显 (echo/printf/cat/tee/here-string) 须自己再打码, 外发工具拿到它直接算泄露。
+const ASSIGN = /\b([A-Za-z_]\w*)=\$\(/g;
+const captured = (text: string, at: number): { name: string; end: number } | undefined => {
+  for (const m of text.matchAll(ASSIGN)) {
+    const from = (m.index ?? 0) + m[0].length;
+    if (at < from) continue;
+    const end = [...text.slice(from)].reduce<{ depth: number; at: number }>((acc, ch, i) =>
+      acc.at >= 0 ? acc : ch === "(" ? { ...acc, depth: acc.depth + 1 } : ch === ")" ? (acc.depth === 0 ? { ...acc, at: from + i } : { ...acc, depth: acc.depth - 1 }) : acc,
+    { depth: 0, at: -1 }).at;
+    if (end >= at) return { name: m[1] ?? "", end };
+  }
+  return undefined;
+};
+const ECHOERS = new Set(["echo", "printf", "cat", "tee", "print"]);
+const OUTBOUND = new Set(["curl", "wget", "nc", "ncat", "socat", "scp", "rsync", "pbcopy", "xclip", "xsel"]);
+const ANY_VERB = new RegExp(`${CMD_HEAD}\\\\?(?:[^\\s"'|;&<>()]*\\/)?([\\w.-]+)`, "dg");
+const SCRIPTERS = /^(?:python[\d.]*|node|nodejs|ruby|perl|php|tsx|deno|bun)$/;
+const varLeaks = (text: string, qmap: Uint8Array, name: string, from: number): boolean => {
+  const ref = new RegExp(String.raw`\$\{?${name}(?![\w])`);
+  return [...text.slice(from).matchAll(ANY_VERB)].some((m) => {
+    const at = from + (m.indices?.[1]?.[0] ?? m.index ?? 0);
+    const seg = segmentAt(text, at, qmap);
+    if (!ref.test(seg)) return false;
     const verb = m[1] ?? "";
-    if (!PRINT_ONLY.test(verb)) return true; // 拷出 / 写入 / 脚本读: 没有「打码」一说
-    const at = m.indices?.[1]?.[0] ?? m.index ?? 0; // 动词自己的位置 (m.index 还带着命令词前缀)
-    const seg = text.slice(at).split(/[\n;&|)]/, 1)[0] ?? "";
-    if (verb === "sed" && IN_PLACE.test(seg)) return true;
-    if (/^(?:e?grep|fgrep|zgrep|rg|ag|ack)$/.test(verb) && COUNT_ONLY.test(seg)) return false;
-    return !MASKED_PIPE.test(text.slice(at + seg.length));
+    if (OUTBOUND.has(verb) || SCRIPTERS.test(verb)) return true;
+    return (ECHOERS.has(verb) || /<<</.test(seg)) && !maskedPipe(text.slice(at + seg.length));
   });
-  return read || CRED_INTERP.test(text) || CRED_WRITE.test(text) || CRED_REMOTE.test(text) || CRED_FIND.test(text) || CRED_XARGS.test(text);
+};
+
+// ── cp / mv: 只放行「同名拷贝」 ─────────────────────────────────────────
+// 名字不变 → 事后 `cat` 那份拷贝同样被本规则认出; 改名 (`cp .env notes.txt`) 就脱了钩, 拦。
+// 目的地在公开目录 (/tmp 之类) / 带 `host:` / 动态拼接 (`$(…)`) 也拦; 凭据只出现在目的地 (`cp .env.example .env` = 写入) 也拦。
+const PUBLIC_DIR = /^(?:\/(?:private\/)?tmp|\/(?:private\/)?var\/tmp|\/dev\/shm|\/Users\/Shared|\/(?:mnt|media|Volumes|srv)|\/var\/www|(?:~|\$HOME|\$\{HOME\}|\/(?:home|Users)\/[^/]+)\/Downloads|\$\{?TMPDIR\}?)(?:\/|$)/;
+const REMOTE_DEST = /^[^/\s]*:/;
+const baseOf = (p: string): string => p.replace(/\/+$/, "").replace(/^.*\//, "");
+const redirectFree = (words: readonly string[]): string[] =>
+  words.reduce<{ out: string[]; skip: boolean }>((acc, w) =>
+    acc.skip ? { out: acc.out, skip: false }
+    : /^\d*>>?&?\d*$/.test(w) ? { out: acc.out, skip: true }
+    : /^\d*>/.test(w) ? acc
+    : /^<+$/.test(w) ? acc // 输入重定向: 去掉 `<` 本身, 后面的文件仍是被读的操作数
+    : /^<+./.test(w) ? { out: [...acc.out, w.replace(/^<+/, "")], skip: false }
+    : { out: [...acc.out, w], skip: false },
+  { out: [], skip: false }).out;
+
+interface CopyShape { sources: string[]; dest: string; dirDest: boolean }
+const copyShape = (words: readonly string[]): CopyShape | undefined => {
+  const dd = words.indexOf("--");
+  const opts = dd < 0 ? words : words.slice(0, dd);
+  const tIdx = opts.findIndex((w) => w === "-t" || w === "--target-directory" || /^--target-directory=/.test(w) || /^-[a-zA-Z]*t$/.test(w));
+  const tDir = tIdx < 0 ? undefined : /^--target-directory=/.test(opts[tIdx]!) ? opts[tIdx]!.slice("--target-directory=".length) : opts[tIdx + 1];
+  const operands = words.filter((w, i) => (dd >= 0 && i > dd) || (!w.startsWith("-") && !(tIdx >= 0 && i === tIdx + 1 && !/=/.test(opts[tIdx]!))));
+  if (tIdx >= 0) return tDir ? { sources: operands, dest: tDir, dirDest: true } : undefined;
+  return operands.length < 2 ? undefined : { sources: operands.slice(0, -1), dest: operands[operands.length - 1]!, dirDest: false };
+};
+const dynamic = (w: string): boolean => /\$\(|`/.test(w);
+/** 这条 cp/mv 是否「只是同名拷贝」(不泄露、不外发、不改名)。 */
+const sameNameCopy = (words: readonly string[], text: string, at: number): boolean => {
+  const shape = copyShape(redirectFree(words));
+  if (!shape) return false;
+  const { sources, dest } = shape;
+  const creds = sources.filter((w) => CRED_TOKEN.test(w));
+  if (!creds.length || [...sources, dest].some(dynamic)) return false;
+  if (PUBLIC_DIR.test(dest) || REMOTE_DEST.test(dest)) return false;
+  if (/\bcd\s+["']?(?:\/(?:private\/)?tmp|\/(?:private\/)?var\/tmp|\/dev\/shm)(?:[\/\s"';&]|$)/.test(text.slice(0, at))) return false; // 先 cd 进公开目录再拷相对名
+  const dirDest = shape.dirDest || dest === "." || dest === ".." || dest.endsWith("/");
+  if (!dirDest && sources.length > 1) return false;
+  return creds.every((c) => dirDest || baseOf(c) === baseOf(dest));
+};
+
+// ── approval.danger.credentialAllow: 放行指定凭据文件的「读 (打码) / 同机拷贝 / 元数据」 ─────────────
+export type CredVerb = "copy" | "read-masked" | "list";
+export type CredAllowEntry = string | { path: string; verbs?: readonly CredVerb[] };
+export interface CredCtx { cwd?: string; allow?: readonly CredAllowEntry[] }
+const ALL_VERBS: readonly CredVerb[] = ["copy", "read-masked", "list"];
+const homeOf = (): string => process.env.HOME ?? "";
+const expandHomeVars = (p: string): string =>
+  p.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/, homeOf());
+/** 路径 → 绝对路径 (展开 ~ / $HOME, 相对的按 cwd); 带变量 / 命令替换 (或 token 里带通配) 的解不出, 返回 undefined。 */
+const absPath = (p: string, cwd: string | undefined, glob = false): string | undefined => {
+  const e = expandHomeVars(p);
+  if (/[$`]/.test(e) || (!glob && /[*?]/.test(e))) return undefined;
+  if (e.startsWith("/")) return posix.normalize(e);
+  return cwd ? posix.normalize(posix.join(cwd, e)) : undefined;
+};
+const globRe = (g: string): RegExp =>
+  new RegExp("^" + g
+    .replace(/[.+^${}()|\\]/g, "\\$&")
+    .replace(/\*\*\//g, "\0A")
+    .replace(/\*\*/g, "\0B")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]")
+    .replace(/\0A/g, "(?:.*/)?")
+    .replace(/\0B/g, ".*") + "$");
+const credAllowed = (tok: string, verb: CredVerb, ctx: CredCtx | undefined): boolean => {
+  const allow = ctx?.allow ?? [];
+  if (!allow.length) return false;
+  const abs = absPath(tok, ctx?.cwd);
+  if (!abs) return false;
+  return allow.some((e) => {
+    const entry = typeof e === "string" ? { path: e, verbs: ALL_VERBS } : { path: e.path, verbs: e.verbs ?? ALL_VERBS };
+    const pat = entry.path.startsWith("**") ? entry.path : absPath(entry.path, ctx?.cwd, true);
+    return !!pat && entry.verbs.includes(verb) && globRe(pat).test(abs);
+  });
+};
+
+/** 每个字符所处的引号: 0 = 不在引号里, 1 = 单引号内, 2 = 双引号内 (开引号自身记 0)。一趟扫完, 供 segmentAt 判断一个动词是不是长在外层引号里。 */
+const quoteMap = (text: string): Uint8Array => {
+  const map = new Uint8Array(text.length);
+  let q = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (q) {
+      if (ch === "\\" && q === '"') { map[i] = 2; if (i + 1 < text.length) map[++i] = 2; continue; }
+      if (ch === q) { q = ""; continue; }
+      map[i] = q === "'" ? 1 : 2;
+    } else if (ch === '"' || ch === "'") q = ch;
+  }
+  return map;
+};
+
+/** 从 `at` 起到命令分隔符为止的一段; 引号里的 `|` `;` `)` 不算分隔 (`grep -E "KEY|TOKEN" .env`)。
+ *  动词若本身就在一层外层引号里 (`bin/mx 'grep … .env'`), 那层引号一闭合 (收尾的 `'`) 这一段就结束 ——
+ *  不让它跟后面下一个 `'…'` 配成对; 内层再开的另一种引号照常整段跳过; 内层没闭合的引号在它开处截断。 */
+const segmentAt = (text: string, at: number, qmap: Uint8Array): string => {
+  const outer = qmap[at] === 1 ? "'" : qmap[at] === 2 ? '"' : "";
+  let q = "";
+  let open = -1;
+  let depth = 0; // 段内自己开的括号 (`$(pwd)/.env`): 它们的 `)` 不算分隔, 只有属于外层的 `)` 才算
+  for (let i = at; i < text.length; i++) {
+    const ch = text[i]!;
+    if (q) { if (ch === q) q = ""; continue; }
+    if (outer && ch === outer) return text.slice(at, i);
+    if (ch === '"' || ch === "'") { q = ch; open = i; continue; }
+    if (ch === "(") { depth++; continue; }
+    if (ch === ")" && depth > 0) { depth--; continue; }
+    if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === ")") return text.slice(at, i);
+  }
+  return text.slice(at, q ? open : text.length);
+};
+
+/** 命令段里的「文件操作数」: grep 族去掉第一个非选项词 (它是模式, 不是文件; 给了 -e / -f 则没有模式词)。 */
+const operandsOf = (verb: string, words: readonly string[]): string[] => {
+  if (!GREP_VERB.test(verb)) return [...words];
+  const patternFlag = (w: string): boolean => /^(?:-[a-zA-Z]*e|--regexp)$/.test(w); // 下一个词是模式
+  const viaFlag = words.some((w) => patternFlag(w) || /^--regexp=|^-[a-zA-Z]*f/.test(w) || w === "--file");
+  const at = viaFlag ? -1 : words.findIndex((w) => !w.startsWith("-"));
+  return words.filter((w, i) => i !== at && !(i > 0 && patternFlag(words[i - 1]!)) && !/^--regexp=/.test(w));
+};
+
+/** 一个动词 + 它这段命令: true = 会泄露 / 外发 / 写入 (该发卡)。`at` 是动词在整段文本里的位置。 */
+const verbLeaks = (text: string, qmap: Uint8Array, verb: string, at: number, ctx: CredCtx | undefined): boolean => {
+  const seg = segmentAt(text, at, qmap);
+  const words = shellWords(seg).slice(1);
+  const rest = text.slice(at + seg.length);
+  if (!words.some((w) => CRED_TOKEN.test(w))) return false; // 这一段没碰凭据文件
+  if (verb === "cp" || verb === "mv") {
+    if (sameNameCopy(words, text, at)) return false;
+    const shape = copyShape(redirectFree(words));
+    if (!shape) return true;
+    const creds = shape.sources.filter((w) => CRED_TOKEN.test(w));
+    const writesCred = CRED_TOKEN.test(shape.dest) && creds.length < shape.sources.length; // 非凭据 → 凭据文件 = 写入
+    // 白名单的同机拷贝: 任意改名 / 任意本机目的地 (含 /tmp), 但仍不放 host: / 动态拼接 / 写入凭据文件。
+    return !(creds.length > 0 && !writesCred && ![...shape.sources, shape.dest].some(dynamic) && !REMOTE_DEST.test(shape.dest)
+      && creds.every((c) => credAllowed(c, "copy", ctx)));
+  }
+  if (!PRINT_ONLY.test(verb)) return true; // 外发 / 写入 / 脚本读: 没有「打码」一说
+  const operands = operandsOf(verb, redirectFree(words));
+  const creds = operands.filter((w) => CRED_TOKEN.test(w));
+  if (!creds.length) return false; // 只在模式 / 选项里提到它: 不是在读这个文件
+  if (verb === "sed" && IN_PLACE.test(seg)) return true;
+  if (GREP_VERB.test(verb) && COUNT_ONLY.test(seg)) return false;
+  if (verb === "cmp" && !/(?:^|\s)(?:-[a-zA-Z]*[lbi]|--verbose|--print-bytes)/.test(seg)) return false; // 只报第一处不同的位置
+  if (verb === "diff" && /(?:^|\s)(?:-[a-zA-Z]*q|--brief)\b/.test(seg)) return false; // 只报「不同」二字
+  if (verb === "cut" && KEYS_ONLY_CUT.test(seg)) return false;
+  if ((verb === "awk" || verb === "gawk") && KEYS_ONLY_AWK.test(seg)) return false;
+  if (maskedPipe(rest)) return false;
+  const cap = captured(text, at);
+  if (cap && !varLeaks(text, qmap, cap.name, cap.end)) return false;
+  return !(creds.every((c) => credAllowed(c, "read-masked", ctx)) && maskedPipe(rest, true));
+};
+
+export const credentialAccess = (text: string, ctx?: CredCtx): boolean => {
+  const found = [
+    ...[...text.matchAll(CRED_VERB)].map((m) => ({ verb: m[1] ?? "", at: m.indices?.[1]?.[0] ?? m.index ?? 0 })),
+    ...[CRED_REMOTE.exec(text)].flatMap((m) => (m ? [{ verb: m[1] ?? "", at: m.indices?.[1]?.[0] ?? m.index }] : [])),
+  ];
+  const qmap = quoteMap(text);
+  return found.some((f) => verbLeaks(text, qmap, f.verb, f.at, ctx))
+    || CRED_INTERP.test(text) || CRED_WRITE.test(text) || CRED_FIND.test(text) || CRED_XARGS.test(text);
 };
 
 // 命令文本上的路径类规则 (已 scrub): SSH 与凭据按上面的口径, 其余沿用路径正则。
-const CMD_PATH_RULES: readonly Rule[] = [
+const cmdPathRules = (cred: CredCtx): readonly Rule[] => [
   ["SSH 密钥", SSH_KEY],
-  ["凭据文件", credentialAccess],
+  ["凭据文件", (t) => credentialAccess(t, cred)],
 ];
 
 const compile = (sources: readonly string[]): Rule[] =>
@@ -316,8 +527,10 @@ export const dangerEarlyExit = (
 };
 
 /** 判定一次工具调用是否落在危险名单里。undefined = 安全。 */
-export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): DangerHit | undefined => {
+export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown, ctx?: { cwd?: string }): DangerHit | undefined => {
   const d = cfg.approval.danger;
+  // credentialAllow 每次现读 (config_set 热生效); 相对路径按这次调用的会话 cwd 解析。
+  const credRules = cmdPathRules({ cwd: ctx?.cwd || undefined, allow: d.credentialAllow ?? [] });
   const cmds = commandsOf(toolInput);
   const allow = compile(d.allowPatterns);
   // 白名单优先: 任一命令被豁免则整条调用豁免 (显式覆盖内置的宽规则)。
@@ -334,7 +547,7 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
   const cmdHit = (c: string, raw: string): DangerHit | undefined =>
     firstHit(builtinCmd, c) ??
     firstHit(compile(d.commandPatterns), raw) ??
-    (d.builtin ? firstHit(CMD_PATH_RULES, c) : undefined) ??
+    (d.builtin ? firstHit(credRules, c) : undefined) ??
     // 命令里的路径类规则只留「命令即路径」的两条 (系统目录 / 家目录根, 锚定整串开头)。
     (d.builtin && pathish(c) ? firstHit(PATH_RULES.slice(2), c) : undefined);
 

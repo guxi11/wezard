@@ -122,7 +122,13 @@
       "commandPatterns": [],     // 例: ["\\bpm2\\s+delete\\b"]
       "toolPatterns": [],        // 例: ["^mcp__prod__"]
       "pathPatterns": [],        // 例: ["/prod/"]
-      "allowPatterns": []        // 例: ["\\brm\\s+-rf\\s+node_modules\\b"]
+      "allowPatterns": [],       // 例: ["\\brm\\s+-rf\\s+node_modules\\b"]  整条放行, 粗粒度 (任一命令匹配则全部危险规则一并豁免)
+      // 凭据文件白名单 (缺省 []): 只豁免内置「凭据文件」这一条规则里的 拷贝 / 打码读 / 元数据,
+      // 写入 / 外发 / 脚本直读永远拦, SSH·提权·强杀等其他规则不受影响; denyRules / askRules 照旧压过它。
+      // 条目 = 路径 glob (~ 与 $HOME 可用, ** 跨目录, * 不跨 /, 相对路径按会话 cwd 解析),
+      // 或 {path, verbs}: verbs ⊆ copy (cp/mv 到本机任意处, 含改名与 /tmp) / read-masked (读出内容但须接 cut·sed·awk 下游, 不原样回显) / list (元数据, 默认已放行)。
+      // 经 config_set 改立即生效, 手改本文件要 reload; 改它走人点卡。
+      "credentialAllow": []      // 例: ["**/.wt/*/.env", { "path": "~/proj/.env", "verbs": ["copy"] }]
     }
   },
 
