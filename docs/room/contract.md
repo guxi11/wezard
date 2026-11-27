@@ -1,5 +1,7 @@
 # room 模型 · 契约定稿 (检查点 1)
 
+> **修订 (2026-11-27, 频道改造; 设计 [docs/evolve/channel-topic-rooms.md](../evolve/channel-topic-rooms.md))**: 频道里**每个帖子一个 room**, id = `topic:<topic_id>/<post_id>`; 频道本身没有 room, 只绑一个 host 身份 (`wrc.channel.steward.<topic_id>` = 类, 每个 topic room 一个实例)。下文 §1 的 id 表与 kind 行、§3a 的镜像口径随之改写; 帖子 room 的出站一律评论根帖。**BREAKING**: `room_fork` 与首触判定已删, 详见 CHANGELOG。以下其余各节不受影响。
+
 分支 `room-model` @ worktree `../cc-wecom-room` (基于 origin/v3 cf3e0b3)。未写实现代码。
 已按裁决定: 终句零语义 (F-1, 无兜底投递) · 一次切换无影子/flag · host 动态求值 · 其余取设计稿推荐 (A-1b / B-3 订阅默认关 M=20 / C-1 全量镜像 / D-1 DM 自动落 / W-1 默认可切全量)。
 
@@ -7,7 +9,8 @@
 
 | room | id | 例 |
 |---|---|---|
-| 绑定传输 (企微群 / 企微单聊 / topic 帖 / 微信) | **= 现有 base principal 原样** | `chat:wrkSF…` · `user:T0388…` |
+| 绑定传输 (企微群 / 企微单聊 / 微信) | **= 现有 base principal 原样** | `chat:wrkSF…` · `user:T0388…` |
+| 频道帖子 (2026-11-27 起, 每帖一个 room) | **`topic:<topic_id>/<post_id>`** (`shared/topic-room.ts`); 由 (频道, 帖子) 算出, 不依赖 opk, 第一条事件就能定 id | `topic:wrabc…/pst_9f…` |
 | wizard 两人 (无绑定) | `dm:` + 两个实例的**稳定身份 uid** 字典序 `|` 拼接 —— 同一对唯一、复用 | `dm:w3f9a0c12e4b7|w8d21be07aa95` |
 | 3 人以上临时 (无绑定) | `adhoc:` + 8 位随机 hex, room_open 显式开, 或 chat_ask 点名多个群外 wizard 时按成员集合复用 / 新开 | `adhoc:9f3c01ab` |
 
@@ -17,7 +20,13 @@
   - 存量实例: `uidOf(rec) = rec.uid ?? "w" + sha1(rec.target + "|" + rec.bornAt).slice(0, 12)`, 纯函数, 迁移脚本与 daemon 算出同一个值; daemon boot 时回填落盘, 之后只读字段。
   - 改名 / 交接 / /new / 换 slot 都不动 uid。
 - 账本里一切 wizard 引用 (Who.id、dm room id、closes 里的 holder、wake) 都用 uid; target / 名字只在投递 pane 和渲染那一刻由 registry 现查。
-- kind 由 id 前缀 + 传输推出: `wecom-group | wecom-dm | topic-post | wx | dm | adhoc`。
+- kind 由 id 前缀 + 传输推出: `wecom-group | wecom-dm | topic-post | wx | dm | adhoc` (+ `channel`, 只读存档)。
+- **频道 / 帖子 (2026-11-27 改)**:
+  - 频道**没有 room**; 它只剩一条事实 —— 频道 → host 身份 (`wrc.channel.steward.<topic_id>` = 类名), 每个 topic room 坐该类在**本 room** 的实例 (不预起 pane, 首次唤醒冷启动)。
+  - 入站解析顺序 (`topicRoomOf`): 群源 / 帖子源 bind (存量) > 已存在的 topic room > 旧 `chat:<opk>` 帖子 room (kind `topic-post`, 或已配对) > 配对反查 > 新口径 `topic:<T>/<P>`。
+  - **存量零改写**: 旧 `chat:<opk>` 帖子 room 照用 (换 id 会让消息 id 的 roomHash8 全变); 旧频道 room `chat:<topic_id>` 成**只读存档** (入站不再落它, 里面未关的 duty 仍可 `chat_reply` 关); 旧帖子源 bind 照认, 新的帖子源 bind 拒 400。
+  - **开新帖**: `chat_say({room:"chat:<topic_id>"})` 把频道 id 当虚地址, 先预检 (拒 perceptron / 引导化身; 调用方须是频道 host 实例或存档频道 room 成员), `send_post` 拿到 `post_id` 才开 `topic:<T>/<post_id>` (founder = 频道 host 实例); 没拿到 `post_id` 只回 warning; 机器人自发帖的 `topic_event` 回推跳过。
+  - perceptron 每频道共享一个 `chat:<topic_id>#monitor`, 入座该频道所有 topic room。
 - 落盘: `~/.wezard/state/rooms/<encodeURIComponent(id)>.jsonl` (目录 = roomsDirOf(daemon.stateDir), 配置可改; 迁移 / observe / daemon 同一处推导), 一 room 一文件; `rooms/registry.json` 只是缓存, 可由各文件重建。
 - **消息 id** = `<roomHash8>.<seq>` (如 `a1b2c3d4.41`): 全机唯一, 自带 room (re 一个 id 就知道 room, chat_reply 不必给 room)。
 
@@ -130,6 +139,7 @@ spawn / clone / delegate 增 `room?` (子 wizard 以 via:"spawn" 免审入群); 
 - **提醒尾巴在唤醒时才挂, 不进账本**: 人话触发的唤醒, 渲染时 (room-hub `deliver` → `tailOf` → `injectText({tail})`, 实现见 `daemon/wake-tail.ts`) 才按「被唤醒的 wizard + 触发它的人话行」算管家自查 (steward hint) 与点名提示 (mention), 与名册增量 (notice) 同一道边界: pane 闸放行后才渲染并记去重 (放行后贴失败 / uncertain 同名册增量, 这次的提示算用掉)。同一次渲染还给出这一轮的出处 (最后一条人话触发行: 绑定 room → channel = 群, dm / adhoc → `""`; speaker = `user:<id>`), room-hub 贴进 pane 时作 `injectText` 的 channel / speaker, 与 reload 后 `openingOf` 同规则 (后者在有「你要交代」行时只认交代点到的行)。触发行里没有人话 (同伴 / 回执 / 定时) 不挂这两种。人话**不再带信封**: 「谁说的」= 行作者, 「在哪个群」= 唤醒头 `【label】(roomId)`; 重载后接回这一轮的出处 (mirror `openingOf`) 也读这两处 —— 人话行的 room 是绑定 room → channel = 群, dm / adhoc → 私下 (`""`); 老转录里的人话信封 (`wezard="envelope" kind="human"`) 读侧仍认。
 - inbound 不回镜 (它本来就来自企微); migrate 是历史; trigger 是定时任务唤醒, 不是对人说的话。
 - 非 msg 的 op (join / leave / seen / move / name / notice) 不镜像 (公告变动由上面那条 daemon system 行镜像)。无绑定的 dm / adhoc room 一律不镜像, 只在 rolepage 可见。
+- **topic room 的出站一律评论根帖** (`send_reply`; 被拒回退新帖并带引用), `chat_say` / `chat_reply` / `send_file` / `notify` 同口径。
 - 形态: 气泡头署作者名; 人话行带 bubble 时, **第一条 re 它的 reply** 覆盖占位气泡, 之后的作为新消息。file 行走媒体消息。
 - 镜像失败只改 Xport 状态, 不回滚、不影响完成。
 

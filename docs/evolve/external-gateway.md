@@ -124,7 +124,7 @@ wait 实现: 按账本的追加事件唤醒, 或每 500ms 重读一次房间状�
 前提: 第 1 步已上线 (5408b4e)。「外部轮」按**接待 wizard 这个身份**判, 不给单个轮次打标 —— 接待 wizard 只服务外部请求, 两者等价, 身份判据更稳 (轮次标记跨不过下一轮的上下文)。判据: 调用方的会话 / pane 解析到的 wizard 名 ∈ `external.principals[].reception` (启用的那些), 现查配置, 热生效。
 
 1. **禁用表 (路由层拦, 不靠工具名)**: CodeBuddy 的调用都包在 REPL 脚本里, 只看外层工具名拦不住, 所以在 daemon 路由处理里按「调用方是接待 wizard」拒 (403, 原因写「外部接待 wizard 不能 …, 需要就请 owner 做」)。先 grep mcp/tools.ts 列出每个工具打的路由, 再逐个落:
-   - 拒: 改配置 (/config/set)、停别的 wizard、set_workspace、room_bind / room_unbind / room_fork、room_invite / room_leave (移别人)、room_name、schedule_task / cancel_task、wizard_identity (改别人)、wizard_remember 的 chat / workspace 作用域、clone_wizard (会把外部上下文复制出去)。
+   - 拒: 改配置 (/config/set)、停别的 wizard、set_workspace、room_bind / room_unbind、room_invite / room_leave (移别人)、room_name、schedule_task / cancel_task、wizard_identity (改别人)、wizard_remember 的 chat / workspace 作用域、clone_wizard (会把外部上下文复制出去)。
    - 拒往**绑定 room** 发话: chat_say / chat_reply / chat_ask / notify / send_file 的目标 room 是绑定 room (isBoundRoom) → 拒。dm / adhoc 照常 (它要在自己的接待 room 里交代, 也要能 delegate / chat_ask 内部 wizard —— 那些落 dm / adhoc)。
    - 照常: chat_reply / chat_say / chat_ask 进非绑定 room、delegate、spawn_wizard (派出去的子 wizard 不继承这些限制, 这是有意的: 判断由接待 wizard 做)、room_read (只读它是成员的)、wizard_roster、pending_items、plan_*、wizard_whoami、handoff 自己。
 2. **审批收紧**: `daemon/approval.ts` 里, 会话归属是接待 wizard 时, 凡 matcher 拦下的工具一律发卡 —— 不走 allowRules、放行窗口、会话缓存、skipAll。卡面加一行「外部接待 <名> · 由外部调用方 <调用方名> 的请求驱动」。wezard 自己的 MCP 工具 (含 REPL 脚本里只调 wezard 工具的情形) 维持现状不发卡, 否则它连 chat_reply 都交代不了 —— 单测必须覆盖: 接待 wizard 调 chat_reply 不发卡; 调 Bash `ls` 发卡; 同一条 Bash 对普通 wizard 命中 allowRules 时不发卡。

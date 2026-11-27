@@ -1,6 +1,6 @@
 # 频道改造: 每个 topic 一个 room · 频道只留 host 身份绑定 · 图上框出频道 —— 设计稿
 
-状态: **设计稿 (待 admin 拍板 §9)**; 未写实现。lead = `.VictorNash`。取代 `docs/room/multi-source-binding.md` 里「频道首触接待」那一半 (§4.1 / §5.1) 与 `docs/room/channel-monitor.md` 里「频道 room」的那一半; 群源绑定 (P4) 不在本次删除范围。
+状态: **已拍板并实现** (2026-11-27; 后端 `544ecf0`, rolepage 频道框 `0c6e02d`; 拍板结果见 §9)。lead = `.VictorNash`。取代 `docs/room/multi-source-binding.md` 里「频道首触接待」那一半 (§4.1 / §5.1) 与 `docs/room/channel-monitor.md` 里「频道 room」的那一半; 群源绑定 (P4) 不在本次删除范围。
 
 admin 原话 (经 `.wezard-1` 转): 「另外，在channel里，我想了下，感觉还是每个topic起一个room吧，channel可以没有room，仅能绑定一种host身份关系。按照这个方向重新调整。可视化的部分，把一个channel内的room框起来」
 
@@ -147,10 +147,17 @@ topicRoomOf({topic, post, opk?}) =
 
 无阻塞项时的默认: 1-A / 2-A / 3-A (2-A 即现状, 不拍也照此做), 3-A 若真机回包没有 post_id 则退到 3-B。
 
+**拍板结果 (2026-11-27)**: 按默认 **①A ②A ③A** (`.wezard-1` 指示, 消息 e20d0a19.5):
+1. perceptron = 每频道一个共享 (`chat:<topic_id>#monitor`), 入座该频道所有 topic room;
+2. 频道绑的是**类**, 每个 topic room 坐该类在本 room 的实例;
+3. wizard 开新帖 = `chat_say({room:"chat:<topic_id>"})`: 先预检再 `send_post`, 有 `post_id` 才开 topic room, 没有只回 warning (即 3-B 的退路已写进实现, 真机回包字段名仍待确认: `postIdOfBody` 兼容顶层 / `data` / `post` 三种形状)。
+
+实现: 后端 `544ecf0` (`feat(channel)!`: topic room + 删首触 / `room_fork` / `decideTimeoutMin` + 开新帖 + 共享 perceptron + `/api/world` `channels[]`); 前端 `0c6e02d` (`feat(rolepage)`: 关系图频道框)。
+
 ## 10. 分阶段
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | P1 后端 | §2-§7: `topicRoomOf` + 入站四路改落点 + 出站 `topic:` + 删 fork / 首触 / 补拉 / decideTimeout + 帖子源 bind 拒 + 引导改住 topic room + rebind 遍历 + perceptron 粒度 + 读模型 `channel` / `channels` + charter / 工具描述 | `npm run typecheck`; 改写 `tests/channel-*.test.ts`、`room-bind-tool`、`onboarding`、`channel-steward` 等; 新增 topicRoomOf / 存量解析 / 存档频道 room 只读 的断言; build + reload, wsConnected |
 | P2 前端 | rolepage 关系图: 同频道 topic room 套框 (hull), 框标题 = 频道名 + 🎩 host; 存档频道 room 在框内; 窄屏可读 | `node scripts/shot.mjs` 桌面 + `--mobile` 截图 (演示数据, `--redact`/`--forbid`), 亲眼核对; `tests/room-graph.dom.mjs` |
-| 收口 | contract.md / channel-monitor.md / multi-source-binding.md 加修订头, CLAUDE.md 频道一节, README 若提到, CHANGELOG [Unreleased] (BREAKING) | 文档链接 / 命令复核 |
+| 收口 | contract.md / channel-monitor.md / multi-source-binding.md 加修订头, CLAUDE.md 频道一节, README 若提到, CHANGELOG [Unreleased] (BREAKING) | 文档链接 / 命令复核 (**已做 2026-11-27**) |

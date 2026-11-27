@@ -281,9 +281,9 @@ wizard 的名字由它自己起（对它说「以后你就叫 sanitizer」）；
 
 **你得到**：企微频道里 @ 机器人的帖子，也能让对口的 wizard 来答，并且评论回帖子下面。
 
-频道和帖子是两种 room：频道 room 的账本一行是一个顶层帖子，帖子 room 是它的评论区；每个 room 有自己的 host 实例。出站看动作——频道里 `chat_say` 发新帖，`chat_reply` 回某条评论就评论回原帖；图片和内嵌文件也能收。一个信息源与 room 可以多对一绑定：频道里 @ 机器人的首触先落在频道 room、唤醒 host，由 host 判「并进已有 room（`room_bind`）还是另起帖子 room」，10 分钟没判就自动另起，话不丢。
+频道里**每个帖子一个 room**（id `topic:<频道>/<帖子>`），从帖子的第一条事件起就是；频道本身没有 room，只绑一个 host 身份，每个帖子 room 坐它的一个实例。wizard 在帖子 room 里说话一律评论回根帖；想在频道开新帖，`chat_say` 到频道 id（`chat:<topic_id>`）。图片和内嵌文件也能收。群聊仍可用 `room_bind` 并进已有 room，帖子不能绑；关系图会把同一个频道的 room 框起来。
 
-**perceptron**：绑定 room 里没点名也没 @ 机器人的话，缺省落给 host，但有 wizard 成员的 room 会懒建一个只读的 **perceptron**（`wrc.channel.monitor`，缺省开，档位 `light`）：它**不能写任何消息**，只读账本和名册，给出一份「该回应的成员名单」，名单里的人名下各开一条 duty。被点中的 wizard 看到的只是人的原话。机制详见[技术说明](技术说明.md#perceptron谁该回应没点名的人话)。
+**perceptron**：绑定 room 里没点名也没 @ 机器人的话，缺省落给 host，但有 wizard 成员的 room 会懒建一个只读的 **perceptron**（频道里是每个频道共享一个，坐进该频道所有帖子 room；`wrc.channel.monitor`，缺省开，档位 `light`）：它**不能写任何消息**，只读账本和名册，给出一份「该回应的成员名单」，名单里的人名下各开一条 duty。被点中的 wizard 看到的只是人的原话。机制详见[技术说明](技术说明.md#perceptron谁该回应没点名的人话)。
 
 ---
 

@@ -1,5 +1,12 @@
 # 频道 / 帖子 room 与 monitor —— 定稿 (2026-11-23)
 
+> **修订 (2026-11-27, 频道改造, admin 经 `.wezard-1` 转: 「每个 topic 起一个 room, channel 可以没有 room, 仅能绑定一种 host 身份关系」; 设计 [docs/evolve/channel-topic-rooms.md](../evolve/channel-topic-rooms.md))**: 本文 **§1 第 1~2 点、§2.3 的入站 / 配对 / 帖子诞生 / 出站、§2.5 的「不画容器」已被取代**。现行口径:
+> ① **频道没有 room**, 只绑一个 host 身份 (`wrc.channel.steward.<topic_id>` = 类, 每个 topic room 一个实例); 每个帖子**从第一条事件起**就是自己的 room, id = `topic:<topic_id>/<post_id>`, 不再「被 @ 才诞生」、也不再有「先落频道 room 再判」;
+> ② **perceptron 每频道共享一个** (`chat:<topic_id>#monitor`), 入座该频道所有 topic room (一次唤醒可带多个 room 的段, `room_activate` 的 `re` 自带 room); 不再「每个频道 room、每个帖子 room 各一个」;
+> ③ 出站: topic room 一律评论根帖; 开新帖 = `chat_say({room:"chat:<topic_id>"})` (虚地址, 拿到 `post_id` 才开 topic room); 旧频道 room 成只读存档, 其 `channelOutboundOf` 分支只服务存档;
+> ④ rolepage 关系图**把一个频道的 room 框起来** (标题 = 频道名 + 🎩 host), 推翻 §2.5 的「不画容器」。
+> 旧 `chat:<opk>` 帖子 room 照用 (零改写)。monitor → perceptron 的改名与门控、换绑 (§1-8)、删 room_transfer (§2.4) 仍有效。
+
 > **修订 (2026-11-24, monitor → perceptron, 人拍板 9e7dbc47.4 / 090407fa.3; 门控二次纠正 9e7dbc47.9)**:
 > ① 判决输出**名单** (多目标) + `reason`, 落一条 `perceive` op (`{duty, to[], asker, by, why?}`) —— 仍不写消息行, 名单逐个开 duty, fold 记 verdict 供 rolepage (人话行挂「感知 → .A, .B · 理由」chip); **空判决不落任何记录**。
 > ② **门控替换 §2.2 的「频道落定即建」, 且不按成员数 (人二次拍板: channel 里只有一个 wizard 也需要感知)**: 是否建 / 是否接管 = 该 room 是否存在 wizard 成员 (含单管家 room / 频道), 频道 / 帖子 / **群**一视同仁, **不回落 host 兜底**; 例外: 单聊 (人私聊 = 直接说给全局管家) / `.me` 独立对话 / 引导中的群与频道 (`needsOnboarding` / `channelMonitorWanted` 守卫) —— 这几类照旧落 host。judge 的 `toMonitor` 另加 `origin!=="migrate"`。
@@ -10,15 +17,15 @@
 
 ## 1. 结论
 
-1. **频道和帖子都是 room**, 类似 Slack 的 channel 和 thread。
+1. **〔已取代 2026-11-27: 频道没有 room, 每帖一个 `topic:<T>/<P>` room〕 频道和帖子都是 room**, 类似 Slack 的 channel 和 thread。
    - 频道 room id = chat:<topic_id>, kind = channel。账本一行就是频道里的一个顶层帖子。
    - 帖子 room id = chat:opk…, kind = topic-post。账本是这个帖子下的评论。
    - graph 里两者都是普通 room 节点, 不画容器/包含关系; 归属由 channel 指针表达 (不做成员关系)。
    - **每个 room 的 host 是它自己的实例** (人 2026-11-23 二次拍板): 频道绑的是类 / 身份, 频道 room 与
      每个帖子 room 各自解析**本 room** 的化身 (类 = 领号新开), 互不共用 —— 老口径「帖子 room 坐频道
      那个实例」已废。帖子 room 的实例不预起 pane, 第一次被唤醒时冷启动。
-2. **帖子 room 在帖子第一次被 @ 时诞生 (方案 i)**。这时 topic_at_bot 事件和原生帧配上对, 才拿得到帖子的 opk 群 id。诞生之前, 这个帖子下的评论都记在频道 room 里: 那一行带 post 字段, 指向根帖。
-3. **每个频道 room、每个帖子 room 各有一个 monitor** (原来的 judge 改名而来)。
+2. **〔已取代: 帖子第一条事件就开 room〕 帖子 room 在帖子第一次被 @ 时诞生 (方案 i)**。这时 topic_at_bot 事件和原生帧配上对, 才拿得到帖子的 opk 群 id。诞生之前, 这个帖子下的评论都记在频道 room 里: 那一行带 post 字段, 指向根帖。
+3. **〔已取代: 每频道一个共享 perceptron `chat:<topic_id>#monitor`〕 每个频道 room、每个帖子 room 各有一个 monitor** (原来的 judge 改名而来)。
    - 是 room 成员, 有连续会话, 可以自己 handoff。
    - **不发言, 不当 host, 不持有 duty**。
 4. **@ 了机器人就不过 monitor**: 等同于点名 host (管家), 发话人明确知道在找谁。
@@ -55,7 +62,7 @@
 - **move 行**: 读侧 fold 保留, 老账本里的 move 行照常折叠; 写入方随 room_transfer 一起删。
 
 ### 2.2 monitor 身份与生命周期 (daemon)
-- 新 WizardKind "monitor", 档位 light (可配)。一个 room 一个, 由 daemon 自动建、自动拉进 room:
+- 新 WizardKind "monitor", 档位 light (可配)。一个 room 一个 〔现为每频道一个共享, 入座该频道所有 topic room〕, 由 daemon 自动建、自动拉进 room:
   - 频道 room: 第一次见到这个频道时建;
   - 帖子 room: 帖子 room 诞生时建。
 - **工具面硬限** (参照 approval.ts:2140 guideRefusal, REPL 下钻同 25179b4):
@@ -67,7 +74,7 @@
   - room-watchdog 不对 monitor 写 canceled, 它名下本来就没有 duty。
 - **pane 资源**: 一个 room 一个常驻 pane, 数量会涨。monitor 闲时允许被 pane 资源回收 (身份和绑定保留), 下一条人话冷启动。上线前先确认 pane 上限 / 孤儿清扫不会误杀它, 见 workspace 记忆里的 pane 上限与 ENOMEM 两条。
 
-### 2.3 频道传输 (daemon/channel.ts)
+### 2.3 频道传输 (daemon/channel.ts)  〔入站 / 配对 / 帖子诞生 / 出站四条已取代, 见文首修订; 现行入站解析 = `topicRoomOf`〕
 - **删一次性判官**: runJudgeOnce、askJudge、buildJudgePrompt、parseVerdict、judgeAndMaybe、Verdict, 以及配置 wrc.channel.judge, 和 tests/channel-judge.test.ts。
   - task-gate.ts 那个匹配只是同名词, 先核实再动。
 - **入站, 不再伪造 chatid = topicId 的帧 (channel.ts:642 dispatch)**:
@@ -89,7 +96,7 @@
 - 交接 = 拉新人进来, 然后自己 room_leave。
 - tests/room-overdue.test.ts 里对 move 的断言改成读侧 fold, 删掉的测试留删除记录。
 
-### 2.5 读模型与 graph
+### 2.5 读模型与 graph  〔「不画容器」已推翻: 关系图把频道的 room 框起来〕
 - **room 类型**: shared/room-view.ts:53 KIND_BY_PREFIX 不再靠前缀猜。频道 / 帖子的 kind 由 channel-posts 映射在读的时候算出来 (buildRoomFact 现算, 不落账本)。RoomFact 加 channel?: {id, name} 和 rootPost?。
 - **/api/world**: 帖子 room 带 channel 指针。
 - **web/chat.js graphModel**:

@@ -23,7 +23,7 @@
 4. [daemon/wizard.ts](../daemon/wizard.ts) `renderCharter` — 在 `## 我能做什么` 那段 `bullet([...])` 里加一行 **「何时用」**。
    - 分工: charter 行回答「什么时候该选它」(Claude Code 把 MCP schema 放在 ToolSearch 后面, 只有 charter 常驻); 工具 `description` 写机制、参数、边界。两处别互相复述。
    - 稀有 / 人侧工具不进 charter (没人该主动想起它)。
-   - **工具面三处联动 (现成样例: 多源绑定 room_bind / room_unbind / room_fork)**: ① 注册 [mcp/tools.ts](../mcp/tools.ts) `server.registerTool("room_bind", …)`; ② daemon 路由 [daemon/index.ts](../daemon/index.ts) 的 `POST /room/bind|/room/unbind|/room/fork` (判定在 [daemon/room-bind.ts](../daemon/room-bind.ts), 路由只管认调用者 / 回包); ③ charter [daemon/wizard.ts](../daemon/wizard.ts) `renderCharter` 加一行「何时用」。三处缺一处都算没做完: 只有注册 = 模型不知道何时想起; 只有 charter = 调用 404。
+   - **工具面三处联动 (现成样例: 多源绑定 room_bind / room_unbind)**: ① 注册 [mcp/tools.ts](../mcp/tools.ts) `server.registerTool("room_bind", …)`; ② daemon 路由 [daemon/index.ts](../daemon/index.ts) 的 `POST /room/bind|/room/unbind` (判定在 [daemon/room-bind.ts](../daemon/room-bind.ts), 路由只管认调用者 / 回包); ③ charter [daemon/wizard.ts](../daemon/wizard.ts) `renderCharter` 加一行「何时用」。三处缺一处都算没做完: 只有注册 = 模型不知道何时想起; 只有 charter = 调用 404。
 
 **不用动的 (默认已覆盖)**
 

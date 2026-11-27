@@ -2,6 +2,12 @@
 
 状态: **已拍板** (2026-11-24 人定五点, 见 §11; 未写实现)。分支 v3; 改动面见 §10。
 
+> **修订 (2026-11-27, 频道改造; 设计 [docs/evolve/channel-topic-rooms.md](../evolve/channel-topic-rooms.md))**: 本文**「频道首触接待」那一半已取代** —— §0 现状追踪、§4.1 的「频道 @ 首触改走接待」、§5.1 的三出口与兜底、§7 的频道成员补拉自愈、§8 的 P3、§9 的首触延迟、§11-2 (首触超时) 作废。现行口径:
+> - 频道每个帖子一个 room (`topic:<topic_id>/<post_id>`), 没有「先落频道 room 再由 host 判」, 因此**没有首触判定**; `rooms.binding.decideTimeoutMin` 已删 (旧键忽略, boot 时 warn); 帖子 host 也不再补拉进频道 room (频道没有 room);
+> - **帖子源不能再 `room_bind` (400)**; **群源** `room_bind` / `room_unbind` 保留 (P4, 证据 / 阈值 `simMin` / `busyWindowMin` 照旧); 存量的帖子源 bind op 照读 (`topicRoomOf` 首位尊重它), 仍可 `room_unbind`;
+> - `room_fork` 工具与 `POST /room/fork` 已删 (帖子天然是 room, 无需「另起」);
+> - 仍有效: §3 数据模型 (bind / unbind op、`src` 字段、boot 索引与对账闸)、§4.2 出站按行目标源、§6 权限 (群源)、§11-1 / 3 / 4 / 5。
+
 ## 0. 背景与问题
 
 人的原话 (2026-11-24):
@@ -77,7 +83,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 改动点:
 - `daemon/index.ts` 人话落 room 的口子 (`channelIngest` / 群路径 `dispatch` 前的 room 解析): 先查索引。
-- **频道 @ 机器人首触改走接待**: 原生帧配对成功 (`postBorn`) 时**不再自动开帖子 room + 新实例**; 人话落频道 room (行带 post + `mention:"bot"` + `src: chat:<opk…>`), 直达频道 room 的 host。host 判定 (§5) 才决定帖子 room 诞不诞生 / 绑不绑。未配上对的兜底路径同此 (落频道 room, 现状本就如此)。
+- **〔已取代 2026-11-27: 帖子每帖一个 room, 无首触接待〕 频道 @ 机器人首触改走接待**: 原生帧配对成功 (`postBorn`) 时**不再自动开帖子 room + 新实例**; 人话落频道 room (行带 post + `mention:"bot"` + `src: chat:<opk…>`), 直达频道 room 的 host。host 判定 (§5) 才决定帖子 room 诞不诞生 / 绑不绑。未配上对的兜底路径同此 (落频道 room, 现状本就如此)。
 - `stewardReception` 只对**恒等路径** (未被绑定的源) 生效 —— 源已绑进 room R 时, 裸消息的接待对象 = **R 的 host** (不是源的类绑定化身); `stewardRoute` 增加「先查绑定索引」一步。
 
 ### 4.2 出站 (room → 源)
@@ -96,7 +102,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 ## 5. host 判定 (绑定的决策面)
 
-### 5.1 决策时刻
+### 5.1 决策时刻 **〔已取代 2026-11-27, 见文首修订〕**
 
 **新源首触 reception**: 频道 @ 首触 (§4.1) 落频道 room 唤醒 host 时。host 三个出口:
 
@@ -105,7 +111,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 3. **另起 room** → 帖子 room 诞生 + 领号新实例 (今天的行为), 并且**把新 host 实例同步拉进频道 room** (人 2026-11-24 追加): 走 hub 正常 join (via `spawn`, by = 判定者 —— host 本人或超时兜底时 DAEMON), 不走 join-req 等批。频道 host 从此在成员表里看得到每个帖子 host —— 判定新消息落哪个已有帖子 room / 复用哪个实例的「已知成员」视图。
    - 拉进来的是**普通成员**: ord = nextOrd, 频道 host (最早加入序) 的 host 身份不动; 不订阅 (`watch` 默认关), 频道里未点名的人话按 §B-3 只醒 monitor/host, **不会唤醒它**; 被点名则照常醒 (频道 host 与它横向沟通的通道)。
 
-**兜底**: host 被唤醒后 `rooms.binding.decideTimeoutMin` (缺省 10) 内没有 bind 也没有显式「另起」→ daemon 自动走出口 3 (不丢话、不卡接待: 现行行为就是兜底)。监督线: overdue 两级提醒照常生效。
+**兜底 〔已删: `decideTimeoutMin` 随首触一起删〕**: host 被唤醒后 `rooms.binding.decideTimeoutMin` (缺省 10) 内没有 bind 也没有显式「另起」→ daemon 自动走出口 3 (不丢话、不卡接待: 现行行为就是兜底)。监督线: overdue 两级提醒照常生效。
 
 ### 5.2 证据与相关度 (与复用 wizard 同构)
 
@@ -122,7 +128,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 
 **硬门 (daemon, 判定面之外)**: ① 同 bot; ② 源未被绑定 (一源一 room, 想换先 unbind); ③ 目标 room 存在且有 host; ④ 源类型 ∈ {群, 帖子}; ⑤ 源不能是目标 room 的主源 (恒等没意义)。
 
-阈值归 `rooms.binding.*` 配置 (simMin / decideTimeoutMin / busyWindowMin), 全部 hot-read。
+阈值归 `rooms.binding.*` 配置 (simMin / busyWindowMin; `decideTimeoutMin` 已删), 全部 hot-read。
 
 ### 5.3 与「复用已有 wizard」的关系
 
@@ -146,7 +152,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 - **存量零数据迁移**: 无绑定 → 恒等回落, 现行为逐字节不变。唯一「迁移」是 boot 索引重建 + 对账闸 (§3.2), 属代码路径非数据改写; 红线照走: 线上先备份 `~/.wezard/state/rooms` (字节原样), 演练至少一遍真 daemon (临时 HOME + 临时端口) 验「内存索引 = 账本重放」。
 - reload: bind 索引随 boot 重建; 在途轮次不受影响 (行上 src 已落死)。
 - 解绑: 源回落恒等 —— 帖子源下一条消息时帖子 room 才按需诞生 (现行 lazy 语义); 群源回到自己的 1:1 room (原 room 与管家实例原样保留, 解绑即恢复)。
-- **频道成员补拉自愈**: boot (与 `settleBoundChannel` / `channel-rebind` 同钩子) 幂等补拉**存量**帖子 room 的 host 实例进频道 room —— 条件: 频道已绑定、频道 room 有 host、实例仍在册 (stop/忘掉的跳过)。与 channel-rebind 的补座位同风格; 一频道一帖一实例本是现状实例数, 成员表变长只是把它们显出来。若频道 room 尚无 wizard host (引导期), 不拉 —— 首个被拉者会按最早序变成 host。
+- **〔已删 2026-11-27: 频道没有 room, 无补拉〕 频道成员补拉自愈**: boot (与 `settleBoundChannel` / `channel-rebind` 同钩子) 幂等补拉**存量**帖子 room 的 host 实例进频道 room —— 条件: 频道已绑定、频道 room 有 host、实例仍在册 (stop/忘掉的跳过)。与 channel-rebind 的补座位同风格; 一频道一帖一实例本是现状实例数, 成员表变长只是把它们显出来。若频道 room 尚无 wizard host (引导期), 不拉 —— 首个被拉者会按最早序变成 host。
 - `channel-rebind` (频道换绑工作区) 正交: 换的是类与实例; 本设计换的是话的去处。帖子源被绑进别的 room 时, 频道换绑不动绑定。
 - 出站占位气泡 / 审批卡 / AskUserQuestion: 按「发生源」路由 (§4.2 表), 审批卡投 asker 私聊的现行逻辑不变。
 
@@ -156,13 +162,13 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 |---|---|---|
 | P1 模型 | `bind/unbind` op + fold `bindings` + `src` 字段 + boot 索引与对账闸 | 单测: fold/重放/对账闸 fail-closed; 存量账本 fold 不变 (哈希对比) |
 | P2 出站 | `roomMirror` 按行 src 分流 (reply 跟线程, say 主源) | 回归: 现有群/频道/帖子出站全绿 (src 缺省路径 = 现行为) |
-| P3 频道首触 | @ 首触落频道 room + 超时兜底另起 + `room_bind/unbind` 工具 + 硬门 + 另起时新 host 拉进频道 room (join) | 真机: 频道 @ 一句 → host 收到; bind → 后续评论落本 room、回复评论回原帖; unbind → 回落; 另起 → 新 host 出现在频道成员表, 未点名人话不醒它, 频道 host 身份不变 |
+| P3 频道首触 〔已取代〕 | @ 首触落频道 room + 超时兜底另起 + `room_bind/unbind` 工具 + 硬门 + 另起时新 host 拉进频道 room (join) | 真机: 频道 @ 一句 → host 收到; bind → 后续评论落本 room、回复评论回原帖; unbind → 回落; 另起 → 新 host 出现在频道成员表, 未点名人话不醒它, 频道 host 身份不变 |
 | P4 群源 + 证据 | 群源绑定入站路径 + dry-run 证据/阈值/veto | 真机: 群绑进旧 room、对话两向通; 跨 bot/已绑定被拒 |
 | 收口 | charter 行 + dev-guide 清单 + CHANGELOG Unreleased + build/测试全绿 | 交付另报, 不 push 不 reload |
 
 ## 9. 风险
 
-- 首触延迟: host 忙时接待要等它本轮结束 (唤醒泵既有语义), 超时兜底兜住最坏情况 = 现行为。
+- 〔已取代〕首触延迟: host 忙时接待要等它本轮结束 (唤醒泵既有语义), 超时兜底兜住最坏情况 = 现行为。
 - 频道 room 变高流量: 绑多个热帖后一个 room 承多源, 出站集中打一个源 —— 观察项 (§11-4)。
 - `src` 是新行字段: 老账本无 src, 读侧一律回落主源, 与 `post` 的读法同纪律。
 
@@ -173,7 +179,7 @@ roomOf(source) = bindIndex.get(source) ?? source        // 恒等回落 = 存量
 ## 11. 拍板结果 (2026-11-24, 经 wezardd-8)
 
 1. **绑定存储** = A: 账本 bind/unbind op 为唯一事实 + boot 索引。
-2. **首触超时** = 接受: host 10 分钟不判 → 自动另起 room (出口 3)。
+2. **首触超时** 〔已取代: 首触判定已删〕 = 接受: host 10 分钟不判 → 自动另起 room (出口 3)。
 3. **跨 room 绑定权限** = A: 绑进别人的 room 先 chat_ask 目标 host。
 4. **出站预算** = 不设按源上限; 按(room) 的出站额度已整体删除 (a3653e2), 本设计不引入任何出站预算。
 5. **解绑语义** = lazy: 帖子源解绑后帖子 room 等下一条消息再诞生, 不立即补开。
