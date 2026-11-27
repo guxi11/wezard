@@ -188,11 +188,12 @@
     if (ns.length === 2) return ns.join(' ↔ ');
     return ns.slice(0, 3).join('·') + (ns.length > 3 ? ' 等' + ns.length + '人' : '');
   };
-  // 图上的频道名: 只认服务端真名 (channels[].name / 频道 room 的人起 title), 没有就退回 id 前 8 位。
-  // 不回落 chatNames —— 那里可能是从 cwd 派生的自动名 (仓目录名), 图上比一串 id 更误导。
-  // 侧栏 / 会话列表仍走 chatNames 那套口径, 不受影响。
+  // 图上的频道名四级: 服务端真名 (channels[].name / 频道 room 的人起 title) > chatNames['chat:<id>']
+  // 的兜底名 (cwd 仓目录名, 有信息量: 频道就是这个项目) > id 前 8 位。写 wrc.channel.name 就落在第一级。
   var channelName = function (id, name) {
-    return name && name !== 'chat:' + id ? name : String(id).slice(0, 8);
+    var real = name && name !== 'chat:' + id ? name : '';
+    var auto = W.chatNames['chat:' + id] || '';
+    return real || (auto && auto !== 'chat:' + id ? auto : String(id).slice(0, 8));
   };
   // 帖子 room 的帖号尾 6 位: 新 id `topic:<T>/<P>` 从 id 读, 旧 `chat:<opk>` 帖子 room 用服务端给的 rootPost。
   var postTail = function (r) {
