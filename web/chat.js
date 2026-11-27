@@ -948,6 +948,8 @@
       if (!e._tx.onclick) e._tx.onclick = function (ev) {
         var el = ev.target && ev.target.closest ? ev.target.closest('[data-mon]') : null;
         if (!el || S.gmoved) return;
+        // 这一下已经由 pointerup 处理过了 (按下时的那颗 chip): 别再切一次, pushNav 会多压一层历史。
+        if (Date.now() - (S.gchipAt || 0) < 500) return;
         ev.stopPropagation();
         goRole(el.getAttribute('data-mon'));   // 与点击图里那个 monitor 节点同一个动作
       };
@@ -1006,6 +1008,17 @@
     };
     var start = null;
     svg.onpointerdown = function (e) {
+      // 频道框标题里的 👁 chip 只认「点」, 不从它起手拖动: 以前它走通用路径, 手抖 4px 就被判成拖背景 (S.gmoved),
+      // 随后的 click 被吞掉 —— 真人点 chip 手都会抖几像素, 看着就是「点不动」。这里直接不起拖, click 照常触发。
+      var chipEl = e.target.closest ? e.target.closest('[data-mon]') : null;
+      if (chipEl) {
+        // 记下按下时的那颗 chip: 图很可能还在收敛 (坐标在动), 到 pointerup 时 chip 已经挪开、click 落空 ——
+        // 所以判定放在 pointerup, 按「按下的那颗 chip」走, 不按抬起处命中的元素走。
+        start = null; S.gmoved = false; S.gdrag = '';
+        S.gchip = { mon: chipEl.getAttribute('data-mon'), x: e.clientX, y: e.clientY };
+        return;
+      }
+      S.gchip = null;
       var el = e.target.closest ? e.target.closest('[data-node],[data-room]') : null;
       var node = el && el.getAttribute('data-node'), room = el && el.getAttribute('data-room');
       start = { id: node ? 'p:' + node : room ? 'r:' + room : '', el: el,
@@ -1042,6 +1055,15 @@
       }
     };
     var stop = function (e) {
+      // 按下的是一颗 👁 chip: 抬起时离按下处 24px 以内就算点它 (图在动也点得中)。
+      if (S.gchip) {
+        var ch = S.gchip; S.gchip = null;
+        var cdx = (e.clientX || 0) - ch.x, cdy = (e.clientY || 0) - ch.y;
+        if (e.type !== 'pointercancel' && cdx * cdx + cdy * cdy < 576) {
+          S.gchipAt = Date.now();
+          goRole(ch.mon);
+        }
+      }
       var held = start && start.id && S.gnodes && S.gnodes[start.id];
       start = null;
       S.gdrag = '';
