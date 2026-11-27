@@ -1075,9 +1075,10 @@
 
   // 视野 = 取景 (v0) 叠加用户的缩放 (S.gzoom) 与平移 (S.gpx / S.gpy, 像素): 平移永远由用户拖背景决定, 图不会自己滑。
   // 以前是「没缩放/平移过就每帧按内容重算」: 布局还在收敛时包围盒每帧都变 → 中心与缩放跟着变, 整张图自己在滑。
-  var gViewFit = function (f, pn, frames) {
+  var gViewFit = function (f, pn, frames, rescue) {
     // 窄屏 (手机 / 左栏) 上的频道框: 宁可缩到 0.8 也要整个框进画布 (不让虚线框被画布边切掉); 宽屏不变。
-    var kmin = (frames || []).length && pn.w < 420 ? 0.8 : 0.95;
+    // rescue = 兜底修正 (见 gRescueView): 内容确实放不下时允许再缩一些, 也要让框 (和它的标题条) 整个进画布。
+    var kmin = rescue ? 0.55 : ((frames || []).length && pn.w < 420 ? 0.8 : 0.95);
     return { k: Math.max(kmin, Math.min(1, f.k)), cx: f.cx, cy: f.cy };
   };
   // 取景只做一次 (首次出图 / 双击重排 / 画布尺寸变了): 不再按内容每帧重算 —— 以前谁动一下 (拖节点、来一条新消息)
@@ -1088,9 +1089,27 @@
     var v0 = S.gv0;
     return { w: pn.w, h: pn.h, k: v0.k * (S.gzoom || 1), cx: v0.cx, cy: v0.cy, ox: pn.w / 2 + (S.gpx || 0), oy: pn.h / 2 + (S.gpy || 0) };
   };
+  // 取景兜底: 首帧取的景是那一刻的包围盒, 之后布局还在收敛 / 又来了 room 或频道框, 内容就长出了画布 ——
+  // 最上面那个框的标题条 (连着 👁 chip) 被推到画布上边界之外, 既看不见也点不到。
+  // 这里只做一次性修正: 发现框出了画布就按当前内容重新取一次景; 用户自己平移 / 缩放过就完全不动 (视野归用户)。
+  // 不动「每帧按内容重算视野」—— 那会让整张图自己在滑 (见 gViewFit 上面的注释)。
+  var gRescueView = function (g) {
+    if (S.gpx || S.gpy || (S.gzoom || 1) !== 1) return false;
+    var pn = gPanel(), v = gView(g);
+    var X = function (p) { return (p.x - v.cx) * v.k + v.ox; }, Y = function (p) { return (p.y - v.cy) * v.k + v.oy; };
+    var cut = false;
+    (g.frames || []).forEach(function (f) {
+      var b = gFrameBox(f, X, Y);
+      if (b.x0 < -1 || b.y0 < -1 || b.x1 > v.w + 1 || b.y1 > v.h + 1) cut = true;
+    });
+    if (!cut) return false;
+    S.gv0 = gViewFit(gFitK(g, pn), pn, g.frames, true);
+    return true;
+  };
   var drawPos = function (g) {
     var dom = S.gdom, svg = convsEl.querySelector('.rv-graph');
     if (!dom || !svg) return;
+    if (!S.gdrag) gRescueView(g);   // 正在拖节点时不动视野
     var v = gView(g), box = '0 0 ' + v.w + ' ' + v.h;
     if (svg.getAttribute('width') !== String(v.w)) svg.setAttribute('width', v.w);
     if (svg.getAttribute('height') !== String(v.h)) svg.setAttribute('height', v.h);
