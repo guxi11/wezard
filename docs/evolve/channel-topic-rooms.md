@@ -53,7 +53,11 @@ topicRoomId(topic, post) = "topic:" + topic + "/" + post        // 新建一律�
 
 ### 2.3 频道元数据 (不是 room)
 
-需要一个「已知频道」的列表给图做框标题、给 read_channel / 引导认频道: 继续用 `channel-posts.json` 里 `chat:<topic_id> → {channel, post:""}` 那条 (`learnChannelRoom` 现在就写它, 改名 `learnChannel`)。频道显示名沿用 chat-name 键 `chat:<topic_id>` (人起的名字不迁)。
+需要一个「已知频道」的列表给图做框标题、给 read_channel / 引导认频道: 继续用 `channel-posts.json` 里 `chat:<topic_id> → {channel, post:""}` 那条 (`learnChannelRoom` 现在就写它, 改名 `learnChannel`)。频道显示名 (2026-11-27 补): **`wrc.channel.name.<topic_id>`** (record, 与 steward 表同形, hot; `config_set` 可改, 引导 `onboard_bind` 的 `roomName` 对频道也落进它) > 旧的冻结标签 `chats["…"]=chat:<topic_id>` (人起的名字不迁) > topic_id 前 8 位 (`daemon/channel-posts.ts` `channelNameOf`)。**不改 `chatNameOf`** —— 它进宪章、还决定默认会话的 `settleName`, 频道名只是 rolepage 的展示用字, 改名不需要 handoff。
+
+帖子 room 的显示名 (rolepage): 显式 `title` (`room_name`) > 旧聊天名 > **该 room 第一条人话的缩略** (~20 字, 服务端读账本算, `RoomFact.firstAsk`; 独立 svr 同源) > `帖 xxxxxx`。频道名已在频道框标题上, 帖子名里不再重复「频道名 · 帖 xxxxxx」; 同一频道里撞名追加 `· 帖xxxxxx` 消歧。`room_name` 传空串 = 清掉 title (回落到上面几级)。
+
+频道框上的 host 显示口径: 频道表绑定 > 接待口径的有效身份 (`stewardIdentityOf`: 含 `chatPolicy` 老绑定与频道键默认会话) > 各 room 现任 host 的类 (只在前两者都没有时按多数推断, 一写上表就以表为准, 不随 host 换人闪烁) > 才写「未绑 host」。
 
 ### 2.4 行字段
 

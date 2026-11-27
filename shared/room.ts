@@ -319,7 +319,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
   switch (op.op) {
     case "open":
       s.kind = op.kind; if (op.title) s.title = op.title; s.openedAt ??= op.at; break;
-    case "name": if (op.title) s.title = op.title; break;
+    case "name": if (op.title) s.title = op.title; else delete s.title; break;  // 空 title = 清名字 (room_name 传空串)
     case "notice": if (op.text.trim()) s.notice = op.text; else delete s.notice; break;
     case "join": {
       const k = whoKey(op.who);

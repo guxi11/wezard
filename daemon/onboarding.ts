@@ -273,6 +273,16 @@ export const bindChannelSteward = (cfg: Config, sourcePath: string, topicId: str
   }
 };
 
+/** 写频道名 (热): wrc.channel.name.<topic_id>。空名 = 清掉 (回落旧标签 / topic_id 前 8 位)。
+ *  不进宪章, 不用守卫。 */
+export const setChannelName = (cfg: Config, sourcePath: string, topicId: string, name: string): void => {
+  const clean = name.trim().replace(/\s+/g, " ");
+  const rest = Object.fromEntries(Object.entries(cfg.wrc.channel.name ?? {}).filter(([k]) => k !== topicId));
+  cfg.wrc.channel.name = clean ? { ...rest, [topicId]: clean } : rest;
+  try { patchJsonc(sourcePath, [{ path: ["wrc", "channel", "name", topicId], value: clean || undefined }]); }
+  catch (err) { if (clean) throw err; /* 清除时文件里本就没有这一项 */ }
+};
+
 /** 频道级收口: base 认得出频道时, 散落在各帖子的 chatPolicy.<帖子>.steward 并成频道表一条 ——
  *  频道已绑就只清帖子级残留; 没绑就把帖子级里最早出生的那个身份升格。什么都不用做 = undefined。 */
 export const settleChannelSteward = (cfg: Config, store: WizardStore | undefined, sourcePath: string, base: string): { topicId: string; name: string; cleared: string[] } | undefined => {

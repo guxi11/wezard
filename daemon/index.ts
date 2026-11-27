@@ -32,7 +32,7 @@ import { humanWakeTail, wakeInjectOpts, wakeTailPorts } from "./wake-tail.js";
 import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, channelOutboundOf, sendTopicPost, sendTopicPostRaw, sendTopicReply, sendTopicReplyOrPost, type ChannelHuman, type TopicMedia } from "./channel.js";
 import { channelNewPost, createSelfPostLog, newPostSeatOps, newPostTopicOfRef } from "./channel-newpost.js";
-import { channelOf, channelRefOf, knownChannels, learnChannel, postRefOf, topicRoomOf, topicRoomsOf } from "./channel-posts.js";
+import { channelNameOf, channelNameOfBase, channelOf, channelRefOf, knownChannels, learnChannel, postRefOf, postsOfChannel, topicRoomOf, topicRoomsOf } from "./channel-posts.js";
 import { isTopicRoomId, parseTopicRoomId, topicRoomLabel } from "../shared/topic-room.js";
 import { channelKeyOf, channelMonitorLeaveOps, channelMonitorWanted, channelGuideJoinOps, hostJoinOps, planChannelGuideTurn, topicRoomBirthOps, type ChannelGuideTurn } from "./channel-onboarding.js";
 import { rebindChannel } from "./channel-rebind.js";
@@ -146,7 +146,7 @@ import { parseWhen, planHasOpenDuty, renderRoomRead, roomKindOf } from "../share
 import { memberLabel } from "../shared/room-label.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle } from "./wait-idle.js";
-import { applyOnboarding, bindSteward, GUIDE_DESC, guideHandoffOps, guideOf, guideTargetOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderGuideRetry, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
+import { applyOnboarding, bindSteward, GUIDE_DESC, guideHandoffOps, guideOf, guideTargetOf, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderGuideRetry, renderOnboardingDone, rewriteStewardBindings, setChannelName, type OnboardingBound } from "./onboarding.js";
 import { reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 
@@ -239,11 +239,26 @@ const main = async (): Promise<void> => {
   // otherwise a `wezard reload` silently drops the user's "10min" choice.
   initAutoWindowPersistence(cfg.daemon.stateDir);
   // rolepage 的频道 / 帖子 kind 与归属读时算 (channel-posts), 不落账本; host = 频道绑的身份 (wrc.channel.steward → 类)。
+  // 各 room 现任 host 的身份 (账本里 ord 最小的 wizard → 它的类); roomStore 在后面才建, 建好后接线。
+  let roomHostsOfChannel: (topic: string) => Array<{ identity: string; name: string }> = () => [];
   const hostOfChannel = (topic: string): { identity: string; name: string } | undefined => {
-    const name = ((cfg.wrc.channel.steward ?? {})[topic] ?? "").trim();
-    if (!name) return undefined;
-    const cls = wizardStore()?.classes?.byName(name);
-    return { identity: cls?.id ?? name, name: cls?.name ?? name };
+    const store = wizardStore();
+    const named = (identity: string, fallback: string): { identity: string; name: string } =>
+      ({ identity, name: store?.classes?.get(identity)?.name ?? fallback });
+    // ① 频道表绑定 (类名 → 类; 不是类就是普通身份名)。
+    const bound = ((cfg.wrc.channel.steward ?? {})[topic] ?? "").trim();
+    if (bound) {
+      const cls = store?.classes?.byName(bound);
+      return { identity: cls?.id ?? bound, name: cls?.name ?? bound };
+    }
+    // ② 接待口径的有效身份 (chatPolicy 老绑定 / 频道键的默认会话) —— 与实际接待同一判据, 框上不再写「未绑」而 room 里明明有人接待。
+    const eff = stewardIdentityOf(cfg, store, "chat:" + topic);
+    if (eff) return named(eff, store?.all().find((w) => identityOfRec(w) === eff)?.name ?? eff);
+    // ③ 表空、接待也没有: 看各 room 现任 host 的类 (只在这里推断 —— 表一写上就以表为准, 不会随 host 换人闪烁); 取最多的那个。
+    const tally = new Map<string, { identity: string; name: string; n: number }>();
+    for (const h of roomHostsOfChannel(topic)) tally.set(h.identity, { ...h, n: (tally.get(h.identity)?.n ?? 0) + 1 });
+    const top = [...tally.values()].sort((a, b) => b.n - a.n || a.identity.localeCompare(b.identity))[0];
+    return top ? { identity: top.identity, name: top.name } : undefined;
   };
   const channelRefWithHost = (room: string): ReturnType<typeof channelRefOf> => {
     const r = channelRefOf(cfg, room);
@@ -1237,6 +1252,15 @@ const main = async (): Promise<void> => {
     const roomsDir = roomsDirOf(cfg.daemon.stateDir);
     const roomStore = openRoomStore(roomsDir);
     roomOfHashHook = (h) => roomStore.roomByHash(h);
+    roomHostsOfChannel = (topic) => [...new Set([...topicRoomsOf(cfg, topic, roomStore.ids()), ...postsOfChannel(cfg, topic).filter((b) => roomStore.ids().includes(b))])]
+      .flatMap((r) => {
+        const s = roomState(r);
+        const h = s ? roomHost(s) : undefined;
+        const w = h?.kind === "wizard" ? wizards.byUid(h.id) : undefined;
+        if (!w) return [];
+        const identity = identityOfRec(w);
+        return [{ identity, name: wizardStore()?.classes?.get(identity)?.name ?? w.name }];
+      });
     /** 损坏的 room 文件 (RoomBroken) 不挡 boot, 也不参与任何判定 —— 只记一行。 */
     const roomState = (id: string): RoomState | undefined => {
       try { return roomStore.get(id); } catch (e) { log.warn({ mod: "room", room: id, err: errText(e) }, "room: 账本损坏, 跳过"); return undefined; }
@@ -1320,7 +1344,7 @@ const main = async (): Promise<void> => {
       if (room.startsWith("adhoc:")) return memberLabel([...(s?.members.values() ?? [])].map((x) => roomNameOf(x.who))) || room;
       // topic room: 「频道名 · 帖 xxxxxx」(频道名沿用 chat-name 键 chat:<topic_id>; 没起名用 id 前 8 位)。
       const tr = parseTopicRoomId(room);
-      if (tr) return topicRoomLabel(tr, chatNameOf(cfg, "chat:" + tr.channel));
+      if (tr) return topicRoomLabel(tr, channelNameOf(cfg, tr.channel));
       return chatNameOf(cfg, room) || room;
     };
     /** 频道 room 判据: 进程内见过的 topic (事件登记) **或** channel-posts 认识且没有根帖的频道。
@@ -1987,14 +2011,16 @@ const main = async (): Promise<void> => {
       if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是 " + roomLabel(r.room) + " 的成员, 起不了名 / 改不了公告" }); return; }
       if (!canRename(s, me)) { json(res, 403, { ok: false, reason: "只有本 room 的 host 能起名 / 改公告 (现在是 " + (roomHost(s) ? roomNameOf(roomHost(s)!) : "无人") + ")" }); return; }
       const name = (b.name ?? "").toString().trim().replace(/\s+/g, " ");
+      // name 给了 (哪怕是空串) 就算「给了」: 空串 = 清掉 title, 回落到频道名 / 首条人话缩略 / 聊天名。
+      const nameGiven = b.name !== undefined && b.name !== null;
       const noticeGiven = b.notice !== undefined && b.notice !== null;
-      if (!name && !noticeGiven) { json(res, 400, { ok: false, reason: "name 与 notice 至少给一个" }); return; }
+      if (!nameGiven && !noticeGiven) { json(res, 400, { ok: false, reason: "name 与 notice 至少给一个" }); return; }
       if (name.length > 60) { json(res, 400, { ok: false, reason: "名字太长 (最多 60 字)" }); return; }
       // 先判公告再写名字: 公告被拒 (太长) 时整个请求不留半截。
       const nt = noticeGiven ? setRoomNotice(r.room, String(b.notice), me) : undefined;
       if (nt && !nt.ok) { json(res, nt.status, { ok: false, reason: nt.reason }); return; }
-      if (name) hub.write(r.room, [{ op: "name", at: Date.now(), room: r.room, title: name, by: me }]);
-      json(res, 200, { ok: true, room: r.room, ...(name ? { name } : {}), ...(nt?.ok ? { notice: nt.notice, changed: nt.changed } : {}) });
+      if (nameGiven && (name || s.title)) hub.write(r.room, [{ op: "name", at: Date.now(), room: r.room, title: name, by: me }]);
+      json(res, 200, { ok: true, room: r.room, ...(nameGiven ? { name, ...(name ? {} : { cleared: true }) } : {}), ...(nt?.ok ? { notice: nt.notice, changed: nt.changed } : {}) });
     });
     http.register("POST /room/invite", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2774,12 +2800,17 @@ const main = async (): Promise<void> => {
       // roomMirror 给 daemon 的行补 "[wezard] " 前缀, 完成确认自己已经带了一个。
       const text = renderOnboardingDone(bound).replace(/^\[wezard\]\s*/, "");
       let handed = false;
+      // 频道没有 room 可起名: 人给的名字落成频道名 (wrc.channel.name.<T>), 频道框标题与各帖子 room 的兜底前缀都跟着它。
+      if (channelBase && roomName) {
+        try { setChannelName(cfg, sourcePath, channelOf(cfg, base), roomName); }
+        catch (err) { roomLog.warn({ base, err: errText(err) }, "onboarding: 频道名写盘失败"); }
+      }
       for (const room of guideRoomsOf(base, guide)) {
         const s = roomState(room);
         // 频道: 管家是**本 room** 的实例 (bound.target 只是频道级锚点, 不属于任何 topic room)。
         const steward = channelBase ? roomStewardOf(room, base) : roomSelfOf(bound.target);
         if (!s || !steward) continue;
-        // 频道没有 room 可起名 (群名是频道名, 不是某个帖子的标题) —— roomName 只给群。
+        // 频道的 roomName 已在上面写成频道名, 不进帖子 room 的 title —— roomName 只给群。
         const ops = guideHandoffOps(s, { guide, steward, text, now: Date.now(), ...(roomName && !channelBase ? { roomName } : {}) });
         if (!ops.length) continue;
         hub.write(room, ops);
@@ -3170,7 +3201,11 @@ const main = async (): Promise<void> => {
             file: x.file,
           };
         }),
-        chatNames: Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),
+        chatNames: {
+          ...Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),
+          // 频道名表 (wrc.channel.name) 盖过旧标签: 前端 channelName 先读 chatNames['chat:<T>'], svr 也靠它。
+          ...Object.fromEntries(Object.entries(cfg.wrc.channel.name ?? {}).filter(([, n]) => n.trim()).map(([t, n]) => [`chat:${t}`, n.trim()])),
+        },
         // 微信用户的发话人 id 就是它那个群的 chatId: 名字跟着群名走。
         humanNames: Object.fromEntries(wx.list().map((a) => [`human:${a.chatId}`, chatNameOf(cfg, `chat:${a.chatId}`)] as const).filter(([, n]) => n)),
         weixin: wx.list().map((a) => ({
@@ -3180,13 +3215,13 @@ const main = async (): Promise<void> => {
         // room 账本快照 + 名字表: rolepage 关系图 / room 视图的唯一来源 (room-ui)。
         // 坏账本跳过并留日志 —— 一个坏文件不该让整张图消失。
         rooms: roomFacts(roomStore, wizards.all(), {
-          chatName: (base) => { const tr = parseTopicRoomId(base); return tr ? topicRoomLabel(tr, chatNameOf(cfg, "chat:" + tr.channel)) : chatNameOf(cfg, base); },
+          chatName: (base) => { const tr = parseTopicRoomId(base); return tr ? topicRoomLabel(tr, channelNameOf(cfg, tr.channel)) : channelNameOfBase(cfg, base) || chatNameOf(cfg, base); },
           channelOf: channelRefWithHost,
           onBroken: (room, err) => log.warn({ mod: "room", room, err: errText(err) }, "room-facts: 坏账本跳过"),
         }),
         names: nameTable(wizards.all()),
         // 已知频道 (没有 room 的绑定频道也要有一个框): 种子, /api/world 再并上 rooms 里归并出的。
-        channels: knownChannels(cfg).map((id) => ({ id, name: chatNameOf(cfg, "chat:" + id) || "chat:" + id, ...((h) => (h ? { host: h } : {}))(hostOfChannel(id)) })),
+        channels: knownChannels(cfg).map((id) => ({ id, name: channelNameOf(cfg, id) || "chat:" + id, ...((h) => (h ? { host: h } : {}))(hostOfChannel(id)) })),
         classes: classes.all().map((c) => ({ id: c.id, name: c.name, role: c.role, workspace: c.workspace })),
       };
     };

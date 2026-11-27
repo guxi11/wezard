@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { Config } from "../shared/config.js";
 import { loadJsonMap, type JsonMap } from "../shared/json-map-store.js";
 import { sleep } from "../shared/std.js";
+import { chatNameOf } from "./chat-name.js";
 import { parseTopicRoomId, topicRoomId } from "../shared/topic-room.js";
 
 export interface ChannelPostRef { channel: string; post: string }
@@ -146,3 +147,12 @@ export const topicRoomOf = (a: {
  *  roomIds 由调用方给 (账本里现有的全部 room id) —— 本模块不持有 room 账本。 */
 export const topicRoomsOf = (cfg: Config, topicId: string, roomIds: readonly string[]): string[] =>
   roomIds.filter((r) => { const ref = postRefOf(cfg, r); return !!ref?.post && ref.channel === topicId; });
+
+/** 频道显示名: wrc.channel.name.<T> (config_set 可改) > 旧的存量冻结标签 chats[…]=chat:<T> > ""。
+ *  不碰 chatNameOf —— 它进宪章、还决定 settleName 的默认命名, 频道名只是 rolepage 的展示用字。 */
+export const channelNameOf = (cfg: Config, topicId: string): string =>
+  ((cfg.wrc.channel.name ?? {})[topicId] ?? "").trim() || chatNameOf(cfg, "chat:" + topicId);
+
+/** `chat:<T>` 形式的 base 若是频道键且有频道名 → 它; 否则 ""。 */
+export const channelNameOfBase = (cfg: Config, base: string): string =>
+  base.startsWith("chat:") ? ((cfg.wrc.channel.name ?? {})[base.slice(5)] ?? "").trim() : "";

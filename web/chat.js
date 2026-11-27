@@ -198,8 +198,17 @@
     var m = /^topic:[^/]+\/(.+)$/.exec(r.id);
     return String(r.rootPost || (m && m[1]) || r.id).slice(-6);
   };
-  // 帖子 room 的可读名「频道名 · 帖 xxxxxx」(后端若已把它放进 chatNames 就不走这里)。
-  var topicLabel = function (r) { return channelName(r.channel.id, r.channel.name) + ' · 帖 ' + postTail(r); };
+  // 帖子 room 的可读名: 频道名已在频道框标题 / 侧栏分组上, 这里不再重复「频道名 · 帖 xxxxxx」, 改显示第一条人话的缩略 (服务端 r.firstAsk, 读账本算);
+  // 取不到 (还没人说过话 / 旧服务端) 退回「帖 xxxxxx」。显式 title / 旧的聊天名仍然优先 (topicBase 的前两项)。
+  var topicBase = function (r) { return r.title || W.chatNames[r.id] || r.firstAsk || ('帖 ' + postTail(r)); };
+  // 同一频道里两个帖子撞名 (比如同一句话开了两帖) 时追加「· 帖xxxxxx」消歧; 不撞名不追加。
+  var topicName = function (r) {
+    var b = topicBase(r);
+    var dup = (W.rooms || []).some(function (o) { return o.id !== r.id && o.kind === 'topic-post' && o.channel && r.channel && o.channel.id === r.channel.id && topicBase(o) === b; });
+    // 撞名时先把正文压到 8 字, 免得图上胶囊被截断时把消歧后缀截掉。
+    var cs = Array.from(b);
+    return dup ? (cs.length > 8 ? cs.slice(0, 8).join('') + '…' : b) + ' · 帖' + postTail(r) : b;
+  };
   var shortRoom = function (id) {
     var s = String(id || '');
     var kind = /^user:/.test(s) ? '单聊' : /^chat:wx/.test(s) ? '微信' : /^(?:dm|adhoc):/.test(s) ? 'room' : '群';
@@ -218,9 +227,9 @@
    *  绑定的群没起名也没有聊天名时不拿成员拼 (成员是侧栏的事), 只给短代号。 */
   var roomNameOf = function (r, fallback) {
     if (!r) return fallback || shortRoom(fallback);
+    if (r.kind === 'topic-post' && r.channel) return topicName(r);
     if (r.title) return r.title;
     if (W.chatNames[r.id]) return W.chatNames[r.id];
-    if (r.kind === 'topic-post' && r.channel) return topicLabel(r);
     return (/^(?:dm|adhoc):/.test(r.id) && memberNames(r)) || shortRoom(r.id);
   };
   var roomLabelOf = function (r) {
@@ -372,14 +381,10 @@
   var smartsWord = function (sm) { var e = eduOf(sm); return e ? e[0] + ' ' + e[1] + ' · 档位 ' + sm.tier + (sm.note ? ' · 模型 ' + sm.note : '') : ''; };
   // 没有档位就说「档位未知」并带上实际模型 —— 不猜档位。
   var smartsTip = function (nd) { return smartsWord(nd && nd.smarts) || (nd && nd.model ? '档位未知 · 模型 ' + nd.model : '档位未知'); };
-  // 图上 room 胶囊里的字: 帖子 room 在频道框里, 频道名已在框的标题上, 只留「帖 xxxxxx」(去掉「频道名 · 」前缀; 完整名在 tooltip);
+  // 图上 room 胶囊里的字: 帖子 room 在频道框里, 名字本来就不带频道名 (见 topicName); 完整名在 tooltip。
   // 旧的频道 room (kind=channel) 现在只是只读存档, 名字前冠「存档 · 」(再配 .arch 的弱化样式)。
   var graphLabel = function (r) {
     var l = roomLabelOf(r);
-    if (r.kind === 'topic-post' && r.channel) {
-      var pre = channelName(r.channel.id, r.channel.name) + ' · ';
-      return l.indexOf(pre) === 0 && l.length > pre.length ? l.slice(pre.length) : l;
-    }
     return r.kind === 'channel' ? '存档 · ' + l : l;
   };
   // ── 频道框 ──

@@ -473,10 +473,10 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Name a room / set its notice (host only)",
       description:
-        "给 room 起显示名 (`name`) 和 / 或设群公告 (`notice`), 两个至少给一个; 只有本 room 的 host 能改。名字只是别名: room 的地址永远是 id (chat:… / user:… / dm:… / adhoc:…), 名字不参与寻址, 同名也不冲突; 它只出现在 rolepage、注入头与 room_read 的标签里。公告是每个 room 一条的一句话 (本周重点 / 某条规矩), 让 room 里所有 wizard 一直知道: 改动时绑定 room 里会发一条「📌 群公告」系统行 (进企微), 在跑的成员下一次注入时随 system-reminder 收到, 新 wizard 的宪章里带着, room_read 头部也有; `notice: \"\"` 清除; 与现有相同则无变化。host 换人后由新 host 改; 人用 `/notice`。",
+        "给 room 起显示名 (`name`) 和 / 或设群公告 (`notice`), 两个至少给一个; 只有本 room 的 host 能改。`name: \"\"` 清掉名字 (帖子 room 回落到首条人话缩略, 其余回落到聊天名 / 成员名)。名字只是别名: room 的地址永远是 id (chat:… / user:… / dm:… / adhoc:…), 名字不参与寻址, 同名也不冲突; 它只出现在 rolepage、注入头与 room_read 的标签里。公告是每个 room 一条的一句话 (本周重点 / 某条规矩), 让 room 里所有 wizard 一直知道: 改动时绑定 room 里会发一条「📌 群公告」系统行 (进企微), 在跑的成员下一次注入时随 system-reminder 收到, 新 wizard 的宪章里带着, room_read 头部也有; `notice: \"\"` 清除; 与现有相同则无变化。host 换人后由新 host 改; 人用 `/notice`。",
       inputSchema: currentAddressSchema({
         room: z.string().describe(ROOM_DOC),
-        name: z.string().optional().describe("新的显示名, 一句话, 最多 60 字。"),
+        name: z.string().optional().describe("新的显示名, 一句话, 最多 60 字; 空串 = 清除。"),
         notice: z.string().optional().describe("群公告正文, 最多 500 字 (空白会折成单个空格); 空串 = 清除。"),
       }),
     },

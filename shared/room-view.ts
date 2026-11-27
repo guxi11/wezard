@@ -55,6 +55,8 @@ export interface RoomFact {
   channel?: { id: string; name: string; host?: ChannelHost };
   /** 帖子 room 的根帖 id (send_reply 用); 存档频道 room 没有。 */
   rootPost?: string;
+  /** 帖子 room 里第一条人话的缩略 (~20 字, 读时算; 没有人话 / 不是帖子 room = 缺省): 帖子没有显式 title 时 rolepage 拿它当名字。 */
+  firstAsk?: string;
   /** 绑进本 room 的副源 (multi-source-binding; fold 出 bindings, unbind 即消失)。 */
   sources: RoomSourceFact[];
 }
@@ -94,6 +96,15 @@ export const roomKindOf = (s: RoomState): RoomKind => s.kind ?? KIND_BY_PREFIX(s
 
 const stripMd = (t: string): string => t.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
 
+/** 第一条人话 (author 是人、有正文) 的缩略: 去 wezard 尾巴 / markdown, 折空白, 超长截断加 …。 */
+export const FIRST_ASK_CHARS = 20;
+export const firstAskOf = (s: RoomState): string => {
+  const row = s.msgs.find((m) => m.author.kind === "human" && stripMd(rowText(m)));
+  const t = row ? stripMd(rowText(row)) : "";
+  const cs = Array.from(t);
+  return cs.length > FIRST_ASK_CHARS ? cs.slice(0, FIRST_ASK_CHARS).join("") + "…" : t;
+};
+
 export const buildRoomFact = (s: RoomState, n: RenderNames, channelOf?: ChannelOf): RoomFact => {
   const host = roomHost(s);
   // 频道 / 帖子的 kind 读时算 (channel-posts 是唯一判据), 不落账本。
@@ -109,6 +120,7 @@ export const buildRoomFact = (s: RoomState, n: RenderNames, channelOf?: ChannelO
     title: s.title ?? "",
     ...(chRef ? {
       ...(chRef.post ? { rootPost: chRef.post } : {}),
+      ...(chRef.post && firstAskOf(s) ? { firstAsk: firstAskOf(s) } : {}),
       channel: { id: chRef.channel, name: n.roomLabel("chat:" + chRef.channel), ...(chRef.host ? { host: chRef.host } : {}) },
     } : {}),
     notice: s.notice ?? "",

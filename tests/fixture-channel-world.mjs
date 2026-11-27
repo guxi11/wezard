@@ -2,6 +2,7 @@
 //
 //   .HostDemo 绑在「Demo 频道」(3 个 topic room + 1 个旧帖子 room + 1 个存档频道 room);
 //   「空频道 Demo」没绑 host 也没有任何 room (只剩标题的空框, 标题显示「未绑 host」);
+//   帖子名 = 首条人话缩略 firstAsk: a1b2c3 / d4e5f6 同一句 (撞名, 追加「· 帖xxxxxx」消歧), 另两个没有 (退回「帖 xxxxxx」)。
 //   外加一个普通群与一个 wizard 两人 dm, 都在框外。
 // 多框 / 绑了 host 的空框 / 窗口外 room 等变体由 room-graph.dom.mjs 在这份基础上改。
 // 形状与 /api/world 一致 (shared/room-view.ts buildChannelFacts / shared/world.ts)。
@@ -19,8 +20,8 @@ export const demoChannelWorld = (now = Date.now()) => {
   const ch1 = { id: "DemoC1abcdef", name: "Demo 频道", host };
   const cinfo = (c) => ({ id: c.id, name: c.name, ...(c.host ? { host: c.host } : {}) });
   const rooms = [
-    room("topic:DemoC1abcdef/post-a1b2c3", "topic-post", [W(1, ".HostDemo", true, 1), H("demo-u1", "用户甲", 2)], { channel: cinfo(ch1), rootPost: "post-a1b2c3" }),
-    room("topic:DemoC1abcdef/post-d4e5f6", "topic-post", [W(2, ".HostDemo-2", true, 1)], { channel: cinfo(ch1), rootPost: "post-d4e5f6", openDuties: 1 }),
+    room("topic:DemoC1abcdef/post-a1b2c3", "topic-post", [W(1, ".HostDemo", true, 1), H("demo-u1", "用户甲", 2)], { channel: cinfo(ch1), rootPost: "post-a1b2c3", firstAsk: "帮我看看这个报错" }),
+    room("topic:DemoC1abcdef/post-d4e5f6", "topic-post", [W(2, ".HostDemo-2", true, 1)], { channel: cinfo(ch1), rootPost: "post-d4e5f6", openDuties: 1, firstAsk: "帮我看看这个报错" }),
     room("topic:DemoC1abcdef/post-g7h8i9", "topic-post", [W(3, ".HostDemo-3", true, 1), W(5, ".AliceDemo", false, 2)], { channel: cinfo(ch1), rootPost: "post-g7h8i9" }),
     room("chat:opkLegacy01", "topic-post", [W(4, ".HostDemo-4", true, 1)], { channel: cinfo(ch1), rootPost: "post-old001" }),
     room("chat:DemoC1abcdef", "channel", [H("demo-u1", "用户甲", 1)], { channel: cinfo(ch1), last: { seq: 1, at: now - 3 * 3600_000 } }),

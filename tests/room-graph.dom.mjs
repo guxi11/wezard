@@ -1044,16 +1044,18 @@ try {
       assert.ok(r.titles.some((t) => t.text.includes("空频道") && t.text.includes("未绑 host")), `${label}: 没绑 host 显示「未绑 host」`);
       assert.equal(r.titleInFrame, true, `${label}: 标题不溢出框`);
       assert.deepEqual(Object.values(r.rooms).filter((v) => v.arch).map((v) => v.text.includes("存档")), [true], `${label}: 存档频道 room 标「存档」且是弱化样式`);
-      assert.ok(r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text.includes("帖 a1b2c3"), `${label}: topic room 在框内显示「帖 xxxxxx」: ` + r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text);
+      assert.ok(r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text.includes("帮我看看"), `${label}: topic room 在框内显示首条人话缩略 (不带频道名): ` + r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text);
+      assert.ok(!r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text.includes("Demo 频道"), `${label}: 框内帖子 room 不重复频道名`);
+      assert.ok(r.rooms["topic:DemoC1abcdef/post-g7h8i9"].text.includes("帖 g7h8i9"), `${label}: 没有首条人话退回「帖 xxxxxx」: ` + r.rooms["topic:DemoC1abcdef/post-g7h8i9"].text);
       // 窄屏: 每个框都落在画布 (svg) 之内, 不被边切掉。
       if (viewport.width <= 420) assert.ok(r.frameBounds.every(([x0, x1]) => x0 >= -1 && x1 <= viewport.width + 1), `${label}: 框溢出了屏幕: ` + JSON.stringify(r.frameBounds));
       if (label === "桌面") {
-        // topic room 的可读名 (侧栏 / tooltip): 「频道名 · 帖 xxxxxx」。
+        // topic room 的可读名 (侧栏 / tooltip): 首条人话缩略 (同框撞名追加「· 帖xxxxxx」), 没有就「帖 xxxxxx」。
         assert.ok(r.frames.find((f) => f.id === C1.id).tip.includes("5 个 room"), "框 tooltip 说明里面有几个 room");
         await pg.click('[data-side="list"]');
         await pg.waitForSelector(".rv-list .ci", { timeout: 5000 });
         const names = await pg.evaluate(() => [...document.querySelectorAll(".rv-list .ci .t")].map((t) => t.textContent.trim()));
-        assert.ok(["a1b2c3", "d4e5f6", "g7h8i9", "old001"].every((t) => names.includes("Demo 频道 · 帖 " + t)), "侧栏 topic room 名 = 频道名 · 帖 xxxxxx (新 id 与旧 opk 帖子 room 都是): " + JSON.stringify(names));
+        assert.ok(["帮我看看这个报错 · 帖a1b2c3", "帮我看看这个报错 · 帖d4e5f6", "帖 g7h8i9", "帖 old001"].every((t) => names.includes(t)), "侧栏 topic room 名 = 首条人话缩略 / 撞名消歧 / 退回「帖 xxxxxx」: " + JSON.stringify(names));
       }
       await pg.close();
     }

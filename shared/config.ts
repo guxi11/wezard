@@ -149,6 +149,9 @@ const Channel = z.object({
   // 频道也是「组团里的一个群」, 接待解析 = 本表 > 频道现存的默认会话 > 全局管家,
   // perceptron 放行后的消息走同一条解析。键是裸 topic_id (频道缓存/事件都用它, 不带 chat: 前缀)。
   steward: hot(z.record(z.string(), z.string()).default({}).describe("频道管家表: 裸 topic_id → wizard 身份名 (参数写裸名)。频道专用的绑定键, 不写 chatPolicy (那是群聊/单聊的); 绑定后该频道裸消息路由到这个身份在频道的化身 (没有就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 频道现存默认会话; 新频道由全局管家接待。热生效")),
+  // 频道名 (与 steward 表同形): rolepage 的频道框标题 / 帖子 room 兜底名里的「频道名」。
+  // 缺省回落到存量冻结标签 chats["…"]=chat:<topic_id> (channelNameOf), 都没有 = topic_id 前 8 位。
+  name: hot(z.record(z.string(), z.string()).default({}).describe("频道名表: 裸 topic_id → 频道显示名 (rolepage 频道框标题; 帖子 room 没有自己的名字时的兜底前缀)。不写 = 回落到 chats 里旧的 chat:<topic_id> 标签, 再没有 = topic_id 前 8 位。不进宪章, 改名不需要 handoff。热生效")),
 }).default({});
 
 const Wrc = z.object({
