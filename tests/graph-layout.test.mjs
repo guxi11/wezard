@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { demoChannelWorld } from "./fixture-channel-world.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = readFileSync(join(root, "web", "chat.js"), "utf8");
@@ -18,10 +19,10 @@ const WORLD = JSON.parse(readFileSync(join(root, "tests", "fixture-graph-world.j
 const load = (world, panel) => {
   const a = SRC.indexOf("  // ── 名字 / 节点"), b = SRC.indexOf("  // 常驻循环");
   assert.ok(a > 0 && b > a, "web/chat.js 的图段落标记找不到了 (「// ── 名字 / 节点」/「// 常驻循环」)");
-  const W = { rooms: world.rooms, nodes: world.nodes, uidTargets: world.uidTargets || {}, chatNames: world.chatNames || {}, names: world.names || {} };
+  const W = { rooms: world.rooms, nodes: world.nodes, channels: world.channels || [], uidTargets: world.uidTargets || {}, chatNames: world.chatNames || {}, names: world.names || {} };
   const S = { panelBox: { w: panel.w, h: panel.h } };
   const store = { getItem: () => null, setItem: () => {} };
-  const names = ["participants", "directPair", "graphModel", "reconcileGraph", "gStep", "gLayout", "roomHasRole", "nodeIdOf"];
+  const names = ["participants", "directPair", "graphModel", "reconcileGraph", "gStep", "gLayout", "roomHasRole", "nodeIdOf", "gFrameBox", "gBox", "frameTitle"];
   const fn = new Function("W", "S", "D", "localStorage", "convsEl", "esc", "isRoleId",
     SRC.slice(a, b) + "\nreturn {" + names.map((n) => n + ":" + n).join(",") + "};");
   return { ...fn(W, S, { role: "", roomId: "" }, store, { querySelector: () => null }, String, () => false), W, S };
@@ -188,6 +189,58 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
   assert.equal(L.roomHasRole(room, is(L.nodeIdOf(wiz(2).who))), false, "不在 room 里的 wizard → 无关联");
   assert.equal(L.roomHasRole({ id: "dm:y", members: [] }, is("human:alice")), false, "空 room → 无关联");
   assert.equal(L.roomHasRole(null, is("human:alice")), false, "room 不存在 → 无关联");
+}
+
+// 频道框 (docs/evolve/channel-topic-rooms.md §P2): 一个频道一个框, 框内含它名下的 room 节点 (topic room / 旧帖子 room / 存档频道 room 都算),
+// 空频道也有框, 框外的节点 (人 / 别的 room / 别的框) 不压进框里, 框内 room 互不重叠, 不再有指向「频道 room」的弱连线。
+for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 390, h: 640 }]]) {
+  const world = demoChannelWorld();
+  const L = load(world, panel);
+  const m = model(L, world);
+  assert.deepEqual(m.frames.map((f) => f.cid), world.channels.map((c) => c.id).sort(), `${label}: 一个频道一个框 (含空频道)`);
+  const by = Object.fromEntries(m.frames.map((f) => [f.cid, f]));
+  const c1 = world.channels[0], c2 = world.channels[1];
+  assert.equal(c1.rooms.length, 5, "demo: 频道 1 名下 3 个 topic room + 1 个旧帖子 room + 1 个存档频道 room");
+  assert.deepEqual(by[c1.id].rooms.slice().sort(), c1.rooms.slice().sort(), `${label}: 框内 = 频道名下全部 room (含存档 room、旧帖子 room)`);
+  assert.deepEqual(by[c2.id].rooms, [], `${label}: 空频道的框里没有 room, 但框在`);
+  assert.ok(!m.links.some((l) => l.chan), `${label}: 频道弱连线 (chan) 已由框取代`);
+  const ids = new Set(m.nodes.map((n) => n.id));
+  assert.ok(m.links.every((l) => ids.has(l.a) && ids.has(l.b)), `${label}: 不留指向不存在节点的线`);
+  assert.ok(m.nodes.some((n) => n.isRoom && n.ref.kind === "topic-post" && /^topic:/.test(n.ref.id)) && m.nodes.some((n) => n.isRoom && n.ref.id === "chat:DemoC1abcdef"),
+    `${label}: 频道名下只有两个 wizard 的 room 也留成 room 节点 (不收成直连线)`);
+
+  L.S.gnodes = null;
+  const g = L.reconcileGraph(m).g;
+  L.gLayout(g);
+  settle(L, g, 0.02);
+  assert.ok(finite(g), `${label}: 带框的图坐标出现 NaN`);
+  const id = (p) => p.x, idy = (p) => p.y;
+  const rects = g.frames.map((f) => ({ f, b: L.gFrameBox(f, id, idy) }));
+  const inside = (p, b) => { const x = L.gBox(p); return p.x - x[0] >= b.x0 - 0.5 && p.x + x[0] <= b.x1 + 0.5 && p.y - x[1] >= b.y0 - 0.5 && p.y + x[1] <= b.y1 + 0.5; };
+  const hit = (p, b) => { const x = L.gBox(p), cy = p.y + x[2]; return p.x - x[0] < b.x1 - 0.5 && p.x + x[0] > b.x0 + 0.5 && cy - x[1] < b.y1 - 0.5 && cy + x[1] > b.y0 + 0.5; };
+  let bad = 0, leak = 0;
+  rects.forEach(({ f, b }) => g.nodes.forEach((p) => {
+    if (p.hub) return;
+    if (f.set[p.id]) { if (!inside(p, b)) bad++; } else if (hit(p, b)) leak++;
+  }));
+  assert.equal(bad, 0, `${label}: 框没有把它的 room 全框住`);
+  assert.equal(leak, 0, `${label}: 框外的节点压进了框里`);
+  for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+    const A = rects[i].b, B = rects[j].b;
+    assert.ok(A.x1 <= B.x0 + 0.5 || B.x1 <= A.x0 + 0.5 || A.y1 <= B.y0 + 0.5 || B.y1 <= A.y0 + 0.5, `${label}: 两个框重叠`);
+  }
+  const rs = g.nodes.filter((n) => n.isRoom);
+  let roomOverlap = 0;
+  for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) {
+    const a = rs[i], b = rs[j], A = L.gBox(a), B = L.gBox(b);
+    if (Math.abs(a.x - b.x) < A[0] + B[0] - 0.5 && Math.abs(a.y - b.y) < A[1] + B[1] - 0.5) roomOverlap++;
+  }
+  assert.equal(roomOverlap, 0, `${label}: 框把 room 节点挤到互相重叠`);
+  const empty = rects.find((r) => r.f.cid === c2.id).b;
+  assert.ok(empty.x1 - empty.x0 >= L.frameTitle(by[c2.id]).w && Number.isFinite(empty.y0), `${label}: 空框要装得下标题`);
+  rects.forEach(({ f, b }) => assert.ok(b.x1 - b.x0 <= panel.w - 12, `${label}: 框「${f.name}」比画布还宽`));
+  assert.ok(L.frameTitle(by[c2.id]).tail.includes("未绑 host") && L.frameTitle(by[c1.id]).tail.includes("🎩 HostDe"), `${label}: 标题 = 频道名 + 🎩 host / 未绑 host`);
+  console.log(`graph-layout ${label} 频道框: ${g.frames.length} 个框 · ${rs.length} 个 room · 框内 ${by[c1.id].nodes.length} 个`);
 }
 
 console.log("graph-layout: ok");

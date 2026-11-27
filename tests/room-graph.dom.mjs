@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
+import { demoChannelWorld } from "./fixture-channel-world.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** playwright 不是本仓库的依赖 (rolepage 的运行环境用不到它): 本机装了就直接用, 否则跳过。
@@ -120,7 +121,10 @@ const server = createServer((req, res) => {
   if (u.pathname === "/api/world") {
     // 名册缺席 (svr 刚重启): 回包 degraded, 名字全是 id。
     if (globalThis.__degrade) return send("application/json", JSON.stringify({ ...WORLD, degraded: true, names: {}, chatNames: {}, nodes: WORLD.nodes.map((n) => ({ ...n, name: n.target })) }));
-    return send("application/json", JSON.stringify({ ...WORLD, rooms: [...WORLD.rooms, ...(globalThis.__extraRooms || [])], nodes: [...WORLD.nodes, ...(globalThis.__extraNodes || [])] }));
+    // __channels / __world: 频道框用例 (见「频道框」一节) 补 channels 与名字表。
+    return send("application/json", JSON.stringify({ ...WORLD, rooms: [...WORLD.rooms, ...(globalThis.__extraRooms || [])], nodes: [...WORLD.nodes, ...(globalThis.__extraNodes || [])],
+      channels: globalThis.__channels || [],
+      ...(globalThis.__world ? { uidTargets: { ...WORLD.uidTargets, ...globalThis.__world.uidTargets }, chatNames: { ...WORLD.chatNames, ...globalThis.__world.chatNames }, names: { ...WORLD.names, ...globalThis.__world.names }, humanNames: { ...WORLD.humanNames, ...globalThis.__world.humanNames } } : {}) }));
   }
   if (u.pathname === "/api/room") {
     // 滚动测试: 一百多条消息, 每次回包最后一条的正文都变 (模拟进行中的一轮 / 新消息), 逼 detail 每 4s 真重渲染一次。
@@ -240,7 +244,8 @@ try {
   }));
   assert.deepEqual(icons.nodes, ["👥"], "群 G (多人群聊) 的节点图标 = 👥: " + JSON.stringify(icons));
   assert.match(icons.tip, /群聊 · 企微群/, "类型文字留在 tooltip: " + icons.tip);
-  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "#️⃣", "📌", "🧙"], "图例五种 room 图标 (群聊 / 单聊 / 频道 / 帖子 / wizard room): " + JSON.stringify(icons.legend));
+  assert.deepEqual(icons.legend.filter((e) => e !== "👤"), ["👥", "💬", "📌", "#️⃣", "🧙"], "图例 room 图标 (群聊 / 单聊 / 帖子 / 存档频道 room / wizard room); 频道本身是虚线框 (.lg.frm), 不是图标: " + JSON.stringify(icons.legend));
+  assert.equal(await page.evaluate(() => document.querySelectorAll(".rv-legend .lg.frm").length), 1, "图例有一个「频道」框样例");
   assert.equal(counts.rooms, 1, "room 节点数 = 2d 内有动静的 ≥3 人 room 数 (两人 room 改成连线)");
   assert.deepEqual(counts.directLinks, [DM], "两人 room 画成成员之间的线");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
@@ -946,7 +951,7 @@ try {
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
   }
 
-  // ── 频道 / 帖子 / monitor (§2.5): 都是普通节点 (没有容器), 帖子弱连线指向频道, monitor 虚线、不戴礼帽 ──
+  // ── 频道 / 帖子 / monitor: room 都是普通节点, 同一频道的 room 由一个框框起来 (不再有指向频道 room 的弱连线), monitor 虚线、不戴礼帽 ──
   {
     const CH = "chat:CiCMchan", P = "chat:opkPost1", MU = "w" + "9".padStart(12, "0");
     globalThis.__extraRooms = [
@@ -962,6 +967,9 @@ try {
     const ch = await pg.evaluate(() => ({
       tips: [...document.querySelectorAll(".rv-room > title")].map((t) => t.textContent),
       chanEdges: document.querySelectorAll(".rv-edge.chan").length,
+      frames: [...document.querySelectorAll(".rv-frame")].map((f) => f.getAttribute("data-channel")),
+      frameTitles: [...document.querySelectorAll(".rv-ftl")].map((t) => t.textContent),
+      archs: document.querySelectorAll(".rv-room.arch").length,
       monNodes: document.querySelectorAll(".rv-person.mon").length,
       monEdges: document.querySelectorAll(".rv-edge.mon").length,
       monHat: document.querySelectorAll(".rv-person.mon .rv-hosthat").length,
@@ -970,11 +978,14 @@ try {
     }));
     assert.ok(ch.tips.some((t) => t.includes("频道")), "频道 room 是普通节点, 类型在 tooltip: " + JSON.stringify(ch.tips));
     assert.ok(ch.tips.some((t) => t.includes("帖子") && t.includes("频道 研发频道")), "帖子 tooltip 带所属频道");
-    assert.equal(ch.chanEdges, 1, "帖子 → 频道一条弱连线 (不画容器)");
+    assert.equal(ch.chanEdges, 0, "不再有「帖子 → 频道 room」的弱连线 (归属由框表达)");
+    assert.deepEqual(ch.frames, ["CiCMchan"], "帖子 room 带 channel → 画出它的频道框: " + JSON.stringify(ch.frames));
+    assert.ok(/研发频道/.test(ch.frameTitles[0]) && /未绑 host/.test(ch.frameTitles[0]), "框标题 = 频道名 + 未绑 host: " + JSON.stringify(ch.frameTitles));
+    assert.equal(ch.archs, 1, "kind=channel 的旧频道 room 是存档样式 (.arch)");
     assert.equal(ch.monNodes, 1, "monitor 画成单独样式的节点");
     assert.equal(ch.monEdges, 1, "monitor 与所在 room 之间是虚线");
     assert.equal(ch.monHat, 0, "monitor 不戴 host 礼帽");
-    assert.equal(ch.containers, 0, "room 节点不嵌套 (没有容器)");
+    assert.equal(ch.containers, 0, "room 节点之间不嵌套 (框是图层, 不是 room 节点)");
     assert.deepEqual([ch.icons[CH], ch.icons[P]], ["#️⃣", "📌"], "频道 #️⃣ / 帖子 📌, 与群聊 👥 分开: " + JSON.stringify(ch.icons));
     // 列表头像也换成频道 / 帖子图标 (有成员时不再画成员拼块)。
     await pg.click('[data-side="list"]');
@@ -983,6 +994,70 @@ try {
     assert.deepEqual([avatars[CH], avatars[P]], ["#️⃣", "📌"], "列表头像: 频道 #️⃣ / 帖子 📌: " + JSON.stringify(avatars));
     await pg.close();
     globalThis.__extraRooms = []; globalThis.__extraNodes = [];
+  }
+
+  // ── 频道框 (docs/evolve/channel-topic-rooms.md P2): 一个频道一个虚线框, 框住名下全部 room (topic room / 旧帖子 room / 存档频道 room), 空频道也有框; 桌面与 390 宽都不溢出 ──
+  {
+    const demo = demoChannelWorld();
+    const C1 = demo.channels[0], C2 = demo.channels[1];
+    globalThis.__extraRooms = demo.rooms; globalThis.__extraNodes = demo.nodes; globalThis.__channels = demo.channels;
+    globalThis.__world = { uidTargets: demo.uidTargets, chatNames: demo.chatNames, names: demo.names, humanNames: demo.humanNames };
+    for (const [label, viewport] of [["桌面", { width: 1100, height: 800 }], ["窄屏", { width: 390, height: 844 }]]) {
+      const pg = await browser.newPage({ viewport });
+      await pg.addInitScript(() => { localStorage.setItem("wezard.role.side", "graph"); localStorage.setItem("wezard.role.winMin", "0"); });
+      await pg.goto(base + "/role?id=t-ticket&room=", { waitUntil: "load" });
+      await pg.waitForSelector(".rv-frame", { state: "attached", timeout: 5000 });
+      // 窄屏深链进来直接是 detail (.reading), 先点 ‹ 回到图那一页。
+      if (viewport.width <= 420) await pg.click("#tb-back");
+      await pg.waitForFunction(() => document.querySelector(".rv-graph") && document.querySelector(".rv-graph").getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await pg.waitForTimeout(600);
+      const r = await pg.evaluate((c1) => {
+        const box = (e) => { const b = e.getBoundingClientRect(); return { x0: b.left, x1: b.right, y0: b.top, y1: b.bottom }; };
+        const inBox = (a, b) => a.x0 >= b.x0 - 1 && a.x1 <= b.x1 + 1 && a.y0 >= b.y0 - 1 && a.y1 <= b.y1 + 1;
+        const frames = [...document.querySelectorAll(".rv-frame")].map((f) => ({ id: f.getAttribute("data-channel"), cls: f.getAttribute("class"), rect: box(f.querySelector("rect")), tip: f.querySelector("title").textContent }));
+        const titles = [...document.querySelectorAll(".rv-ftl")].map((t) => ({ text: t.textContent, box: box(t) }));
+        const rooms = Object.fromEntries([...document.querySelectorAll(".rv-room")].map((n) => [n.getAttribute("data-room"), { box: box(n.querySelector("rect")), text: n.querySelector("text").textContent.trim(), arch: n.classList.contains("arch") }]));
+        const f1 = frames.find((f) => f.id === c1);
+        const people = [...document.querySelectorAll(".rv-person")].map((n) => box(n.querySelector(".sh, .rv-emo")));
+        return {
+          frames, titles, rooms, f1,
+          chan: document.querySelectorAll(".rv-edge.chan").length,
+          hubNodes: document.querySelectorAll(".rv-node[data-channel], .rv-gnodes [data-channel]").length,
+          pplInside: people.filter((p) => f1 && !(p.x1 <= f1.rect.x0 || p.x0 >= f1.rect.x1 || p.y1 <= f1.rect.y0 || p.y0 >= f1.rect.y1)).length,
+          titleInFrame: frames.every((f, i) => titles[i] && titles[i].box.x1 <= f.rect.x1 + 1 && titles[i].box.x0 >= f.rect.x0 - 1),
+          inFrame: Object.fromEntries(Object.entries(rooms).map(([id, v]) => [id, !!f1 && inBox(v.box, f1.rect)])),
+          svgW: document.querySelector(".rv-graph").getBoundingClientRect().width,
+          frameBounds: frames.map((f) => [Math.round(f.rect.x0), Math.round(f.rect.x1)]),
+        };
+      }, C1.id);
+      assert.equal(r.frames.length, 2, `${label}: 一个频道一个框 (含空频道): ` + JSON.stringify(r.frames.map((f) => f.id)));
+      assert.deepEqual(r.frames.map((f) => f.id).sort(), [C1.id, C2.id].sort());
+      assert.equal(r.chan, 0, `${label}: 没有频道弱连线`);
+      assert.equal(r.hubNodes, 0, `${label}: 布局用的 hub 节点不进 DOM`);
+      const inside = C1.rooms.filter((id) => r.inFrame[id]);
+      assert.deepEqual(inside.sort(), C1.rooms.slice().sort(), `${label}: 框内含频道名下全部 5 个 room (3 topic + 旧帖子 + 存档): ` + JSON.stringify(r.inFrame));
+      assert.equal(r.inFrame["chat:wrDemoGroup"], false, `${label}: 普通群不在频道框里: ` + JSON.stringify({ f: r.f1.rect, g: r.rooms["chat:wrDemoGroup"].box, svgW: r.svgW }));
+      assert.equal(r.pplInside, 0, `${label}: 人 / wizard 不压进框里`);
+      assert.equal(r.f1.cls.includes("empty"), false);
+      assert.ok(r.frames.find((f) => f.id === C2.id).cls.includes("empty"), `${label}: 没有 room 的频道是空框`);
+      assert.ok(r.titles.some((t) => t.text.includes("Demo 频道") && t.text.includes("🎩")), `${label}: 标题 = 频道名 + 🎩 host: ` + JSON.stringify(r.titles.map((t) => t.text)));
+      assert.ok(r.titles.some((t) => t.text.includes("空频道") && t.text.includes("未绑 host")), `${label}: 没绑 host 显示「未绑 host」`);
+      assert.equal(r.titleInFrame, true, `${label}: 标题不溢出框`);
+      assert.deepEqual(Object.values(r.rooms).filter((v) => v.arch).map((v) => v.text.includes("存档")), [true], `${label}: 存档频道 room 标「存档」且是弱化样式`);
+      assert.ok(r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text.includes("帖 a1b2c3"), `${label}: topic room 在框内显示「帖 xxxxxx」: ` + r.rooms["topic:DemoC1abcdef/post-a1b2c3"].text);
+      // 窄屏: 每个框都落在画布 (svg) 之内, 不被边切掉。
+      if (viewport.width <= 420) assert.ok(r.frameBounds.every(([x0, x1]) => x0 >= -1 && x1 <= viewport.width + 1), `${label}: 框溢出了屏幕: ` + JSON.stringify(r.frameBounds));
+      if (label === "桌面") {
+        // topic room 的可读名 (侧栏 / tooltip): 「频道名 · 帖 xxxxxx」。
+        assert.ok(r.frames.find((f) => f.id === C1.id).tip.includes("5 个 room"), "框 tooltip 说明里面有几个 room");
+        await pg.click('[data-side="list"]');
+        await pg.waitForSelector(".rv-list .ci", { timeout: 5000 });
+        const names = await pg.evaluate(() => [...document.querySelectorAll(".rv-list .ci .t")].map((t) => t.textContent.trim()));
+        assert.ok(["a1b2c3", "d4e5f6", "g7h8i9", "old001"].every((t) => names.includes("Demo 频道 · 帖 " + t)), "侧栏 topic room 名 = 频道名 · 帖 xxxxxx (新 id 与旧 opk 帖子 room 都是): " + JSON.stringify(names));
+      }
+      await pg.close();
+    }
+    globalThis.__extraRooms = []; globalThis.__extraNodes = []; globalThis.__channels = []; globalThis.__world = undefined;
   }
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
