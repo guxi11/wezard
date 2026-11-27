@@ -7,6 +7,7 @@ import { baseOfKey, labelFor } from "./session-label.js";
 import type { WorldFactClass, WorldFactWizard } from "./world.js";
 import type { RoomFact } from "./room-view.js";
 import type { JoinVia } from "./room.js";
+import { isTopicRoomId } from "./topic-room.js";
 
 export interface RoomMemberView {
   /** wizard = 实例 uid; 人 = userid。 */
@@ -30,7 +31,7 @@ export interface RoomMemberView {
 }
 
 /** 是不是一个绑定的群 (而不是单聊 / dm / adhoc): 只有企微群有「群成员」这一说。 */
-export const isGroupChat = (base: string): boolean => base.startsWith("chat:");
+export const isGroupChat = (base: string): boolean => base.startsWith("chat:") || isTopicRoomId(base);
 
 const order = (a: RoomMemberView, b: RoomMemberView): number =>
   Number(b.host) - Number(a.host) ||

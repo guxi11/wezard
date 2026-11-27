@@ -360,7 +360,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Say something in a room",
       description:
-        "在一个 room 里说一句 (不开 duty、不关账)。绑定 room 里这一行就真的进企微; dm / adhoc 只在 rolepage。派活 ack / 中间进展 / 只是想让别人看见一句话, 都用它。`to` 只指出对谁说, 不唤醒、不开 duty —— 要对方交代就用 chat_ask。**频道 room 里这一句 = 发一条新帖**; 要回到某条评论 (原帖) 下面用 chat_reply, 帖子 room 里出站一律评论回根帖。",
+        "在一个 room 里说一句 (不开 duty、不关账)。绑定 room 里这一行就真的进企微; dm / adhoc 只在 rolepage。派活 ack / 中间进展 / 只是想让别人看见一句话, 都用它。`to` 只指出对谁说, 不唤醒、不开 duty —— 要对方交代就用 chat_ask。room 给 `chat:<topic_id>` (已知频道 id; 频道本身没有 room) = 在该频道发新帖: 帖子发出后开 `topic:<频道>/<post_id>` room (你入座), 这句话记在新 room 里, 回包带 `room` / `post`; 发帖失败 → 报错、不落行; 发出了但拿不到 post_id → 回包 ok 带 `warning`、没有新 room。除此之外, 帖子 room 里说话一律评论回根帖。",
       inputSchema: currentAddressSchema({
         room: z.string().optional().describe(ROOM_DOC),
         text: z.string().describe("要说的话 (markdown)"),
@@ -411,7 +411,7 @@ export const createWezardServer = (): McpServer => {
       title: "Close (or field) a duty — the only completion signal",
       description:
         "答一条或多条 duty。room 由 `re` 定 —— 消息 id 全机唯一, 自带 room, 不用给。status: " + STATUS_DOC +
-        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问 / 等人用 need; progress 只在有新事实 (commit / 产物 / 结论) 时用, 没新事实别报。绑定 room 里同伴说的话人已经看见 —— 关账只补人还不知道的 (commit / 取舍 / 下一步), 别把同伴说过的结论再复述一遍; dm / adhoc 里人看不见, 结论要带回主 room。**频道 room 里 re 到一条评论 = 评论回原帖下面** (要新开一帖用 chat_say); 帖子 room 里一律评论回根帖。",
+        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问 / 等人用 need; progress 只在有新事实 (commit / 产物 / 结论) 时用, 没新事实别报。绑定 room 里同伴说的话人已经看见 —— 关账只补人还不知道的 (commit / 取舍 / 下一步), 别把同伴说过的结论再复述一遍; dm / adhoc 里人看不见, 结论要带回主 room。频道帖子 room (topic room) 里一律评论回根帖 —— 回话 = 评论那个帖子, re 到哪条都一样。",
       inputSchema: currentAddressSchema({
         re: z.union([z.string(), z.array(z.string())]).describe("要答的那些消息 id (信封 / 注入的未读行头部的 `[<id>]`)。"),
         text: z.string().optional().describe("答复正文; 不给 (且你是处理人) = passed。"),
@@ -612,9 +612,9 @@ export const createWezardServer = (): McpServer => {
     "room_bind",
     {
       title: "Bind an info source into this room (host / human only)",
-      description: "把一个企业微信信息源绑进本 room (多对一): 之后那个源的消息落这本账, 这里的回复按源回去 (帖子源 = 评论回原帖, 群源 = 群消息)。源 = base principal: 频道帖子 chat:<opk…> 或群 chat:<群id>; 频道本身就是一个 room, 不绑。**谁可以绑**: 目标 room 的 host 或人; 判定者不是目标 host 时先 chat_ask 那个 host, 让它自己调本工具。硬门: 同机器人 / 一源只能绑一个 room (想换先 room_unbind) / 目标 room 必须有 host / 源必须是群或帖子 / 源不能就是目标 room 的主源。source 省略 = 本 room 最近一条带源的人话 (频道里 @ 你的那条首触) —— 频道 host 判定「这条是我的」时直接 room_bind() 即可, 帖子 room 不诞生、不开新实例。三种出口: ① 自己处理 = 绑进本 room; ② 强相关旧 room = chat_ask 那个 room 的 host, 由它绑; ③ 另起 = 不绑 (daemon 在 rooms.binding.decideTimeoutMin 后自动为这个首触开帖子 room + 领号新实例, 并把新 host 拉进频道 room)。why 写一句判定理由 (审计落在 bind 行上)。",
+      description: "把一个**群聊**信息源绑进本 room (多对一): 之后那个群的消息落这本账, 这里的回复按源回群。源 = base principal: 群 chat:<群id>。**频道帖子不能绑** (400): 频道里每个帖子天然是自己的 room (topic:<频道>/<帖子>), 回话 = 评论根帖; 想让别人参与就 room_invite / chat_ask。**谁可以绑**: 目标 room 的 host 或人; 判定者不是目标 host 时先 chat_ask 那个 host, 让它自己调本工具。硬门: 同机器人 / 一源只能绑一个 room (想换先 room_unbind) / 目标 room 必须有 host / 源必须是群 / 源不能就是目标 room 的主源。source 省略 = 本 room 最近一条带源的人话的源。why 写一句判定理由 (审计落在 bind 行上)。",
       inputSchema: currentAddressSchema({
-        source: z.string().optional().describe("要绑的源 base principal: chat:<opk…> (频道帖子) 或 chat:<群id> (群)。省略 = 本 room 最近一条带 src 的人话的源。"),
+        source: z.string().optional().describe("要绑的源 base principal: chat:<群id> (群; 频道帖子不能绑)。省略 = 本 room 最近一条带 src 的人话的源。"),
         room: z.string().optional().describe("绑进哪个 room: 缺省 = 唤醒你这一轮的 room; 显式给别的 room 时只有它的 host / 人能成功。"),
         why: z.string().optional().describe("一句判定理由 (落进 bind 行的 why, 审计用)。"),
         dryRun: z.boolean().optional().describe("true = 只评估不写账本: 返回候选 room + 证据行 (同 asker / 近期接待 / 正文相关 (trigram >= rooms.binding.simMin) / 职责匹配)与 veto (跨机器人 / 没有 host / 死 room / 源已绑别处), 证据强的在前;相关度是语义判断, 由你决定绑哪个 —— daemon 不替你选。"),
@@ -624,23 +624,10 @@ export const createWezardServer = (): McpServer => {
       unwrap("room_bind", await daemonPost("/room/bind", { ...(source ? { source } : {}), ...(room ? { room } : {}), ...(why ? { why } : {}), ...(dryRun ? { dryRun: true } : {}) })),
   );
   server.registerTool(
-    "room_fork",
-    {
-      title: "Fork a channel post source into its own room now (channel host only)",
-      description: "对首触落在频道 room 的帖子源**立即**走出口 3 (另起): 建帖子 room + 领号新实例, 并把新 host 作为普通成员拉进频道 room (频道 host 身份不变)。host 判定「这该是一个新 room」时用它, 不必等 rooms.binding.decideTimeoutMin 的超时兜底。只有该频道 room 的 host 能调。幂等: 源已绑 / 帖子 room 已诞生 / 频道还在引导期都不会动 (回 409), 也不会重复开房。",
-      inputSchema: currentAddressSchema({
-        source: z.string().optional().describe("帖子源 base principal (chat:<opk…>)。省略 = 本 room 最近一条带 src 的人话的源。"),
-        room: z.string().optional().describe("从哪个 room 看 (缺省 = 唤醒你这一轮的 room; 必须是该帖所属频道 room 才能过权限)。"),
-      }),
-    },
-    async ({ source, room }) =>
-      unwrap("room_fork", await daemonPost("/room/fork", { ...(source ? { source } : {}), ...(room ? { room } : {}) })),
-  );
-  server.registerTool(
     "room_unbind",
     {
       title: "Unbind an info source from this room (host / human only)",
-      description: "解除本 room 对一个信息源的绑定 (只有目标 room 的 host 或人能解)。解绑后源**回落恒等**: 帖子源的消息回到频道接待处, 下一条消息时才按需诞生它自己的帖子 room (lazy, 不立即补开);群源回到自己的 1:1 room (原 room 与管家实例原样保留)。之后再想合并对话就重新 room_bind。",
+      description: "解除本 room 对一个信息源的绑定 (只有目标 room 的 host 或人能解)。解绑后源**回落恒等**: 群源回到自己的 1:1 room (原 room 与管家实例原样保留); 存量的帖子源 (早先 room_bind 过的) 回落成帖子自己的 room (下一条消息时才按需诞生, lazy)。之后再想合并对话就重新 room_bind。",
       inputSchema: currentAddressSchema({
         source: z.string().describe("要解绑的源 base principal (与 room_bind 时给的一样)。"),
         room: z.string().optional().describe("从哪个 room 解: 缺省 = 唤醒你这一轮的 room。"),
@@ -681,7 +668,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Read a WeCom channel's history",
       description:
-        "翻一个**频道**（企微 topic，不是群聊）的聊天历史，或者按关键词搜。频道里派给你的活，消息头上有 `topic=<id>` —— 注入的上下文（当前线程 + 最近若干条 + 搜索命中）不够时用它自己往前翻。先读本地缓存（daemon 为每个频道存了一份，含 reload / 断线期回填的消息）；给了 `query` 且本地不够时才走官方搜索（`aibot_topic_search` 两步：先出 jobid 再取摘要，正文再按 post_id 取回）。返回一行一条：`[HH:MM] 作者: 正文`，作者是 userid 或 `bot:<aibotid 前十位>`。这是**频道**视角；群聊 / 私聊 / dm 的账本用 room_read，单个 wizard 的会话用 peek_peer。只读，随便查。",
+        "翻一个**频道**（企微 topic，不是群聊）的聊天历史，或者按关键词搜。频道帖子 room 的唤醒头上有 `topic=<id>` —— 注入的上下文（当前线程 + 最近若干条 + 搜索命中）不够时用它自己往前翻。先读本地缓存（daemon 为每个频道存了一份，含 reload / 断线期回填的消息）；给了 `query` 且本地不够时才走官方搜索（`aibot_topic_search` 两步：先出 jobid 再取摘要，正文再按 post_id 取回）。返回一行一条：`[HH:MM] 作者: 正文`，作者是 userid 或 `bot:<aibotid 前十位>`。这是**频道**视角；群聊 / 私聊 / dm 的账本用 room_read，单个 wizard 的会话用 peek_peer。只读，随便查。",
       inputSchema: {
         topic: z.string().describe("频道 id：`chat:<topic_id>` 或裸 topic_id —— 频道消息上下文头的 `topic=` 就是它。"),
         query: z.string().optional().describe("按关键词搜历史（先本地 grep，不够再走官方搜索）。不给 = 按时间翻最新若干条。"),

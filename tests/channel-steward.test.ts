@@ -135,7 +135,8 @@ assert.ok(!calls.length, "非 markdown 出站丢弃");
 await client.sendMessage("chat:normal", { msgtype: "markdown", markdown: { content: "x" } });
 assert.ok(calls.some((c) => c.via === "send" && c.chatid === "chat:normal"), "非频道 chatid 原样放行 (不进频道分支)");
 
-// D2 事件 → 人话落 room (ingest): 没有原生帧的 @ 事件兜底落频道 room 并标 mention:"bot"。
+// D2 事件 → 人话落 room (ingest): 没有原生帧的 @ 事件兜底落帖子自己的 topic room 并标 mention:"bot"。
+// (2026-11-27: 频道没有 room; 旧断言「没配对: 频道 room + post」改为 topic:<T>/<P>, 行不带 post。)
 calls.length = 0;
 const evFrame = {
   cmd: "aibot_topic_event_callback",
@@ -147,8 +148,8 @@ const evFrame = {
 (client as any).wsManager.handleFrame(evFrame);
 await new Promise((r) => setTimeout(r, 50));
 assert.equal(ingested.length, 1, "@ 事件落一行成年人话 (不再伪造群帧)");
-assert.equal(ingested[0]!.room, "chat:topicE", "没配对: 频道 room");
-assert.equal(ingested[0]!.post, "pE");
+assert.equal(ingested[0]!.room, "topic:topicE/pE", "没配对也是帖子自己的 topic room");
+assert.equal((ingested[0] as { post?: string }).post, undefined, "topic room 的行不带 post");
 assert.equal(ingested[0]!.mention, "bot", "@ 了机器人 = 点名 host");
 assert.ok(ingested[0]!.text.includes("频道里求助"), "正文带原帖");
 // 审批卡 → 改投问话人私聊 (lastAsker 由事件记下), 永不进频道。
@@ -156,6 +157,16 @@ calls.length = 0;
 await client.sendMessage("topicE", { msgtype: "template_card", template_card: {} });
 assert.ok(calls.some((c) => c.via === "send" && c.chatid === "tester"), "审批卡改投问话人 DM (lastAsker)");
 assert.ok(!calls.some((c) => c.via === "cmd"), "审批卡没有跨 bot 出去");
+// topic room 当 chatid (审批 / 通知按 target 的 base 推过来): 卡改投问话人 DM, 正文评论回根帖 (send_reply), 绝不当群 chatid 发。
+calls.length = 0;
+await client.sendMessage("topic:topicE/pE", { msgtype: "template_card", template_card: {} });
+assert.ok(calls.some((c) => c.via === "send" && c.chatid === "tester"), "topic room 的审批卡也改投问话人 DM");
+assert.ok(!calls.some((c) => c.via === "send" && c.chatid === "topic:topicE/pE"), "topic room id 不会当群 chatid 发出去");
+calls.length = 0;
+await client.sendMessage("topic:topicE/pE", { msgtype: "markdown", markdown: { content: "批准结果" } });
+const rep1 = calls.find((c) => c.via === "cmd" && c.cmd === "aibot_topic_send_reply");
+assert.ok(rep1 && rep1.content?.includes("\"post_id\":\"pE\"") && rep1.content.includes("批准结果"), "topic room 的通知 → 评论根帖 (send_reply, post_id 取自 id)");
+assert.ok(!calls.some((c) => c.cmd === "aibot_topic_send_post"), "不发新帖");
 
 // ── Part E: 频道消息落 channel 管家化身 (inbound 端到端, 绑定解析) ─────
 const ROOT2 = mkdtempSync(join(tmpdir(), "channel-route-"));

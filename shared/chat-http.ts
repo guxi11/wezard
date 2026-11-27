@@ -26,7 +26,7 @@ import { baseOfKey } from "./session-label.js";
 import { memberLabel } from "./room-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, verdictFacts, type ChannelOf, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
+import { buildChannelFacts, buildRoomFact, buildRoomFacts, dutyFacts, verdictFacts, type ChannelOf, lastSaidAt, memberNotes, roomCreatedAt, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
 import { roomHash, unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
 import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
@@ -191,7 +191,7 @@ const roomShortOf = (f: WorldFacts) => {
       if (label) return label;
     }
     const tail = room.replace(/^[a-z-]+:/, "").slice(-6);
-    const kind = room.startsWith("user:") ? "单聊" : room.startsWith("chat:wx") ? "微信" : room.startsWith("dm:") || room.startsWith("adhoc:") ? "room" : "群";
+    const kind = room.startsWith("user:") ? "单聊" : room.startsWith("topic:") ? "帖子" : room.startsWith("chat:wx") ? "微信" : room.startsWith("dm:") || room.startsWith("adhoc:") ? "room" : "群";
     return kind + (tail ? " …" + tail : "");
   };
 };
@@ -277,7 +277,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const chFrom = (f: WorldFacts): ChannelOf => channelResolver ?? ((room) => {
     const r = (f.rooms ?? []).find((x) => x.id === room);
     if (!r) return undefined;
-    if (r.channel) return { channel: r.channel.id, post: r.rootPost ?? "" };
+    if (r.channel) return { channel: r.channel.id, post: r.rootPost ?? "", ...(r.channel.host ? { host: r.channel.host } : {}) };
     // 频道 room 在快照里没有 channel 指针 (它本身就是频道): kind 直接说明它是频道 ——
     // 独立 svr 没有 channel-posts, 只看账本会把频道当成企微群 (图标/类型全错)。
     return r.kind === "channel" ? { channel: room.replace(/^chat:/, ""), post: "" } : undefined;
@@ -479,6 +479,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       };
       json(res, 200, {
         ok: true, at, ...w, rooms: w.rooms.map(withUnread), plans: w.plans.map(publicPlan),
+        // 频道 (不是 room): 一组 topic room + host 身份, 前端图上画框用。种子 = daemon 推来的已知频道。
+        channels: buildChannelFacts(w.rooms, f.channels ?? []),
         // 名字表: room 成员只有 id (uid / userid), 图上与消息里的显示名都从这里取。
         chatNames: f.chatNames, names: f.names ?? {}, humanNames: f.humanNames ?? {},
       });

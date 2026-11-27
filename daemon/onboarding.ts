@@ -347,6 +347,9 @@ export const applyOnboarding = (
   bind: (name: string) => void,
   workspaceOf: (target: string) => string,
   want = "",
+  /** 化身 / 类锚点落在哪个座位 (缺省 = base)。频道没有 room, base 是频道键 chat:<topic_id>: 引导所在的
+   *  topic room 才是真座位 —— 传它, 免得在一个没有 room 的频道键上造一条无家可归的实例记录。 */
+  seatBase = base,
 ): OnboardingBound => {
   const done = (b: OnboardingBound): OnboardingBound => { bind(b.name); onboarding.finish(base); return b; };
   // 绑已有 (人 2026-11-23): 绑定只绑身份, **化身按本 room 解析** —— 本 room 已有这个身份的
@@ -355,8 +358,8 @@ export const applyOnboarding = (
     const identity = verdict.identity ?? "";
     const cls = identity ? store.classes?.get(identity) : undefined;
     // 本 room 是否本来就有这个身份的化身 (要在 localManifestation 之前判 —— 它会顺手开一条)。
-    const had = !!identity && store.all().some((w) => identityOf(w) === identity && baseOfKey(w.target) === base);
-    const local = localManifestation(store, base, identity);
+    const had = !!identity && store.all().some((w) => identityOf(w) === identity && baseOfKey(w.target) === seatBase);
+    const local = localManifestation(store, seatBase, identity);
     const target = local || verdict.target;
     const rec = store.get(target);
     return done({
@@ -375,12 +378,12 @@ export const applyOnboarding = (
   const classes = store.classes;
   const name = want || store.nextName();
   if (classes) {
-    classes.create({ id: base, name, role: "steward", workspace: verdict.workspace });
-    store.upsert(base, { kind: "steward", workspace: verdict.workspace, identity: base, ordinal: 1, name: instanceName(name, 1) });
-    return done({ name, target: base, workspace: verdict.workspace, fresh: true });
+    classes.create({ id: seatBase, name, role: "steward", workspace: verdict.workspace });
+    store.upsert(seatBase, { kind: "steward", workspace: verdict.workspace, identity: seatBase, ordinal: 1, name: instanceName(name, 1) });
+    return done({ name, target: seatBase, workspace: verdict.workspace, fresh: true });
   }
-  store.upsert(base, { kind: "steward", workspace: verdict.workspace });
-  return done({ name: store.claim(base, name), target: base, workspace: verdict.workspace, fresh: true });
+  store.upsert(seatBase, { kind: "steward", workspace: verdict.workspace });
+  return done({ name: store.claim(seatBase, name), target: seatBase, workspace: verdict.workspace, fresh: true });
 };
 
 export interface OnboardPlan {

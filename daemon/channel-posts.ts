@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { Config } from "../shared/config.js";
 import { loadJsonMap, type JsonMap } from "../shared/json-map-store.js";
 import { sleep } from "../shared/std.js";
+import { parseTopicRoomId, topicRoomId } from "../shared/topic-room.js";
 
 export interface ChannelPostRef { channel: string; post: string }
 
@@ -36,13 +37,16 @@ const refOf = (v: ChannelPostRef | string | undefined): ChannelPostRef | undefin
   return undefined;
 };
 
-/** 帖子 base (chat:opk…) 的配对 {频道, 根帖}; 没配对过 = undefined。 */
-export const postRefOf = (cfg: Config, base: string): ChannelPostRef | undefined => refOf(storeOf(cfg).get(base));
+/** 帖子 room 的 {频道, 根帖}: `topic:<T>/<P>` 直接从 id 拆 (2026-11-27 起新建的帖子 room 全是它);
+ *  旧帖子 base (chat:opk…) 查配对表; 没配对过 = undefined。 */
+export const postRefOf = (cfg: Config, base: string): ChannelPostRef | undefined =>
+  parseTopicRoomId(base) ?? refOf(storeOf(cfg).get(base));
 
 /** 帖子 base 所属频道的裸 topic_id; 没配对过 = ""。 */
 export const channelOfPost = (cfg: Config, base: string): string => postRefOf(cfg, base)?.channel ?? "";
 
-/** base 所属频道: 帖子查映射; chat:<topic_id> 本身 (频道 room) 在映射值或频道管家表里就是频道。 */
+/** base 所属频道: topic room 从 id 拆, 旧帖子查映射; chat:<topic_id> 本身 (频道键 / 存档频道 room)
+ *  在映射值或频道管家表里就是频道。 */
 export const channelOf = (cfg: Config, base: string): string => {
   const post = channelOfPost(cfg, base);
   if (post || !base.startsWith("chat:")) return post;
@@ -52,20 +56,27 @@ export const channelOf = (cfg: Config, base: string): string => {
   return known ? bare : "";
 };
 
-/** 该频道里某个裸 post_id 已经诞生的帖子 room base (chat:opk…); 没有 = undefined。 */
+/** 该频道里某个裸 post_id 在**旧口径**下配过对的帖子 base (chat:opk…); 没有 = undefined。 */
 export const postBaseOf = (cfg: Config, topicId: string, postId: string): string | undefined =>
   Object.keys(storeOf(cfg).all())
     .find((b) => { const r = refOf(storeOf(cfg).get(b)); return r?.channel === topicId && !!r.post && r.post === postId; });
 
-/** 该频道已配对的帖子 base (不含频道 room 自己 —— 它由 learnChannelRoom 记进来, 根帖 id 为空)。 */
+/** 该频道已配对的旧帖子 base (chat:opk…, 不含频道键自己 —— 它由 learnChannel 记进来, 根帖 id 为空)。 */
 export const postsOfChannel = (cfg: Config, topicId: string): string[] =>
   Object.keys(storeOf(cfg).all())
     .filter((b) => { const r = refOf(storeOf(cfg).get(b)); return r?.channel === topicId && !!r.post; });
 
-/** 记一个频道 room 本身 (chat:<topic_id>) 为已知频道: 未绑定、还没有帖子配对过的频道也要认得出
- *  —— 引导 / 绑定落 wrc.channel.steward 都要先认出「这是一个频道」。幂等。 */
-export const learnChannelRoom = (cfg: Config, topicId: string): boolean =>
+/** 记一个频道为已知频道 (映射里 chat:<topic_id> → {channel, post:""}): 未绑定、还没有帖子配对过的频道
+ *  也要认得出 —— 引导 / 绑定落 wrc.channel.steward 都要先认出「这是一个频道」。幂等。
+ *  频道本身没有 room (2026-11-27 起); 这条映射只是「已知频道」名单, 图上框标题 / read_channel 认频道用。 */
+export const learnChannel = (cfg: Config, topicId: string): boolean =>
   learnChannelPost(cfg, "chat:" + topicId, topicId, "");
+
+/** 已知频道的裸 topic_id 全集: 映射里出现过的 + 频道管家表里绑过的。 */
+export const knownChannels = (cfg: Config): string[] => [...new Set([
+  ...Object.values(storeOf(cfg).all()).flatMap((v) => refOf(v)?.channel ?? []),
+  ...Object.keys(cfg.wrc.channel.steward ?? {}),
+])];
 
 /** 记一对 帖子 → {频道, 根帖}; 新学到或改了返回 true (没变不写盘)。
  *  postId 是频道自己的 post_id (send_reply 要它), 不是帖子群的 chatid (opk…) —— 两者不同。 */
@@ -98,3 +109,40 @@ export const awaitChannelOfPost = async (cfg: Config, base: string, waitMs: numb
     await sleep(100);
   }
 };
+
+/** 入站事件 → 它该落的 topic room (docs/evolve/channel-topic-rooms.md §3.1; 纯, 不开 room)。
+ *  顺序 = 存量先: ① 帖子源曾被 room_bind 绑进某 room → 继续落那里 (对话不中途分家, 只读兼容; 原生帧的 opk
+ *  与事件路径配对表反查到的旧源都要查, 否则「源已 bind 而 chat:<opk> room 从没诞生」会让没带 opk 的事件另开
+ *  `topic:T/P` 与原生 @ 帧落的 R 分家); ② 已存在的 `topic:T/P` 就是这个帖子的 room (后来才诞生的
+ *  chat:<opk> 顶不掉它); ③ 已诞生的旧帖子 room (chat:<opk>, **仅 kind 是 topic-post 或配对表里就是这个帖子的** —— 原生帧 2s 内没配上时
+ *  inbound 会在 chat:<opk> 误生一个 wecom-group room, 它不是帖子 room) 与旧配对表反查 (事件路径没有 opk) 同理;
+ *  都没有 = 新口径 topic:<T>/<P> —— 由 (频道, 帖子) 决定, 第一条事件就能算出, 之后被 @ 也不变。
+ *  旧口径只在对应 room 真的存在时才认 (配过对但从没诞生过 room 的帖子不该落进一个不存在的 room)。 */
+export const topicRoomOf = (a: {
+  cfg: Config;
+  topic: string;
+  post: string;
+  opk?: string;
+  roomOfSource: (source: string) => string | undefined;
+  roomExists: (room: string) => boolean;
+  /** room 的 kind (账本里的 open 行); 缺省 = 不区分 (测试桩 / 旧接线, 存在即认)。 */
+  roomKind?: (room: string) => string | undefined;
+}): string => {
+  const paired = postBaseOf(a.cfg, a.topic, a.post);
+  // 存量帖子 room 在账本里记的 kind 是 wecom-group (旧版按群开的), 所以 kind 之外再认「配对表里就是这个帖子的
+  // 源」; 没配对过、kind 又不是 topic-post 的 chat:<opk> = 误生的群 room, 不认。
+  const legacyPostRoom = (r: string): boolean =>
+    a.roomExists(r) && (!a.roomKind || a.roomKind(r) === "topic-post" || r === paired);
+  const bound = [a.opk, paired].flatMap((src) => (src ? [a.roomOfSource(src)] : [])).find((r): r is string => !!r);
+  if (bound) return bound;
+  const fresh = topicRoomId(a.topic, a.post);
+  if (a.roomExists(fresh)) return fresh;
+  if (a.opk && legacyPostRoom(a.opk)) return a.opk;
+  if (paired && legacyPostRoom(paired)) return paired;
+  return fresh;
+};
+
+/** 一个频道名下所有 topic room (含旧 chat:<opk> 帖子 room); 不含存档频道 room (chat:<topic_id>)。
+ *  roomIds 由调用方给 (账本里现有的全部 room id) —— 本模块不持有 room 账本。 */
+export const topicRoomsOf = (cfg: Config, topicId: string, roomIds: readonly string[]): string[] =>
+  roomIds.filter((r) => { const ref = postRefOf(cfg, r); return !!ref?.post && ref.channel === topicId; });

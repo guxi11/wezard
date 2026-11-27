@@ -595,8 +595,9 @@ export interface InboundOpts {
   /** 引导在途状态 (onboarding.json)。daemon 传一份共享实例 —— 否则 /onboarding/bind 那边
    *  finish 的是一份自己现读的盘, 与这里的在途表各算各的。缺省 = 自己读。 */
   onboarding?: OnboardingStore;
-  /** 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。 */
-  guideInbound?: (a: { base: string; guide: string; text: string; from: string; streamId: string; frame: WsFrame<BaseMessage> }) => Promise<{ ok: boolean; reason?: string }>;
+  /** 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。room = 频道原生 @ 帧所在帖子的 topic room
+   *  (频道没有 room, 引导住人说话的那个帖子 room); 群引导不给, 落 base 本身。 */
+  guideInbound?: (a: { base: string; guide: string; text: string; from: string; streamId: string; frame: WsFrame<BaseMessage>; room?: string }) => Promise<{ ok: boolean; reason?: string }>;
   /** 引导落定: 引导在 room 里时 join 管家 / 转 duty / leave / 系统行。false = 没得交 (不在 room 里)。 */
   guideSettle?: (base: string, bound: OnboardingBound) => boolean;
   /** 本群 room 的群公告 (`/notice` 读)。 */
@@ -607,6 +608,9 @@ export interface InboundOpts {
    *  源已绑 / 帖子源还没诞生 (落频道接待) 时给结论; 恒等路径 = undefined (走 stewardReception)。
    *  src / post = 账本行要写死的入口源与频道帖子 id (重放不推断)。 */
   sourceRoute?: (base: string) => { room: string; target: string; src?: string; post?: string } | undefined;
+  /** 频道原生 @ 帧 (base = 帖子自己的 chat:opk…, 已配上频道): 这个帖子的 topic room id (不开 room);
+   *  没配上 = undefined。频道引导用它决定引导化身入座哪个 room。 */
+  channelRoom?: (base: string) => string | undefined;
 }
 
 export type GuideInbound = NonNullable<InboundOpts["guideInbound"]>;
@@ -1166,16 +1170,17 @@ export const installInboundRouter = (
   const guideGate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, raw: string): Promise<boolean> => {
     if (!isGroup(msg)) return false;
     let base = chatPrincipal(msg);
+    let guideRoom = "";
     if (sourceOf(msg) === "channel") {
       await settleChannelPost(base);
       // §4.1: 这个源已绑进某个 room / 帖子 room 已有 host → 接待在 room 里, 不走频道引导
       // (绑定优先于「频道还没绑定管家」—— 一个帖子可以绑进别处, 不该被频道引导截走)。
       if (opts.sourceRoute?.(base)) return false;
       // 频道: 绑定与引导的粒度都是频道 (人 2026-11-23: 一个频道一个管家、一条引导)。原生帧的
-      // base 是**帖子**群 (chat:opk…), 配上频道就换回频道 room —— 引导化身住频道 room, 帖子
-      // room 在绑定前没有 host, 人话落那儿没人接。
+      // base 是**帖子**群 (chat:opk…), 配上频道就换成频道键 (引导的状态键, 不是 room); 引导化身
+      // 住人说话的那个帖子 room (guideRoom) —— 频道自己没有 room (2026-11-27)。
       const topicId = channelOfPost(cfg, base);
-      if (topicId) base = "chat:" + topicId;
+      if (topicId) { guideRoom = opts.channelRoom?.(base) ?? ""; base = "chat:" + topicId; }
     }
     const store = wizardStore();
     if (!needsOnboarding(cfg, store, base)) {
@@ -1213,7 +1218,8 @@ export const installInboundRouter = (
       if (verdict.kind !== "retry") {
         const bound = applyOnboarding(store!, onboarding, base, verdict,
           (name) => guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: verdict.kind === "bind-new" ? "新群引导新建管家 " + name + " (工作区 " + verdict.workspace + ") 并绑到 " + base : "新群引导把 " + name + " 绑为 " + base + " 的管家", byHuman: true })),
-          (t) => identityWorkspaceOf(store, t) || ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
+          (t) => identityWorkspaceOf(store, t) || ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)),
+          undefined, guideRoom || base);
         log.info({ base, ...bound }, "onboarding: steward bound (fast path)");
         // 引导化身在 room 里 (上一句已经交给它了): 管家接进 room、duty 连原话一起转过去,
         // 完成确认由 room 的系统行发; 否则照旧回一条 daemon 系统行。
@@ -1236,7 +1242,7 @@ export const installInboundRouter = (
     if (err) { await replySystem(frame, msg, "[wezard] 引导会话起不来: " + err + " — 稍后再发一句试试。"); return true; }
     bridge.armCharter(guide, first ? renderGuideOpening() : renderGuideRetry(retryReason));
     const sent = opts.guideInbound
-      ? await opts.guideInbound({ base, guide, text, from: msg.from.userid, streamId: msg.msgid, frame })
+      ? await opts.guideInbound({ base, guide, text, from: msg.from.userid, streamId: msg.msgid, frame, ...(guideRoom ? { room: guideRoom } : {}) })
       : { ok: false, reason: "room 接线还没就绪" };
     if (sent.ok) return true;
     log.warn({ base, guide, reason: sent.reason }, "onboarding: 人这句没能进 room");

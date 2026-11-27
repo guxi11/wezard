@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { expandHome } from "./paths.js";
 import { stripLegacyTail } from "./reminder.js";
+import { parseTopicRoomId } from "./topic-room.js";
 
 // ── 身份 ───────────────────────────────────────────────────────────────
 
@@ -587,9 +588,12 @@ export interface OutboundDeps {
   channelAction?: (row: MsgRow) => { action: "post" } | { action: "reply"; post: string };
 }
 
-/** 目标源 → 传输 (设计稿 §4.2 表): wx > 频道 > 帖子 (有配对) > 群。
- *  帖子源仍查 channel-posts 的 {频道, 根帖} 拿企微侧地址; 绑定本身不改企微地址。 */
+/** 目标源 → 传输 (设计稿 §4.2 表): topic room > wx > (存档) 频道 room > 旧帖子 (有配对) > 群。
+ *  topic room (`topic:<T>/<P>`) 的企微侧地址就在 id 里: 一律评论根帖, 与 row.kind 无关 (回话 / 主动说 /
+ *  文件 / notify 都是评论区的一条), 不查任何映射。旧帖子源仍查 channel-posts 的 {频道, 根帖}。 */
 export const planOutbound = (source: string, row: MsgRow, d: OutboundDeps): OutboundPlan => {
+  const topic = parseTopicRoomId(source);
+  if (topic) return { via: "post", channel: topic.channel, post: topic.post };
   const chatId = source.replace(/^(user|chat|group):/, "");
   if (d.wxOwns(chatId)) return { via: "wx", chatId };
   if (d.isTopic(source)) {

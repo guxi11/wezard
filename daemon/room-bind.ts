@@ -1,14 +1,16 @@
-// 源 ↔ room 多对一绑定 (§4.1 / §5.1 / §5.2 / §6 / §7): 纯判定 + 待判定扫描 + 频道成员补拉。
+// 源 ↔ room 多对一绑定 (§4.1 / §5.2 / §6): 纯判定 + 绑定证据 (dry-run)。
 //
 // 绑定的事实只在**目标 room 的账本**里 (bind / unbind op, P1), 这里不写盘也不碰 hub ——
 // 路由 (daemon/index.ts) 把 planBind / planUnbind 的结论交给 hub.write, 由 store.append 落 op;
 // 对账闸关着时 append 抛 BindGateClosed, 路由回 503 (fail-closed, 主流程照常回落恒等)。
 //
-// 待判定 (首触兜底) 与存量补拉都**从账本现算**, 不维护第二份队列: 频道 room 里带 src 的人话行
-// 就是「这个帖子源来过、还没被处置」的全部事实; boot 重建后同一个扫描自然接上。
+// 2026-11-27 (docs/evolve/channel-topic-rooms.md): 频道帖子天然是自己的 topic room, 没有「首触接待」
+// 了 —— 帖子源不能再 bind (400), 首触待判定扫描 / 帖子 host 补拉 / room_fork 的判定都已删。绑定只剩
+// 群源; 存量的帖子源 bind op 照读 (topicRoomOf 首位尊重它), 仍可 unbind。
 import type { Config } from "../shared/config.js";
-import { isBoundRoom, openDuties, roomHost, whoKey, type BindOp, type RoomState, type UnbindOp, type Who } from "../shared/room.js";
+import { isBoundRoom, openDuties, roomHost, type BindOp, type RoomState, type UnbindOp, type Who } from "../shared/room.js";
 import { channelOf, postRefOf } from "./channel-posts.js";
+import { isTopicRoomId } from "../shared/topic-room.js";
 
 /** 绑定的判定面: 索引 / 账本 / 对账闸都由调用方现取 (hot, 不缓存)。 */
 export interface BindContext {
@@ -23,13 +25,17 @@ export type BindVerdict =
   | { ok: true; op: BindOp; already: boolean }
   | { ok: false; status: 400 | 403 | 404 | 409 | 503; reason: string };
 
-/** 这个 base 能不能当源: 群聊 (chat:<群id>) 或频道帖子 (chat:<opk…>)。频道自己 (chat:<topic_id>)
- *  与单聊 (user:…) 都不是源 —— 前者本来就是一个 room, 后者一人一 room 收益低 (非目标)。 */
+/** 这个 base 能不能当源: 只有群聊 (chat:<群id>)。频道帖子 (topic:<T>/<P> / 旧 chat:<opk…>) 天然是自己的
+ *  topic room, 不再并进别的 room (2026-11-27); 频道键 (chat:<topic_id>) 不是 room; 单聊 (user:…) 一人
+ *  一 room 收益低 (非目标)。 */
 export const bindableSource = (cfg: Config, source: string): boolean => {
   if (!source.startsWith("chat:")) return false;
-  const topic = channelOf(cfg, source);
-  return !(topic && source === "chat:" + topic);
+  return !channelOf(cfg, source);
 };
+
+/** 帖子源 (topic room id / 旧帖子 base / 频道键) —— planBind 对它们有单独的拒绝说明。 */
+export const isChannelSource = (cfg: Config, source: string): boolean =>
+  isTopicRoomId(source) || !!postRefOf(cfg, source)?.post || (source.startsWith("chat:") && !!channelOf(cfg, source));
 
 /** §5.2 硬门 ①-⑤ + §6 权限。全部在 daemon 静态判, 判定面之外没有再放一道。 */
 export const planBind = (
@@ -40,11 +46,12 @@ export const planBind = (
   if (!a.gate.ok) return { ok: false, status: 503, reason: "绑定索引对账失败, 暂不接受绑定写: " + (a.gate.reason ?? "") };
   const source = a.source.trim();
   const room = a.room.trim();
-  if (!source) return { ok: false, status: 400, reason: "要绑哪个源? 给 source (chat:<群id> 或 chat:<opk…>)" };
+  if (!source) return { ok: false, status: 400, reason: "要绑哪个源? 给 source (chat:<群id>)" };
   // ⑤ 源不能是目标 room 的主源 (恒等绑定没有意义)。
   if (source === room) return { ok: false, status: 400, reason: "源就是本 room 的主源, 不需要绑定" };
-  // ④ 源类型 ∈ {群, 帖子}。
-  if (!bindableSource(a.cfg, source)) return { ok: false, status: 400, reason: "这个源不能绑: 只有群聊 (chat:<群id>) 与频道帖子 (chat:<opk…>) 可作为源 (频道自己就是一个 room; 单聊不在本轮范围)" };
+  // ④ 源类型 = 群。频道帖子每帖一个 room (topic:<T>/<P>), 不再并进别处。
+  if (isChannelSource(a.cfg, source)) return { ok: false, status: 400, reason: "频道帖子不能绑进别的 room: 每个帖子自己就是一个 room (topic:<频道>/<帖子>), 回话 = 评论根帖; 要拉别人进来用 room_invite / chat_ask" };
+  if (!bindableSource(a.cfg, source)) return { ok: false, status: 400, reason: "这个源不能绑: 只有群聊 (chat:<群id>) 可作为源 (单聊不在本轮范围)" };
   // ③ 目标 room 存在且有 host。
   const s = a.stateOf(room);
   if (!s) return { ok: false, status: 404, reason: "没有这个 room: " + room };
@@ -86,95 +93,6 @@ export const planUnbind = (
   if (!s.bindings.has(source)) return { ok: false, status: 409, reason: "这个源没有绑在本 room: " + source };
   const why = a.why?.trim();
   return { ok: true, op: { op: "unbind", at: now, room, source, by: a.actor, ...(why ? { why } : {}) } };
-};
-
-/** 首触待判定的一条: 频道 room 收了这个源的@, host 至今没有 bind, 帖子 room 也还没诞生。 */
-export interface PendingFirstTouch {
-  channelRoom: string;
-  topicId: string;
-  source: string;
-  /** 这个源在频道 room 里最近一条人话的时刻 (判定窗口的起点)。 */
-  at: number;
-}
-
-/** §5.1 兜底扫描 (纯): 从账本现算「超时该另起的首触」。判据全部是事实, 没有内存态:
- *   - 频道 room (kind "channel") 有 wizard host (引导期不兜底, 引导接一切人话);
- *   - 行是人话、带 src、src 属于本频道、帖子 room 还没诞生、源也没绑在别处;
- *   - 距今 >= timeoutMs。同一源只出一条 (取最近一条人话)。
- *  已绑 / 已诞生 / 已另起 的下一次扫描自然不再命中 —— 幂等由判据本身给, 不靠标记。 */
-export const pendingFirstTouches = (a: {
-  cfg: Config;
-  states: readonly RoomState[];
-  roomOfSource: (source: string) => string | undefined;
-  stateOf: (room: string) => RoomState | undefined;
-  now: number;
-  timeoutMs: number;
-}): PendingFirstTouch[] => {
-  if (!(a.timeoutMs > 0)) return [];
-  const out: PendingFirstTouch[] = [];
-  for (const s of a.states) {
-    if (s.kind !== "channel") continue;
-    const host = roomHost(s);
-    if (host?.kind !== "wizard") continue;
-    const topicId = s.id.startsWith("chat:") ? s.id.slice("chat:".length) : "";
-    if (!topicId) continue;
-    const latest = new Map<string, number>();
-    for (const m of s.msgs) {
-      if (m.author.kind !== "human" || m.kind !== "say") continue;
-      const src = m.src;
-      if (!src || src === s.id) continue;
-      if (postRefOf(a.cfg, src)?.channel !== topicId) continue;
-      const prev = latest.get(src);
-      if (prev === undefined || m.at > prev) latest.set(src, m.at);
-    }
-    for (const [source, at] of latest) {
-      if (a.roomOfSource(source)) continue;          // 已经绑了 (本 room 或别处)
-      if (a.stateOf(source)) continue;               // 帖子 room 已经诞生 (另起过)
-      if (a.now - at < a.timeoutMs) continue;
-      out.push({ channelRoom: s.id, topicId, source, at });
-    }
-  }
-  return out;
-};
-
-/** boot 补拉 (§7) 的一条: 把一个已存在的帖子 room 的 host 实例补进频道 room。 */
-export interface BackfillSeat {
-  channelRoom: string;
-  who: Who;
-  /** 已有的帖子 host 实例的 target (日志用)。 */
-  target: string;
-}
-
-/** §7 存量补拉 (纯): 帖子 room 的 host 实例进频道 room —— 让频道 host 在成员表里看得到每个帖子
- *  host。条件: 频道 room 存在、有 wizard host (引导期 / 空频道不拉)、帖子 room 有 wizard host
- *  且实例仍在册 (stop / forget 的跳过)、还不是频道成员。幂等: 已在成员表就不出。 */
-export const planChannelBackfill = (a: {
-  cfg: Config;
-  rooms: readonly string[];
-  stateOf: (room: string) => RoomState | undefined;
-  targetOf: (uid: string) => string | undefined;
-}): BackfillSeat[] => {
-  const out: BackfillSeat[] = [];
-  const seen = new Set<string>();
-  for (const room of a.rooms) {
-    const ref = postRefOf(a.cfg, room);
-    if (!ref?.post) continue;
-    const channelRoom = "chat:" + ref.channel;
-    const cs = a.stateOf(channelRoom);
-    const ps = a.stateOf(room);
-    if (!cs || !ps) continue;
-    const chHost = roomHost(cs);
-    const postHost = roomHost(ps);
-    if (chHost?.kind !== "wizard" || postHost?.kind !== "wizard") continue;
-    const target = a.targetOf(postHost.id);
-    if (!target) continue;                       // 实例不在册 (已 stop / 忘了) 不拉
-    const key = channelRoom + "\n" + postHost.id;
-    if (seen.has(key)) continue;
-    if (cs.members.has(whoKey(postHost))) continue;
-    seen.add(key);
-    out.push({ channelRoom, who: postHost, target });
-  }
-  return out;
 };
 
 // ── §5.2 判定证据 (dry-run): daemon 只给证据, 决定权在模型 ─────────────────
@@ -308,13 +226,13 @@ const renderCandidates = (list: readonly BindCandidate[], blocked: string): stri
     else if (c.evidence.length) lines.push(head + " — " + c.evidence.join("; "));
     else lines.push(head + " — 没有交集");
   }
-  lines.push("", "由你判断: 是不是同一件事。绑定用 room_bind({source, room}); 不是就留在这 (或 room_fork 另起)。");
+  lines.push("", "由你判断: 是不是同一件事。绑定用 room_bind({source, room}); 不是就留在这。");
   return lines.join("\n");
 };
 
 
-/** §4.1 源→room 的落点 (纯): 绑定优先; 帖子 room 已诞生 → 它; 否则 fallback (频道接待处) 或源自己。
- *  入站 (dispatch 前) 与 channelIngest 共用这一条, 保证两路落点一致。 */
+/** §4.1 源→room 的落点 (纯): 绑定优先; 源自己的 room 已诞生 → 它; 否则 fallback 或源自己。
+ *  群源入站 (dispatch 前) 用它; 频道帖子走 channel-posts 的 topicRoomOf。 */
 export const sourceRoomOf = (a: {
   source: string;
   roomOfSource: (source: string) => string | undefined;
@@ -326,34 +244,3 @@ export const sourceRoomOf = (a: {
   if (a.stateOf(a.source)) return a.source;
   return a.fallback?.(a.source) ?? a.source;
 };
-
-export type ForkVerdict =
-  | { ok: true; topicId: string; channelRoom: string }
-  | { ok: false; status: 400 | 403 | 404 | 409; reason: string };
-
-/** §5.1 出口 3 的显式入口 (room_fork) 的判定 (纯): 只有频道帖子源、只有该频道 room 的 host (或人)、
- *  必须是「首触」(频道里这个源有人话) 且还没绑 / 帖子 room 还没诞生。幂等判据与超时兜底同一套。 */
-export const planFork = (a: {
-  cfg: Config;
-  source: string;
-  actor: Who;
-  stateOf: (room: string) => RoomState | undefined;
-  roomOfSource: (source: string) => string | undefined;
-}): ForkVerdict => {
-  const source = a.source.trim();
-  const ref = source ? postRefOf(a.cfg, source) : undefined;
-  if (!ref?.post) return { ok: false, status: 400, reason: "只有频道帖子源可以另起 (chat:<opk…>); 群源请用 room_bind 绑进一个已有 room" };
-  const channelRoom = "chat:" + ref.channel;
-  const cs = a.stateOf(channelRoom);
-  if (!cs) return { ok: false, status: 404, reason: "这个频道还没有 room 账本: " + channelRoom };
-  const host = roomHost(cs);
-  if (!(a.actor.kind === "human" || (host?.kind === "wizard" && host.id === a.actor.id)))
-    return { ok: false, status: 403, reason: "只有这个频道 room 的 host 能另起 (它不是你的接待面)" };
-  const bound = a.roomOfSource(source);
-  if (bound) return { ok: false, status: 409, reason: "这个源已绑在 " + bound + " —— 先解绑再另起" };
-  if (a.stateOf(source)) return { ok: false, status: 409, reason: "帖子 room 已经诞生: " + source };
-  if (!cs.msgs.some((m) => m.author.kind === "human" && m.src === source))
-    return { ok: false, status: 409, reason: "这个源还没有首触 (频道里没有它的话), 不另起" };
-  return { ok: true, topicId: ref.channel, channelRoom };
-};
-

@@ -50,9 +50,10 @@ export interface RoomFact {
   last?: RoomLastFact;
   /** 未决 duty 数 (读时 fold, 不落盘)。 */
   openDuties: number;
-  /** 帖子 room 的归属: 所属频道 (读时由 channel-posts 映射算, 不落账本)。 */
-  channel?: { id: string; name: string };
-  /** 帖子 room 的根帖 id (send_reply 用)。 */
+  /** 所属频道 (读时算, 不落账本): topic room (topic:<T>/<P>) / 旧帖子 room / 存档频道 room 都给。
+   *  host = 频道绑的那个身份 (wrc.channel.steward); 没绑 = 缺省。 */
+  channel?: { id: string; name: string; host?: ChannelHost };
+  /** 帖子 room 的根帖 id (send_reply 用); 存档频道 room 没有。 */
   rootPost?: string;
   /** 绑进本 room 的副源 (multi-source-binding; fold 出 bindings, unbind 即消失)。 */
   sources: RoomSourceFact[];
@@ -72,9 +73,14 @@ const shortSourceId = (id: string): string => {
   return bare.length > 10 ? bare.slice(0, 8) + "…" : bare;
 };
 
+/** 频道的 host 身份 (频道 → 类的绑定, 不是某个 room 的实例): identity = 类 id (解析不到类就是绑定里的名字),
+ *  name = 类名。 */
+export interface ChannelHost { identity: string; name: string }
+
 /** channel-posts 映射的读侧形状 (由调用方注入; shared 不 import daemon)。
- *  channel room → { channel: 裸 topic_id }; 帖子 room → { channel, post: 根帖 id }。 */
-export type ChannelRef = { channel: string; post: string };
+ *  存档频道 room → { channel: 裸 topic_id, post: "" }; 帖子 room → { channel, post: 根帖 id };
+ *  host = 该频道绑的 host 身份 (有就带)。 */
+export type ChannelRef = { channel: string; post: string; host?: ChannelHost };
 export type ChannelOf = (room: string) => ChannelRef | undefined;
 
 const KIND_BY_PREFIX = (id: string): RoomKind =>
@@ -101,7 +107,10 @@ export const buildRoomFact = (s: RoomState, n: RenderNames, channelOf?: ChannelO
     id: s.id,
     kind,
     title: s.title ?? "",
-    ...(chRef?.post ? { rootPost: chRef.post, channel: { id: chRef.channel, name: n.roomLabel("chat:" + chRef.channel) } } : {}),
+    ...(chRef ? {
+      ...(chRef.post ? { rootPost: chRef.post } : {}),
+      channel: { id: chRef.channel, name: n.roomLabel("chat:" + chRef.channel), ...(chRef.host ? { host: chRef.host } : {}) },
+    } : {}),
     notice: s.notice ?? "",
     bound: isBoundRoom(s.id),
     ...(host ? { host } : {}),
@@ -436,4 +445,32 @@ export const planHasOpenDuty = (states: Iterable<RoomState>, planId: string, uid
     if (openDuties(s).some((d) => d.kind !== "join-req" && d.planId === planId && (sameWho(holderOf(s, d), me) || sameWho(d.asker, me)))) return true;
   }
   return false;
+};
+
+// ── 频道 (不是 room): 一组 topic room + 它们共同的 host 身份, 给图上画框 ─────────────
+
+/** /api/world 的一个频道: 它名下的 room (topic room / 旧帖子 room / 存档频道 room) 与 host 身份。 */
+export interface ChannelFact {
+  id: string;
+  name: string;
+  host?: ChannelHost;
+  /** 这个频道名下的 room id (读模型里 channel.id 等于它的那些)。 */
+  rooms: string[];
+}
+
+/** 从 room 快照归并出频道表; seeds = daemon 推来的「已知频道」(没有任何 room 的绑定频道也要有一个框)。
+ *  纯函数, 独立 svr 与 daemon 共用: 有 room 的频道取 room 上带的 channel 描述, 没有就用 seed。 */
+export const buildChannelFacts = (rooms: readonly RoomFact[], seeds: readonly Omit<ChannelFact, "rooms">[] = []): ChannelFact[] => {
+  const byId = new Map<string, ChannelFact>(seeds.map((c) => [c.id, { ...c, rooms: [] }] as const));
+  for (const r of rooms) {
+    if (!r.channel) continue;
+    const cur = byId.get(r.channel.id);
+    byId.set(r.channel.id, {
+      id: r.channel.id,
+      name: cur?.name || r.channel.name,
+      ...((cur?.host ?? r.channel.host) ? { host: (cur?.host ?? r.channel.host)! } : {}),
+      rooms: [...(cur?.rooms ?? []), r.id],
+    });
+  }
+  return [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
 };

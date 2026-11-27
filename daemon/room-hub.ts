@@ -23,6 +23,7 @@ import type { RoomStore } from "./rooms.js";
 import type { DeliveryBatch, ShortIdLog } from "./short-id-log.js";
 import { sleep } from "../shared/std.js";
 import { STATUS_GUIDE } from "../shared/room-overdue.js";
+import { parseTopicRoomId } from "../shared/topic-room.js";
 
 /** gone = 目标没有任何会话绑定 (stop_wizard end / /kill 丢掉了它): 重试也贴不进去, 要有人重生或改派。 */
 export type PasteResult = "ok" | "uncertain" | "failed" | "gone";
@@ -95,7 +96,7 @@ export const createRoomHub = (p: HubPorts) => {
   const closedHook = (): void => { try { p.onClosed?.(); } catch (e) { p.log?.warn({ err: (e as Error).message }, "room: onClosed 失败 (不影响 append)"); } };
 
   /** 唯一的 append 口子。成功 → 已落盘并已触发扇出。 */
-  const append = (room: string, d: Draft, extra: Partial<JudgeCtx> = {}): Verdict => {
+  const append = (room: string, d: Draft, extra: Partial<JudgeCtx> = {}, opts: { noMirror?: boolean } = {}): Verdict => {
     const s = state(room);
     if (!s) return { ok: false, status: 400, reason: "没有这个 room: " + room };
     // perceptron 的发言权是硬的 (§2.2, 2026-11-23 人定): **一行消息都不写** —— 判决走 perceive op
@@ -118,7 +119,7 @@ export const createRoomHub = (p: HubPorts) => {
     p.store.append(room, [v.row]);
     if (v.degraded.length) p.log?.info({ room, id: v.row.id, degraded: v.degraded }, "room: 回合预算用尽, 这几位只推游标不唤醒");
     if (d.author.kind === "wizard" && v.row.kind === "reply") markReplied(d.author.id, v.row);
-    fanout(room, v.row);
+    fanout(room, v.row, opts.noMirror);
     if (v.row.closes?.length) closedHook();
     // 以 done 关账 = 可能有 after 等着它: 只重算 after 含被关消息的那些 duty (trigger 行无 closes, 不递归)。
     if (v.row.closes?.length && v.row.status === "done") reconcileAfter({ closed: v.row.re ?? [] });
@@ -141,8 +142,9 @@ export const createRoomHub = (p: HubPorts) => {
     return ds.length > 0 && ds.every((x) => x.closed?.status === "done");
   };
 
-  const fanout = (room: string, row: MsgRow): void => {
-    if (mirrors(row)) {
+  /** noMirror: 这一行的传输已经由调用方做完了 (频道开新帖: send_post 本身就是外发, 再 mirror 就发两遍)。 */
+  const fanout = (room: string, row: MsgRow, noMirror = false): void => {
+    if (mirrors(row) && !noMirror) {
       const s = state(room)!;
       const cover = coversBubble(s, row);
       void p.mirror(row, cover ? s.byId.get(cover) : undefined)
@@ -260,7 +262,9 @@ export const createRoomHub = (p: HubPorts) => {
       // 房头: 默认 #hash8 + 一个字标记 (群 / 单 / 私 / 临) —— 全 id 47 字符太贵; 只在 hash 撞车时
       // 退回全 id (反查、寻址、账本一律仍用全 id, 这里只是渲染)。
       const ref = p.store.hashAmbiguous(h8) ? "(" + room + ")" : "#" + h8 + " " + roomMark(room);
-      const head = "【" + label + "】" + ref + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
+      // 频道帖子 room: 头上补 topic=<频道 id> —— read_channel 翻频道历史要它 (频道没有 room, id 里才有)。
+      const topicTag = parseTopicRoomId(room) ? " · topic=" + parseTopicRoomId(room)!.channel : "";
+      const head = "【" + label + "】" + ref + topicTag + (again?.has(room) ? " · 上次投递不确定, 下面可能有你已读过的" : "") + (u.more ? " · 更早还有 " + u.more + " 条没列, 用 room_read 翻" : "");
       const lines = u.rows.map((r) => renderMsgLine(r, names, triggers.some((t) => t.id === r.id) ? 100_000 : 500, h8));
       noteShown(room, u.rows);
       const held = openDuties(s).filter((d) => sameWho(holderOf(s, d), who));

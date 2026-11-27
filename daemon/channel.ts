@@ -1,20 +1,21 @@
 // 频道（topic）桥: SDK 1.0.7 的 dispatch 表里没有 aibot_topic_event_callback，
 // 这一层在 SDK 丢掉帧之前接住它。
 //
-// 2026-11-23 起频道 / 帖子都是 room (docs/room/channel-monitor.md):
-// - 频道 room id = chat:<topic_id>; 帖子 room id = chat:<opk…> (原生帧的 chatid)。
-// - 没被 @ 的新帖 / 还没配上 opk 的评论 → 频道 room 的一行人话 (带 post);
-//   配上 opk 之后的评论 → 帖子 room 的一行人话。
-// - @ 机器人的原生帧照旧由 inbound 送进帖子会话 (也就是帖子 room 的那条人话);
+// 2026-11-27 起每个帖子一个 room、频道自己没有 room (docs/evolve/channel-topic-rooms.md):
+// - 新帖 / 评论 / 频道 @ 都落 topicRoomOf(topic, post, opk?) —— 新口径 topic:<T>/<P>, 存量帖子 room
+//   (chat:<opk…>) 与曾被 room_bind 的帖子源照旧 (channel-posts.ts §3.1 的解析顺序)。第一条事件就有 room,
+//   不再「先落频道 room 等 host 判」。
+// - @ 机器人的原生帧照旧由 inbound 送进帖子会话 (sourceRouteHook 落同一个 topic room);
 //   同一句的 topic_at_bot 事件只用来学配对 (post_id ↔ opk ↔ topic_id) 与兜底。
-// - 判官 (一次性 JSON 判定) 已删: 每个 room 一个常驻 monitor 成员, 由它决定激活谁
+// - 判官 (一次性 JSON 判定) 已删: 每个 room 一个常驻 perceptron, 由它决定激活谁
 //   (shared/room.ts 的 activate 行); 这里只负责把话落进对的 room。
 import { join } from "node:path";
 import { generateReqId, type WSClient, type WsFrame } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { sleep } from "../shared/std.js";
-import { learnChannelPost, postBaseOf } from "./channel-posts.js";
+import { learnChannel, learnChannelPost, topicRoomOf } from "./channel-posts.js";
+import { parseTopicRoomId } from "../shared/topic-room.js";
 import { expandHome } from "../shared/paths.js";
 import { inboxName, saveToInbox, sniffExt } from "./media.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
@@ -331,8 +332,8 @@ export interface ChannelReadReq { topic: string; query?: string; limit?: number;
 
 /** read_channel 的守护进程侧: 本地缓存优先, 搜不到 / 没缓存才问官方。 */
 export const readChannel = async (d: ChannelDeps, req: ChannelReadReq): Promise<{ ok: boolean; text: string }> => {
-  const topicId = req.topic.replace(/^chat:/, "").trim();
-  if (!topicId) return { ok: false, text: "给一个频道: chat:<topic_id> 或裸 topic_id" };
+  const topicId = (parseTopicRoomId(req.topic.trim())?.channel ?? req.topic.replace(/^chat:/, "")).trim();
+  if (!topicId) return { ok: false, text: "给一个频道: chat:<topic_id> / 裸 topic_id / 帖子 room id (topic:<频道>/<帖子>)" };
   const limit = Math.min(Math.max(Number(req.limit ?? 20) || 20, 1), 100);
   const query = (req.query ?? "").trim();
   if (query) {
@@ -385,10 +386,27 @@ const topicBody = (content: string, media?: TopicMedia): Record<string, unknown>
   return { content: withInline, ...(images.length ? { image_list: images } : {}), ...(inline.length ? { inline_file_list: inline } : {}) };
 };
 
-export const sendTopicPost = async (client: WSClient, log: Logger, topicId: string, content: string, media?: TopicMedia): Promise<"post"> => {
+/** send_post 的原始结果: 企微回的 body 原样带回 (调用方要从里面读 post_id; 字段名无真机证据, 见 postIdOfBody)。 */
+export interface TopicPostResult {
+  ok: boolean;
+  errcode?: number;
+  errmsg?: string;
+  body: unknown;
+}
+
+/** 发新帖并把回包交回去。传输层抛错 (超时 / 断线) 照旧往上抛 —— 调用方据此报「发帖失败」。 */
+export const sendTopicPostRaw = async (client: WSClient, log: Logger, topicId: string, content: string, media?: TopicMedia): Promise<TopicPostResult> => {
   const body = await call(client, CMD_POST, { topic_id: topicId, ...topicBody(content, media) });
-  if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel tool post rejected");
-  else log.info({ topicId, via: "post", len: content.length }, "channel tool sent");
+  if (body?.errcode) {
+    log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel tool post rejected");
+    return { ok: false, errcode: Number(body.errcode), errmsg: String(body.errmsg ?? ""), body };
+  }
+  log.info({ topicId, via: "post", len: content.length }, "channel tool sent");
+  return { ok: true, body };
+};
+
+export const sendTopicPost = async (client: WSClient, log: Logger, topicId: string, content: string, media?: TopicMedia): Promise<"post"> => {
+  await sendTopicPostRaw(client, log, topicId, content, media);
   return "post";
 };
 
@@ -421,6 +439,26 @@ export const installChannelTransport = (client: WSClient, log: Logger): void => 
   // ── 出站：topic 不走群 chatid，改成频道新帖 ──
   const origSend = client.sendMessage.bind(client);
   (client as any).sendMessage = (chatid: string, body: any): Promise<any> => {
+    // topic room (topic:<T>/<P>): 它不是群 chatid —— 审批卡改投问话人私聊, 正文评论回根帖。
+    // (目标 key 的 base = room id, 审批 / mirror 的通知都会把它原样递进来。)
+    const tr = parseTopicRoomId(String(chatid));
+    if (tr) {
+      if (body?.msgtype === "template_card") {
+        const asker = lastAsker.get(tr.channel);
+        if (asker) {
+          log.info({ topicId: tr.channel, post: tr.post, asker }, "channel: card routed to asker DM");
+          return origSend(asker, body);
+        }
+        log.warn({ topicId: tr.channel }, "channel: template_card dropped (no asker)");
+        return Promise.resolve({ headers: { req_id: "" } } as WsFrame);
+      }
+      const text = body?.msgtype === "markdown" ? String(body.markdown?.content ?? "") : "";
+      if (!text) {
+        log.warn({ topicId: tr.channel, msgtype: body?.msgtype }, "channel: unsupported outbound");
+        return Promise.resolve({ headers: { req_id: "" } } as WsFrame);
+      }
+      return sendTopicReply(client, log, tr.channel, tr.post, text).then(() => ({ headers: { req_id: "" } } as WsFrame));
+    }
     // mirror 有时把 "chat:<topic>" 原样递进来；topic 集合里存的是裸 topic_id。
     const bare = String(chatid).replace(/^(user|chat|group):/, "");
     const topicId = topics.has(chatid) ? chatid : topics.has(bare) ? bare : "";
@@ -440,16 +478,16 @@ export const installChannelTransport = (client: WSClient, log: Logger): void => 
       log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
       return Promise.resolve({ headers: { req_id: "" } } as WsFrame);
     }
-    // 频道 room 只发新帖; 帖子 room 不走这里 (chat:<opk…> 不在 topics, 由 index 的 roomMirror 走 send_reply)。
+    // 存档频道 room (chat:<topic_id>) 只发新帖; 帖子 room 不走这里 (chat:<opk…> 不在 topics, 由 index 的
+    // roomMirror 走 send_reply; topic:<T>/<P> 在上面)。
     return sendTopicPost(client, log, topicId, content).then(() => ({ headers: { req_id: "" } } as WsFrame));
   };
 };
 
 export interface ChannelHuman {
-  /** 落进哪个 room: chat:<topic_id> (频道) 或 chat:<opk…> (帖子)。 */
+  /** 落进哪个 room: topic:<T>/<P> (新口径) 或存量帖子 room (chat:<opk…> / 曾被 room_bind 的承载 room)。
+   *  行不带 post / src —— room 自己就是那个帖子。 */
   room: string;
-  /** 频道 room 的行带它所属的帖子 id (帖子 room 的行不带 —— room 自己就是那个帖子)。 */
-  post?: string;
   author: string;
   text: string;
   at: number;
@@ -465,14 +503,13 @@ export interface ChannelHuman {
 export interface ChannelFacts {
   /** topic_at_bot 等原生帧认领的时长 (ms); 缺省 3000, 测试注入短值。 */
   nativeWaitMs?: number;
-  /** 人话落 room (入站写账本的唯一出口)。 */
+  /** 人话落 room (入站写账本的唯一出口)。room 不在由 ingest 开 (founder = 频道 host 身份在本 room 的实例)。 */
   ingest?: (e: ChannelHuman) => void;
-  /** 帖子源首触 (第一次配上 opk): **只通知, 不建 room** —— 人话落频道 room 交 host 判定
-   *  (docs/room/multi-source-binding.md §4.1); 帖子 room 由 host 的 room_bind 或超时兜底
-   *  (daemon 的另起) 才诞生。 */
-  postTouched?: (topicId: string, postBase: string) => void;
-  /** 频道第一次见到: 建频道 room + 起 monitor。 */
-  channelSeen?: (topicId: string) => void;
+  /** (频道, 帖子, opk?) → 落哪个 room (topicRoomOf 的接线: 索引 / 账本由 daemon 注入)。
+   *  缺省 = 不看索引与账本, 只按配对表 + 新口径 (测试桩 / 旧接线)。 */
+  roomFor?: (topicId: string, postId: string, opk?: string) => string;
+  /** 这个 post_id 是机器人自己刚发的新帖 (channelNewPost 记的最近自发集合): 它的 topic_event 不当人话落行。 */
+  selfPost?: (postId: string) => boolean;
 }
 
 export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger, facts?: ChannelFacts): void => {
@@ -485,12 +522,15 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
   /** 落一行人话; 没有 ingest (旧接线 / 测试桩) 就只记日志 —— 静默丢话是不允许的。 */
   const ingest = (e: ChannelHuman): void => {
     if (!facts?.ingest) {
-      log.warn({ room: e.room, post: e.post, msgid: e.msgid }, "channel: no room ingest wired, message not delivered");
+      log.warn({ room: e.room, msgid: e.msgid }, "channel: no room ingest wired, message not delivered");
       return;
     }
-    log.info({ room: e.room, post: e.post, msgid: e.msgid, len: e.text.length, mention: e.mention }, "channel rx");
+    log.info({ room: e.room, msgid: e.msgid, len: e.text.length, mention: e.mention }, "channel rx");
     facts.ingest(e);
   };
+  const roomFor = (topicId: string, postId: string, opk?: string): string =>
+    facts?.roomFor?.(topicId, postId, opk)
+    ?? topicRoomOf({ cfg, topic: topicId, post: postId, ...(opk ? { opk } : {}), roomOfSource: () => undefined, roomExists: () => false });
 
   const onTopic = async (frame: any): Promise<void> => {
     const body = frame?.body ?? {};
@@ -503,12 +543,11 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     if (!topicId) return;
     registerTopic(topicId);
     if (asker) lastAsker.set(topicId, asker);
-    facts?.channelSeen?.(topicId);
+    // 频道没有 room, 只记「已知频道」名单 (引导 / 绑定 / 图上框标题认频道靠它)。
+    learnChannel(cfg, topicId);
     // 第一次见到的频道从官方补最近 N 条 (reload / 断线空窗期的事件本地没有)。
     void backfill(client, cfg, log, topicId).catch((e: Error) => log.warn({ err: e.message, topicId }, "channel backfill failed"));
     log.info({ topicId, type: ev.eventtype, postId: ev.topic_event?.post_id ?? ev.topic_reply_event?.post_id ?? ev.topic_at_bot?.post_id, asker }, "channel event");
-
-    const channelRoom = "chat:" + topicId;
 
     if (ev.eventtype === "topic_at_bot") {
       const postId = String(ev.topic_at_bot?.post_id ?? "");
@@ -522,10 +561,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       if (native) {
         // 原生帧已把这句话投给帖子会话 (= 帖子 room 的那条人话); 桥只记账。
         // 配上的这一对就是「帖子 → 频道」的唯一判据 (原生帧里没有频道标识)。
-        if (learnChannelPost(cfg, native, topicId, postId)) {
-          log.info({ topicId, post: native }, "channel post learned");
-          facts?.postTouched?.(topicId, native);
-        }
+        if (learnChannelPost(cfg, native, topicId, postId)) log.info({ topicId, post: native }, "channel post learned");
         log.info({ topicId, postId, msgid, nativeChat: native }, "channel at_bot: carried by native frame, bridge skip");
         await record(cfg, topicId, postMsg(await fetchPost(client, topicId, postId, log)));
         if (replyId) await record(cfg, topicId, replyMsg(await fetchReply(client, topicId, postId, replyId, log), postId));
@@ -539,12 +575,9 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       await record(cfg, topicId, postMsg(post, reply ? NO_MEDIA : media));
       if (reply) await record(cfg, topicId, replyMsg(reply, postId, media));
       const text = cleanContent(hit?.content) || "（在频道里 @ 了你，没有正文）";
-      // 兜底: 帖子已配对 → 帖子 room (它就是那个帖子); 没配对 → 频道 room。这一路是 topic_at_bot
-      // (人 @ 了机器人), 落到哪个 room 都一样记 mention:"bot" —— 直达 host, 不交给 room 的 monitor。
-      const paired = postBaseOf(cfg, topicId, postId);
-      ingest(paired
-        ? { room: paired, author: asker, text, at, msgid, mention: "bot", ...mediaOf(media) }
-        : { room: channelRoom, post: postId, author: asker, text, at, msgid, mention: "bot", ...mediaOf(media) });
+      // 兜底: 企微没推原生帧 → 桥自己落一行, 与原生路径同一个 topic room; 这一路是 topic_at_bot
+      // (人 @ 了机器人), 一样记 mention:"bot" —— 直达 host, 不交给 room 的 perceptron。
+      ingest({ room: roomFor(topicId, postId), author: asker, text, at, msgid, mention: "bot", ...mediaOf(media) });
       return;
     }
 
@@ -562,13 +595,18 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       }
       seen.add(msgid);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
+      // 双保险 (主判据是上面的 !asker): 自己刚发的新帖 —— 话已经由 chat_say 记进它的 room 了。
+      if (facts?.selfPost?.(postId)) {
+        log.info({ topicId, postId, msgid }, "channel topic_event skipped: self-posted");
+        return;
+      }
       const post = await fetchPost(client, topicId, postId, log);
       const media = await downloadMedia(cfg, log, post, msgid);
       await record(cfg, topicId, postMsg(post, media));
       const text = cleanContent(post?.content);
       if (!text && !media.images.length && !media.files.length) return;
-      // 没被 @ 的新帖: 频道 room 的一行人话 (带 post); 不 @ 机器人就不过 host, 由 monitor 判激活。
-      ingest({ room: channelRoom, post: postId, author: asker, text, at, msgid, ...mediaOf(media) });
+      // 没被 @ 的新帖: 它自己 room 的第一行人话 (room 不在就开); 不 @ 机器人就不过 host, 由 perceptron 判激活。
+      ingest({ room: roomFor(topicId, postId), author: asker, text, at, msgid, ...mediaOf(media) });
       return;
     }
 
@@ -588,11 +626,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       await record(cfg, topicId, replyMsg(reply, postId, media));
       const text = cleanContent(reply?.content);
       if (!text && !media.images.length && !media.files.length) return;
-      // 评论: 帖子已配对 → 帖子 room; 还没配对 → 频道 room (带 post)。
-      const paired = postBaseOf(cfg, topicId, postId);
-      ingest(paired
-        ? { room: paired, author: asker, text, at, msgid, ...mediaOf(media) }
-        : { room: channelRoom, post: postId, author: asker, text, at, msgid, ...mediaOf(media) });
+      // 评论: 落它所属帖子的 room (不再需要先配对出 opk)。
+      ingest({ room: roomFor(topicId, postId), author: asker, text, at, msgid, ...mediaOf(media) });
       return;
     }
 

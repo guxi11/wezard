@@ -398,7 +398,6 @@ export const RECEPTION_DENY: Readonly<Record<string, string>> = {
   "POST /mirror/workspace": "换工作区",
   "POST /room/bind": "把信息源绑进 room",
   "POST /room/unbind": "解绑信息源",
-  "POST /room/fork": "另起帖子 room",
   "POST /room/name": "给 room 改名 / 改公告",
   "POST /room/invite": "邀请别人进 room",
   "POST /tasks/schedule": "排定时任务",

@@ -156,7 +156,7 @@ const rec = (over: Partial<ExtRequest> = {}): ExtRequest =>
 {
   const isBound = (r: string) => r.startsWith("chat:") || r.startsWith("user:");
   const act = (o: Partial<ReceptionAction> & { route: string }) => ({ selfName: "recv", ...o });
-  for (const route of ["POST /config/set", "POST /mirror/workspace", "POST /room/bind", "POST /room/unbind", "POST /room/fork", "POST /room/name", "POST /room/invite", "POST /tasks/schedule", "POST /tasks/cancel"])
+  for (const route of ["POST /config/set", "POST /mirror/workspace", "POST /room/bind", "POST /room/unbind", "POST /room/name", "POST /room/invite", "POST /tasks/schedule", "POST /tasks/cancel"])
     assert.ok(receptionDenial(act({ route }), isBound), route + " 一律拒");
   assert.ok(receptionDenial(act({ route: "POST /wizard/clone", inherit: true }), isBound), "clone_wizard 拒");
   assert.equal(receptionDenial(act({ route: "POST /wizard/clone", inherit: false }), isBound), undefined, "spawn_wizard 放行");

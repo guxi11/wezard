@@ -1,8 +1,8 @@
 // 频道换绑到一个工作区 (人 2026-11-23: 「绑定工作区为 cc-wecom」)。
 //
 // 频道 = 一条 (steward, workspace) 的类绑定 (wrc.channel.steward.<topic> 存**类名**)。
-// 「换绑到目录 D」= 找到 / 新建 D 的管家类 → 写频道表 → 频道 room 与它每个帖子 room 里坐上
-// **新类在本 room 的实例**。换绑之后这个频道的管家身份就是 D 的那个类: 各 room 的旧管家不再是
+// 「换绑到目录 D」= 找到 / 新建 D 的管家类 → 写频道表 → 该频道每个 topic room (含旧 chat:<opk> 帖子
+// room; 频道自己没有 room, 存档频道 room 不动) 里坐上**新类在本 room 的实例**。换绑之后这个频道的管家身份就是 D 的那个类: 各 room 的旧管家不再是
 // 本 room 的 host (手闸 / 宪章随之不再算它), 但它**不离开 room** —— 它手上可能还有没交代的件,
 // leave 会把它们全部 canceled (那是人的提问, 见 leaveOps)。
 //
@@ -13,7 +13,7 @@
 import type { Config } from "../shared/config.js";
 import { DAEMON, applyOp, roomHost, sameWho, whoKey, type RoomOp, type RoomState } from "../shared/room.js";
 import { baseOfKey } from "../shared/session-label.js";
-import { channelOf, postsOfChannel } from "./channel-posts.js";
+import { channelOf, topicRoomsOf } from "./channel-posts.js";
 import { instanceName, normPath, validClassName } from "./classes.js";
 import { bindChannelSteward, validateWorkspace } from "./onboarding.js";
 import { anchorOf, identityOf, type WizardStore } from "./wizard.js";
@@ -25,6 +25,8 @@ export interface ChannelRebindArgs {
   sourcePath: string;
   store: WizardStore;
   stateOf: (room: string) => RoomState | undefined;
+  /** 账本里现有的全部 room id (topic room 从中按频道筛)。 */
+  roomIds: () => readonly string[];
   write: (room: string, ops: RoomOp[]) => void;
   /** 裸 topic_id (频道 id, 不是帖子 opk… 群 id)。 */
   topicId: string;
@@ -103,11 +105,10 @@ export const rebindChannel = (a: ChannelRebindArgs): ChannelRebindResult => {
     createdClass = true;
   }
 
-  // 频道表 + 帖子级的旧绑定 (同频道只留一条绑定)。
-  const posts = postsOfChannel(a.cfg, topicId);
-  const rooms = [base, ...posts];
+  // 频道表 + 帖子级的旧绑定 (同频道只留一条绑定); 座位只给 topic room。
+  const rooms = topicRoomsOf(a.cfg, topicId, a.roomIds());
   if (((a.cfg.wrc.channel.steward ?? {})[topicId] ?? "") !== cls.name) {
-    bindChannelSteward(a.cfg, a.sourcePath, topicId, cls.name, rooms.filter((b) => !!appointedSteward(a.cfg, b)));
+    bindChannelSteward(a.cfg, a.sourcePath, topicId, cls.name, [base, ...rooms].filter((b) => !!appointedSteward(a.cfg, b)));
   }
 
   const seats: ChannelRebindSeat[] = [];

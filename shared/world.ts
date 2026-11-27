@@ -115,6 +115,9 @@ export interface WorldFacts {
   /** room 账本的快照 (daemon 现扫, svr 随快照带): 关系图与 room 视图的唯一来源。
    *  老 daemon 没有 = 只有轮次视图, 图退化成家谱。 */
   rooms?: readonly RoomFact[];
+  /** 已知频道 (频道没有 room, 但绑了 host 身份的频道也要有一个框): daemon 现算, svr 随快照带。
+   *  /api/world 的 channels = 这份种子 ∪ 从 rooms 归并出来的 (带各自名下的 room)。 */
+  channels?: ReadonlyArray<{ id: string; name: string; host?: { identity: string; name: string } }>;
   /** 名字表: who.id → 显示名 (wizard 是 uid, 人是 userid)。room 成员只有 id, 名字走这里。 */
   names?: Readonly<Record<string, string>>;
   /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */

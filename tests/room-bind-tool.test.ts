@@ -1,15 +1,18 @@
 // 源 ↔ room 绑定 (multi-source-binding P3): 工具面的硬门与权限 (planBind / planUnbind)、
-// 首触兜底扫描 (pendingFirstTouches)、boot 频道成员补拉 (planChannelBackfill), 以及
-// bind/unbind 走账本后的索引与 lazy 回落。
+// 以及 bind/unbind 走账本后的索引与 lazy 回落。
+// 2026-11-27 (docs/evolve/channel-topic-rooms.md): 频道帖子每帖一个 topic room, 帖子源不能再 bind (400);
+// 存量的帖子源 bind op 照读 (索引 / unbind 仍有效)。
+// 删除说明: 首触兜底扫描 (pendingFirstTouches)、boot 频道成员补拉 (planChannelBackfill)、room_fork 判定
+// (planFork) 随首触接待一起删除, 对应的 ④ ⑤ ⑧ 段不再存在; ① 的正常路径改用群源。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigSchema } from "../shared/config.js";
-import { applyOp, DAEMON, emptyRoom, judge, type MsgRow, type RoomState, type Who } from "../shared/room.js";
+import { applyOp, DAEMON, emptyRoom, judge, type RoomState, type Who } from "../shared/room.js";
 import { openRoomStore } from "../daemon/rooms.js";
 import { learnChannelPost } from "../daemon/channel-posts.js";
-import { bindCandidates, planBind, planChannelBackfill, planFork, planUnbind, pendingFirstTouches, sourceRoomOf } from "../daemon/room-bind.js";
+import { bindableSource, bindCandidates, isChannelSource, planBind, planUnbind, sourceRoomOf } from "../daemon/room-bind.js";
 import { stewardRoute } from "../daemon/steward.js";
 import { H, W, uid } from "./room-fixture.js";
 
@@ -42,7 +45,7 @@ const ctx = (over: Partial<{ roomOf: (s: string) => string | undefined; gateOk: 
   stateOf: over.stateOf ?? ((r: string) => (r === ROOM_R ? roomS : undefined)),
   gate: over.gateOk === false ? { ok: false, reason: "对账失败" } : { ok: true },
 });
-const bind = (over: Partial<Parameters<typeof planBind>[0]> = {}) => planBind({ ...ctx(), room: ROOM_R, source: SRC_POST, actor: host, ...over }, 5_000);
+const bind = (over: Partial<Parameters<typeof planBind>[0]> = {}) => planBind({ ...ctx(), room: ROOM_R, source: GROUP, actor: host, ...over }, 5_000);
 
 // 闸关 → 503
 const closed = bind({ gate: { ok: false, reason: "x" } } as never);
@@ -51,9 +54,19 @@ assert.equal((closed as { status: number }).status, 503);
 // ⑤ 源 = 目标主源
 assert.equal(bind({ source: ROOM_R }).ok, false);
 assert.match((bind({ source: ROOM_R }) as { reason: string }).reason, /主源/);
-// ④ 源类型: 单聊 / 频道自己都不行
+// ④ 源类型: 只有群。单聊 / 频道键 / 频道帖子 (新旧口径) 都不行 —— 帖子源 400 且说明「每帖一个 room」。
 assert.match((bind({ source: "user:U1" }) as { reason: string }).reason, /不能绑/);
-assert.match((bind({ source: CHAN }) as { reason: string }).reason, /不能绑/);
+for (const src of [CHAN, SRC_POST, "topic:T1/p1"]) {
+  const v = bind({ source: src });
+  assert.equal(v.ok, false, src + " 不能当源");
+  assert.equal((v as { status: number }).status, 400, src + " → 400");
+  assert.match((v as { reason: string }).reason, /每个帖子自己就是一个 room/, src + " 的拒绝说明");
+}
+assert.equal(bindableSource(cfg, GROUP), true, "群源仍可绑");
+assert.equal(bindableSource(cfg, SRC_POST), false);
+assert.equal(isChannelSource(cfg, "topic:T1/p1"), true, "topic room id 一眼认出, 不查映射");
+assert.equal(isChannelSource(cfg, SRC_POST), true, "旧帖子 base 靠配对表认出");
+assert.equal(isChannelSource(cfg, GROUP), false);
 // ③ room 不存在 / 没有 host
 assert.equal((bind({ room: "chat:nope" }) as { status: number }).status, 404);
 const emptyS = chanRoom("chat:wrE", [], "wecom-group");
@@ -72,11 +85,11 @@ assert.equal(ok.ok, true);
 if (ok.ok) {
   assert.equal(ok.op.op, "bind");
   assert.equal((ok.op as { room: string }).room, ROOM_R);
-  assert.equal((ok.op as { source: string }).source, SRC_POST);
+  assert.equal((ok.op as { source: string }).source, GROUP);
   assert.equal((ok.op as { by: Who }).by.id, host.id);
 }
 
-// ── ② planUnbind ─────────────────────────────────────────────────────
+// ── ② planUnbind (存量帖子源 bind 仍可解) ──────────────────────────────
 const withBinding = ((): RoomState => {
   const s = chanRoom(ROOM_R, [host], "wecom-group");
   applyOp(s, { op: "bind", at: 4_000, room: ROOM_R, source: SRC_POST, by: host });
@@ -95,76 +108,15 @@ assert.equal(unbind({ gate: { ok: false, reason: "x" } } as never).ok, false);
 const store = openRoomStore(join(ROOT, "state", "rooms"));
 store.append(ROOM_R, [{ op: "open", at: 1, room: ROOM_R, kind: "wecom-group", by: DAEMON }]);
 store.append(ROOM_R, [{ op: "join", at: 2, room: ROOM_R, who: host, ord: 1, via: "founder", by: DAEMON }]);
-store.append(ROOM_R, [ok.ok ? ok.op : { op: "bind", at: 3, room: ROOM_R, source: SRC_POST, by: host }]);
-assert.equal(store.roomOfSource(SRC_POST), ROOM_R, "bind 后索引指向目标 room");
+// 存量: 早先写进账本的帖子源 bind op 照读 (新的帖子源 bind 已拒, 这条是历史事实)。
+store.append(ROOM_R, [{ op: "bind", at: 3, room: ROOM_R, source: SRC_POST, by: host }]);
+assert.equal(store.roomOfSource(SRC_POST), ROOM_R, "存量 bind 后索引指向目标 room");
 store.append(ROOM_R, [{ op: "unbind", at: 4, room: ROOM_R, source: SRC_POST, by: host }]);
 assert.equal(store.roomOfSource(SRC_POST), undefined, "unbind 后回落恒等");
 // 重开 store 从账本重放还是同一个结论 (内存态 = 盘上重放)
 const store2 = openRoomStore(join(ROOT, "state", "rooms"));
 assert.equal(store2.roomOfSource(SRC_POST), undefined);
 assert.equal(store2.bindingGate().ok, true);
-
-// ── ④ 首触兜底扫描 (pendingFirstTouches) ─────────────────────────────
-const firstTouchRow = (s: RoomState, text: string, at: number): MsgRow => {
-  const v = judge(s, { author: H("u1"), kind: "say", text, origin: "inbound", post: "p1", mention: "bot", src: SRC_POST },
-    { now: at });
-  assert.equal(v.ok, true);
-  if (v.ok) applyOp(s, v.row);
-  return v.ok ? v.row : (undefined as never);
-};
-const s4 = chanRoom(CHAN, [host]);
-const row1 = firstTouchRow(s4, "@wezard 这句是我的", 10_000);
-const scan = (over: Partial<Parameters<typeof pendingFirstTouches>[0]> = {}) => pendingFirstTouches({
-  cfg, states: [s4], roomOfSource: () => undefined, stateOf: (r) => (r === CHAN ? s4 : undefined),
-  now: 10_000 + 11 * 60_000, timeoutMs: 10 * 60_000, ...over,
-});
-assert.equal(scan().length, 1, "超时未判定 = 待另起");
-assert.equal(scan()[0]!.source, SRC_POST);
-assert.equal(scan()[0]!.topicId, "T1");
-assert.equal(scan({ now: 10_000 + 9 * 60_000 }).length, 0, "窗口内不兜底");
-assert.equal(scan({ roomOfSource: () => ROOM_R }).length, 0, "已绑 (哪怕别处) 不兜底");
-assert.equal(scan({ stateOf: (r) => (r === CHAN ? s4 : r === SRC_POST ? chanRoom(SRC_POST, []) : undefined) }).length, 0, "帖子 room 已诞生不再兜底");
-assert.equal(scan({ timeoutMs: 0 }).length, 0, "0 = 关");
-// 引导期 (没有 wizard host) 不兜底
-assert.equal(scan({ states: [chanRoom(CHAN, [H("u1")])] }).length, 0);
-// 没有 src 的频道行 / 别的频道帖子不算
-const s4b = chanRoom(CHAN, [host]);
-const plain = judge(s4b, { author: H("u1"), kind: "say", text: "没带源", origin: "inbound", post: "p1" }, { now: 10_000 });
-assert.equal(plain.ok, true);
-if (plain.ok) applyOp(s4b, plain.row);
-assert.equal(scan({ states: [s4b] }).length, 0);
-// 同源多条取最近一条 (窗口从最近那条算)
-const s4c = chanRoom(CHAN, [host]);
-firstTouchRow(s4c, "老话", 1_000);
-firstTouchRow(s4c, "新话", 10_000);
-assert.equal(scan({ states: [s4c], now: 10_000 + 5 * 60_000 }).length, 0, "最近一条还在窗口内");
-assert.equal(scan({ states: [s4c], now: 10_000 + 11 * 60_000 }).length, 1);
-assert.equal(row1.src, SRC_POST, "人话行写死 src");
-assert.equal(row1.post, "p1");
-assert.equal(row1.mention, "bot");
-
-// ── ⑤ boot 频道成员补拉 (planChannelBackfill) ────────────────────────
-const postHost = W(uid(2));
-const ch = chanRoom(CHAN, [host]);
-const post = chanRoom(SRC_POST, [postHost], "wecom-group");
-const backfill = (over: Partial<Parameters<typeof planChannelBackfill>[0]> = {}) => planChannelBackfill({
-  cfg, rooms: [SRC_POST, CHAN], stateOf: (r) => (r === CHAN ? ch : r === SRC_POST ? post : undefined),
-  targetOf: (u) => (u === postHost.id ? ".inst" : undefined), ...over,
-});
-assert.equal(backfill().length, 1, "帖子 host 不在频道成员表 → 补拉");
-assert.equal(backfill()[0]!.channelRoom, CHAN);
-assert.equal(backfill()[0]!.who.id, postHost.id);
-// 已在成员表 = 幂等不出
-const ch2 = chanRoom(CHAN, [host, postHost]);
-assert.equal(backfill({ stateOf: (r) => (r === CHAN ? ch2 : r === SRC_POST ? post : undefined) }).length, 0);
-// 实例不在册 (stop / forget) 跳过
-assert.equal(backfill({ targetOf: () => undefined }).length, 0);
-// 频道没有 wizard host (引导期) 不拉
-const chGuide = chanRoom(CHAN, [H("u1")]);
-assert.equal(backfill({ stateOf: (r) => (r === CHAN ? chGuide : r === SRC_POST ? post : undefined) }).length, 0);
-// 帖子 room 没有 host 不拉
-assert.equal(backfill({ stateOf: (r) => (r === CHAN ? ch : r === SRC_POST ? chanRoom(SRC_POST, [], "wecom-group") : undefined) }).length, 0);
-
 
 // ── ⑥ 群源: 源 → room 落点 + steward 接待 (P4 §4.1) ───────────────────
 const gRoom = chanRoom(GROUP, [W(uid(3))], "wecom-group");
@@ -218,23 +170,5 @@ const rep2 = cand({ states: [sPrev], text: "", asker: "" });
 assert.ok(rep2.candidates[0]!.evidence.some((e) => e.includes("近期接待")));
 // busyWindowMin=0 = 不看活跃度 → 死 room 不 veto
 assert.equal(cand({ states: [sDead], busyWindowMin: 0 }).candidates[0]!.veto.length, 0);
-
-// ── ⑧ room_fork 判定 (显式另起) ─────────────────────────────────────
-const chF = chanRoom("chat:T1", [W(uid(1))]);
-const ft = judge(chF, { author: H("u1"), kind: "say", text: "首触", origin: "inbound", post: "p1", src: SRC_POST }, { now: T0 });
-assert.equal(ft.ok, true);
-if (ft.ok) applyOp(chF, ft.row);
-const fork = (over: Partial<Parameters<typeof planFork>[0]> = {}) => planFork({
-  cfg, source: SRC_POST, actor: W(uid(1)), stateOf: (r) => (r === "chat:T1" ? chF : undefined), roomOfSource: () => undefined, ...over,
-});
-assert.equal(fork().ok, true, "频道 host + 首触 → 可另起");
-assert.equal((fork({ actor: W(uid(9)) }) as { status: number }).status, 403, "非频道 host 403");
-assert.equal((fork({ source: GROUP }) as { status: number }).status, 400, "群源不能另起");
-assert.equal((fork({ stateOf: () => undefined }) as { status: number }).status, 404, "频道 room 不在 404");
-assert.equal((fork({ roomOfSource: () => ROOM_R }) as { status: number }).status, 409, "已绑 → 409");
-assert.equal((fork({ stateOf: (r) => (r === "chat:T1" ? chF : r === SRC_POST ? chanRoom(SRC_POST, []) : undefined) }) as { status: number }).status, 409, "帖子 room 已诞生 → 409");
-const chNoTouch = chanRoom("chat:T1", [W(uid(1))]);
-assert.equal((fork({ stateOf: (r) => (r === "chat:T1" ? chNoTouch : undefined) }) as { status: number }).status, 409, "没首触 → 409");
-assert.equal((fork({ actor: H("u1") }).ok), true, "人可另起");
 
 console.log("room-bind-tool ok");

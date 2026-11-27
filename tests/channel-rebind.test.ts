@@ -1,6 +1,7 @@
 // 频道换绑 (人 2026-11-23: 「绑定工作区为 cc-wecom」)。
 //   ① 建 / 复用目录的管家类, 写频道表 (类名), 帖子级旧绑定清掉;
-//   ② 频道 room 与各帖子 room 坐上新类的**本 room** 实例, host 换人;
+//   ② 该频道每个 topic room (新口径 topic:<T>/<P> + 存量 chat:<opk> 帖子 room) 坐上新类的**本 room** 实例,
+//      host 换人; 存档频道 room (chat:<topic_id>, 2026-11-27 起只读) 不动、也不要求它存在;
 //   ③ 旧 host 不离开 room、手上没交代的件一条都不 canceled (leave 会全关);
 //   ④ 幂等: 再跑一遍不建类、不重复领号、不写多余 op。
 import assert from "node:assert/strict";
@@ -17,6 +18,7 @@ const TOPIC = "CiReBindTestAAAA";
 const BASE = "chat:" + TOPIC;
 const POST_A = "chat:opkReBindA";
 const POST_B = "chat:opkReBindB";
+const TOPIC_C = "topic:" + TOPIC + "/postC";      // 新口径 topic room
 const OLD_WS = "/tmp/nope-old-ws";
 const W = (id: string) => ({ kind: "wizard" as const, id });
 
@@ -51,7 +53,7 @@ const world = (tag: string) => {
     store.upsert(room + "#monitor", { identity: room + "#monitor", kind: "monitor", name: "monitor-" + ord });
     seat[room] = store.get(target)!.uid!;
   }
-  const rooms = new Map<string, RoomState>();
+  const rooms = new Map<string, RoomState>();   // BASE = 存档频道 room (不收入站, 换绑不动)
   const open = (id: string) => { const s = emptyRoom(id); applyOp(s, { op: "open", at: 1_000, room: id, kind: "wecom-group", by: DAEMON }); rooms.set(id, s); return s; };
   const seatJoin = (s: RoomState, who: { kind: "wizard"; id: string }, ord: number, role?: "monitor") =>
     applyOp(s, { op: "join", at: 1_000, room: s.id, who, ord, via: "founder", by: DAEMON, ...(role ? { role } : {}) });
@@ -69,6 +71,8 @@ const world = (tag: string) => {
   // 帖子 B: 旧 host 1 号座。
   const pb = open(POST_B);
   seatJoin(pb, W(seat[POST_B]!), 1);
+  // topic room C (新口径): 还没有任何 host。
+  open(TOPIC_C);
   return { dir, state, newWs, cfg, src, store, classes, rooms, seat };
 };
 
@@ -78,6 +82,7 @@ const runRebind = (w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
   return rebindChannel({
     cfg: w.cfg, sourcePath: w.src, store: w.store,
     stateOf: (room) => w.rooms.get(room),
+    roomIds: () => [...w.rooms.keys()],
     write: (room, ops) => { ops.forEach((o) => applyOp(w.rooms.get(room)!, o)); writes.push(room); },
     topicId: TOPIC, workspace: w.newWs, name: "cc-wecom",
     ...over,
@@ -91,27 +96,30 @@ const runRebind = (w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.createdClass, true);
   assert.equal(r.className, "cc-wecom");
-  assert.equal(r.classId, BASE, "新类的锚点 = 频道 room 的默认会话");
+  assert.equal(r.classId, BASE, "新类的锚点 = 频道键 chat:<topic_id> 上的身份记录 (频道没有 room, 它只是身份锚点)");
   assert.equal(w.cfg.wrc.channel.steward?.[TOPIC], "cc-wecom", "频道表写类名");
   assert.equal(w.classes.byName("cc-wecom")!.workspace, w.newWs, "类的工作区 = 目标目录");
   assert.equal(w.classes.byName("cc-wecom")!.description, "wezard 群管家: 分派与验收", "职责从旧绑定的锚点抄一份");
-  assert.deepEqual(r.rooms.map((f) => f.room), [BASE, POST_A, POST_B]);
+  assert.deepEqual(r.rooms.map((f) => f.room), [POST_A, POST_B, TOPIC_C], "只遍历 topic room (旧帖子 room + 新 topic room), 不含存档频道 room");
 
-  // 三个 room: host 都是新类的本 room 实例, 名字 <类名>-N, 序号 1..3。
+  // 三个 room: host 都是新类的本 room 实例, 名字 <类名>-N (1 号是频道键上的身份锚点)。
   const names = r.rooms.map((f) => w.store.get(f.seat)!.name);
-  assert.deepEqual(names, ["cc-wecom-1", "cc-wecom-2", "cc-wecom-3"]);
-  assert.deepEqual(r.rooms.map((f) => w.store.get(f.seat)!.ordinal), [1, 2, 3]);
+  assert.deepEqual(names, ["cc-wecom-2", "cc-wecom-3", "cc-wecom-4"]);
+  assert.deepEqual(r.rooms.map((f) => w.store.get(f.seat)!.ordinal), [2, 3, 4]);
   for (const f of r.rooms) {
     const s = w.rooms.get(f.room)!;
     assert.equal(roomHost(s)!.id, w.store.get(f.seat)!.uid, f.room + ": host 换成新实例");
     assert.equal(w.store.get(f.seat)!.identity, BASE, "实例的身份 = 类 id");
   }
-  // 旧 host 还在 room 里 (不是 members 里被删), 手上那件没交代的还在。
+  // 存档频道 room 一个字节没动: 旧 host 还在, 手上那件没交代的还在, 也没有新座位。
   const ch = w.rooms.get(BASE)!;
-  assert.ok([...ch.members.values()].some((m) => m.who.id === w.seat[BASE]), "旧 host 没有离开频道 room");
+  assert.equal(ch.members.size, 2, "存档频道 room 没坐新实例");
+  assert.equal(roomHost(ch)!.id, w.seat[BASE], "存档频道 room 的 host 还是旧的");
   const duty = openDuties(ch).find((d) => d.msg === BASE + ".1");
   assert.ok(duty && !duty.closed, "旧 host 手上的人话没被 canceled");
   assert.equal(duty!.slot, "wizard:" + w.seat[BASE], "件还在旧 host 名下 (换绑不动别人的账)");
+  // 旧帖子 room 里的旧 host 也还在 (只是不再是 host)。
+  assert.ok([...w.rooms.get(POST_A)!.members.values()].some((m) => m.who.id === w.seat[POST_A]), "旧 host 没有离开帖子 room");
 
   // 旧实例一个字节没动。
   assert.equal(w.store.get(BASE + "#wezard-16")!.name, "wezard-16");
@@ -123,10 +131,10 @@ const runRebind = (w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
   assert.equal(again.createdClass, false, "第二次不再建类");
   assert.deepEqual(again.rooms.map((f) => f.seat), r.rooms.map((f) => f.seat), "复用同一批实例");
   assert.equal(writes.length, 0, "没有新 op");
-  assert.equal(roomHost(w.rooms.get(BASE)!)!.id, w.store.get(r.rooms[0]!.seat)!.uid);
+  assert.equal(roomHost(w.rooms.get(TOPIC_C)!)!.id, w.store.get(r.rooms[2]!.seat)!.uid);
 }
 
-// ── ② 目录已有类: 复用 (不建新类), 频道 room 只是领一个新实例 ─────────────
+// ── ② 目录已有类: 复用 (不建新类), 每个 topic room 只是领一个新实例 ───────────
 {
   const w = world("reuse");
   const before = w.classes.byName("wezard")!;
@@ -138,6 +146,7 @@ const runRebind = (w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
   assert.equal(r.className, "repo", "按 <bot, role, workspace> 复用已有类");
   assert.equal(w.classes.byName("wezard")!.id, before.id, "旧类不动");
   assert.equal(w.store.get(r.rooms[0]!.seat)!.name, "repo-2");
+  assert.equal(w.store.get(r.rooms[2]!.seat)!.name, "repo-4");
 }
 
 // ── ③ 拒绝: 同名的类在别的目录 / 不是频道 / 目录不存在 ─────────────────────
@@ -162,4 +171,13 @@ const runRebind = (w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
   const r = runRebind(w);
   assert.equal(r.ok, true, r.reason);
   assert.equal(w.cfg.chatPolicy?.[POST_A]?.steward, undefined, "帖子级旧绑定被清掉");
+}
+
+// ── ⑤ 频道没有任何 topic room: 只写频道表, 不要求有账本 (2026-11-27) ─────────
+{
+  const w = world("empty");
+  const r = runRebind(w, { roomIds: () => [BASE] });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.rooms, [], "没有 topic room 就没有座位要坐");
+  assert.equal(w.cfg.wrc.channel.steward?.[TOPIC], "cc-wecom", "频道表照写");
 }

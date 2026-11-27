@@ -15,9 +15,9 @@ export interface ChannelContextInput {
   /** 本地/官方搜索命中。 */
   hits?: ChannelMsg[];
   query?: string;
-  /** 判官的一句话理由。 */
+  /** 感知器的一句话理由。 */
   reason?: string;
-  /** 判官的意图识别: 这条消息想干什么。 */
+  /** 感知器的意图识别: 这条消息想干什么。 */
   intent?: string;
   /** 触发消息本身是评论时的 reply_id; 缺省 = 这次触发的就是帖子本身。 */
   replyId?: string;
@@ -76,8 +76,8 @@ export const formatChannelContext = (i: ChannelContextInput): string => {
     }
     if (shown < s.lines.length) out.push(`  …(另 ${s.lines.length - shown} 条没放下)`);
   }
-  if (i.reason) out.push(`[判官] ${clip(i.reason, 200)}`);
-  if (i.intent) out.push(`[判官] 意图: ${clip(i.intent, 200)}`);
+  if (i.reason) out.push(`[感知器] ${clip(i.reason, 200)}`);
+  if (i.intent) out.push(`[感知器] 意图: ${clip(i.intent, 200)}`);
   return out.join("\n");
 };
 
