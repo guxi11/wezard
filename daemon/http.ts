@@ -33,6 +33,8 @@ interface Ctx {
   roomStatus?: { get: () => Record<string, unknown> };
   /** 视图监听的结局: 实际口, 或 null (port=0 / 全被占 / 别的错)。链接根据它取口 (见 detail.ts setViewPort)。 */
   onView?: (port: number | null) => void;
+  /** 事件循环延迟 (daemon/loop-lag.ts); /status 展开成 eventLoopLagMs。缺省 = 不报。 */
+  loopLag?: { snapshot: () => { p99: number; max: number; maxSinceBoot: number; maxAt: number; sampledAt: number } };
 }
 
 /** 外部调用方的能力判据 (/status): 按名字查有没有, 别靠盘上目录之类的副作用猜。 */
@@ -45,6 +47,12 @@ const VERSION = ((): string => {
   const p = [join(HERE, "..", "package.json"), join(HERE, "..", "..", "package.json")].find(existsSync);
   try { return p ? String(JSON.parse(readFileSync(p, "utf8")).version ?? "") : ""; } catch { return ""; }
 })();
+
+// 此刻还在跑的路由 (key → 开始时刻)。事件循环被堵时, 嫌疑人几乎总在这张表里 —— loop-lag 告警带它出来。
+// MCP 工具走回环, 所以 `POST /mcp` 旁边会并排出现它真正调的那条路由 (如 POST /wizard/roster)。
+const inflight = new Map<symbol, { key: string; at: number }>();
+export const inflightRoutes = (now = Date.now()): string[] =>
+  [...inflight.values()].sort((a, b) => a.at - b.at).slice(0, 12).map((r) => `${r.key} ${now - r.at}ms`);
 
 type Handler = (req: IncomingMessage, res: ServerResponse, url: URL, ctx: Ctx) => Promise<void> | void;
 
@@ -71,6 +79,7 @@ export const statusBody = (
   ws: DaemonWs,
   sourcePath: string,
   roomStatus?: { get: () => Record<string, unknown> },
+  loopLag?: Ctx["loopLag"],
 ): Record<string, unknown> => {
   return {
     ok: true,
@@ -89,6 +98,8 @@ export const statusBody = (
     // room 模型增量 (修复单 §4): openDuties = 全部 room 未结 duty 总数 (pending 是审批卡, 别混);
     // watchdog = { failStreak, lastScanAt } — O1 拿它判「看门狗活着且没停摆」。
     ...(roomStatus ? roomStatus.get() : {}),
+    // 事件循环延迟 (ms): p99 / max 是最近一个采样窗口, maxSinceBoot 是开机以来最大的单发停顿。
+    ...(loopLag ? { eventLoopLagMs: loopLag.snapshot() } : {}),
   };
 };
 
@@ -96,8 +107,8 @@ const routes: Record<string, Handler> = {
   "GET /healthz": (_req, res, _url, { ws }) => {
     json(res, 200, { ok: true, wsConnected: ws.client.isConnected });
   },
-  "GET /status": (_req, res, _url, { cfg, ws, sourcePath, roomStatus }) => {
-    json(res, 200, statusBody(cfg, ws, sourcePath, roomStatus));
+  "GET /status": (_req, res, _url, { cfg, ws, sourcePath, roomStatus, loopLag }) => {
+    json(res, 200, statusBody(cfg, ws, sourcePath, roomStatus, loopLag));
   },
   "GET /pending": (_req, res) => {
     json(res, 200, { pending: listPending() });
@@ -172,11 +183,15 @@ export const startHttp = (ctx: Ctx): HttpServer => {
       json(res, 404, { error: "not_found", route: key });
       return;
     }
+    const token = Symbol(key);
+    inflight.set(token, { key, at: Date.now() });
     try {
       await handler(req, res, url, ctx);
     } catch (e) {
       ctx.log.error({ err: (e as Error).message, route: key }, "http handler failed");
       if (!res.headersSent) json(res, 500, { error: "internal", message: (e as Error).message });
+    } finally {
+      inflight.delete(token);
     }
   };
 

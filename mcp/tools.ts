@@ -92,14 +92,26 @@ const asReply = (r: { json: unknown; status: number }): DaemonReply => ({
   status: r.status,
 });
 
+// 回环调用的空闲超时 (daemon 多久不回半个字节算超时), 按路由分级。以前一律吃 Node 全局 agent 的 5s
+// 默认 (文案还写成 `timeout after undefinedms`): 名册 / 派活要同步读几百份 transcript, 本机就在
+// 3.4~5.8s, 超了线路由照跑 (账已落) 而调用方收到错误。慢路由给 60s, 其余 30s; 这只是兜底的上限。
+const SLOW_PATHS: ReadonlySet<string> = new Set([
+  "/dispatch", "/wizard/roster", "/wizard/route", "/wizard/clone", "/wizard/stop", "/wizard/model", "/wizard/whoami",
+  "/wizard/handoff-self", "/handoff", "/mirror/workspace", "/config/set", "/room/file", "/sessions/switch",
+]);
+const SLOW_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
+export const timeoutForPath = (path: string): number => (SLOW_PATHS.has(path) ? SLOW_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+
 const daemonPost = async (path: string, body: Record<string, unknown>): Promise<DaemonReply> =>
   asReply(await daemonRequest("POST", path, {
     // 口令每次现读: daemon 可能在本进程起来之后才生成它。
     headers: { [DAEMON_TOKEN_HEADER]: readDaemonToken() },
     body: { ...selfRef(), ...body },
+    timeoutMs: timeoutForPath(path),
   }));
 
-const daemonGet = async (path: string): Promise<DaemonReply> => asReply(await daemonRequest("GET", path));
+const daemonGet = async (path: string): Promise<DaemonReply> => asReply(await daemonRequest("GET", path, { timeoutMs: timeoutForPath(path) }));
 
 // Routes answer with either `reason` or `error`; `pick` narrows a payload that
 // is nested rather than spread at the top level.

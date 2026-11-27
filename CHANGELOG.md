@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **MCP 工具 `timeout after undefinedms` 止血 (admin 2026-11-27 628/631 经 `.wezard-1`)** — 根因: Node ≥19 的 `http.globalAgent` 默认带 `timeout: 5000`, `shared/daemon-client.ts` 的回环请求没传 `timeoutMs` 也吃它, daemon 5s 内没回半个字节 (`wizard_roster` / `delegate` 要同步读几百份 transcript, 本机实测 3.4~5.8s, 事件循环被堵时定时器先于读回调触发) 就报超时, 而路由其实照跑 (账已落) —— 于是「已落账但客户端报超时」, 文案还拼成 `undefinedms`。修: ① `daemonRequest` 改用专用 agent (`timeout:0, keepAlive:false`), 不传 `timeoutMs` = 不超时, 慢但成功; 显式 `timeoutMs` 的调用方 (hook / audit / ext / codex-hook) 行为不变; 超时文案带真实数字 `timeout after 300ms (no bytes from daemon; elapsed 302ms) GET /path`。② MCP 工具回环按路由分级: 慢路由 (`/dispatch` `/wizard/roster|route|clone|stop|model|whoami|handoff-self` `/handoff` `/mirror/workspace` `/config/set` `/room/file` `/sessions/switch`) 60s, 其余 30s (`mcp/tools.ts` `timeoutForPath`); `cli/wx.ts` / `cli/init.ts` 原先靠那个 5s 兜底, 现显式给 30s。③ 新增事件循环延迟监控 (`daemon/loop-lag.ts`, `monitorEventLoopDelay`): 每 10s 一个窗口, p99 > 500ms 或单发 max > 1000ms 打 warn 并带此刻在跑的路由 (`inflight`, 见 `http.ts` `inflightRoutes`), `/status` 新增 `eventLoopLagMs {p99,max,maxSinceBoot,maxAt,sampledAt}`。名册 / 派活本身的同步重活 (摘要重复读、无上限的 foreignPeers、无缓存) 留给第二阶段。测试: `tests/daemon-client-timeout.test.ts` / `tests/loop-lag.test.ts`。
+
 ## [3.0.4] - 2026-11-27
 
 ### Added

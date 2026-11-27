@@ -8,10 +8,13 @@ import { cliSocketPath } from "../shared/cli-socket.js";
 import { daemonRequest } from "../shared/daemon-client.js";
 
 type Json = Record<string, unknown>;
+// 以前靠 Node 全局 agent 的 5s 空闲超时兜底; 现在 daemonRequest 缺省不设超时, 人敲的命令要自己给个上限。
+const CLI_TIMEOUT_MS = 30_000;
 const call = async (method: "GET" | "POST", p: string, body?: unknown): Promise<Json> => {
   const r = await daemonRequest(method, p, {
     socketPath: cliSocketPath(),
     headers: { [DAEMON_TOKEN_HEADER]: readDaemonToken() },
+    timeoutMs: CLI_TIMEOUT_MS,
     ...(body === undefined ? {} : { body }),
   });
   return (r.json ?? { ok: false, reason: `HTTP ${r.status}` }) as Json;

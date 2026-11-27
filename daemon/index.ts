@@ -22,7 +22,8 @@ import { bindChatReach } from "./reach.js";
 import { kindOf, type SendMedia } from "./media.js";
 import { aibotSendMedia, uploadMediaId } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
-import { startHttp, json, readBody, type Handler } from "./http.js";
+import { startHttp, json, readBody, inflightRoutes, type Handler } from "./http.js";
+import { startLoopLagMonitor } from "./loop-lag.js";
 import { registerMcpHttp } from "./mcp-http.js";
 import { parsePath } from "../shared/config-meta.js";
 import { pickTier, tierOfModel, type TierProbe } from "../shared/model-tiers.js";
@@ -474,7 +475,9 @@ const main = async (): Promise<void> => {
     setViewPort(port);
     if (linksDead(cfg.daemon.detailPublicBase)) log.warn({ port: cfg.daemon.port }, "no view listener and no detailPublicBase/detailRemoteBase: chat messages go out without rolepage / detail links");
   };
-  const http = startHttp({ cfg, ws, log, sourcePath, roomStatus: roomStatusRef, onView });
+  // 主线程被同步重活堵住的证据: 超线 warn (带此刻在跑的路由) + /status.eventLoopLagMs。
+  const loopLag = startLoopLagMonitor({ log, inflight: inflightRoutes });
+  const http = startHttp({ cfg, ws, log, sourcePath, roomStatus: roomStatusRef, onView, loopLag });
   // 控制面 socket 绑不上 (活 daemon 在听 / 目录不是自己的 / 路径超长) = 起不来: 报原因后 exit 1,
   // systemd / launchd 重试, 对方退出后自然接手。视图 TCP 监听失败不走这里 (只告警)。
   await http.ready.catch((e: Error) => fatalExit(`control socket: ${e.message}`));

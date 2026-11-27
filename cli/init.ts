@@ -78,14 +78,18 @@ const syncKindFor = (kind: AgentKind): "claude" | "codebuddy" | "codex" =>
 // wrc.defaultCli: daemon active backend。与 sync.targets 多值独立。
 const backendNameFor = (kind: AgentKind): "claude" | "claude-internal" | "codebuddy" | "codex" => kind;
 
+// 以前靠 Node 全局 agent 的 5s 空闲超时兜底; 现在 daemonRequest 缺省不设超时, 人敲的命令要自己给个上限。
+const CLI_TIMEOUT_MS = 30_000;
+
 // ── HTTP helpers (talk to local daemon) ──────────────────────────────
 // 控制面是 daemon 的 unix socket (env WEZARD_DAEMON_SOCK → daemon.socket → 缺省)。
-const get = async (p: string): Promise<unknown> => (await daemonRequest("GET", p, { socketPath: cliSocketPath() })).json ?? {};
+const get = async (p: string): Promise<unknown> => (await daemonRequest("GET", p, { socketPath: cliSocketPath(), timeoutMs: CLI_TIMEOUT_MS })).json ?? {};
 const post = async (p: string, body: unknown): Promise<unknown> =>
   (await daemonRequest("POST", p, {
     socketPath: cliSocketPath(),
     headers: { [DAEMON_TOKEN_HEADER]: readDaemonToken() },
     body,
+    timeoutMs: CLI_TIMEOUT_MS,
   })).json ?? {};
 
 // ── Existing credentials ─────────────────────────────────────────────
