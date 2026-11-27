@@ -190,8 +190,11 @@
   };
   // 频道名: 人起的名字 (chatNames['chat:<topic_id>']) > 服务端给的 > id 前 8 位 (服务端没名字时回落成 `chat:<id>` 原串, 不当名字用); 与 shared/topic-room.ts topicRoomLabel 同口径。
   var channelName = function (id, name) {
-    var n = W.chatNames['chat:' + id] || name || '';
-    return n && n !== 'chat:' + id ? n : String(id).slice(0, 8);
+    // 服务端给的真名 (channels[].name / room.channel.name, 即 wrc.channel.name) 优先:
+    // chatNames 里可能只是从 cwd 派生的自动名 (仓目录名), 不该盖掉真频道名。
+    var real = name && name !== 'chat:' + id ? name : '';
+    var n = W.chatNames['chat:' + id] || '';
+    return real || (n && n !== 'chat:' + id ? n : String(id).slice(0, 8));
   };
   // 帖子 room 的帖号尾 6 位: 新 id `topic:<T>/<P>` 从 id 读, 旧 `chat:<opk>` 帖子 room 用服务端给的 rootPost。
   var postTail = function (r) {
@@ -397,7 +400,8 @@
     var touch = function (id, name, host) {
       if (!by[id]) { by[id] = { id: 'c:' + id, cid: id, name: '', host: null, rooms: [] }; order.push(id); }
       var f = by[id];
-      if (name && !f.name) f.name = name;
+      // 服务端的原始占位 (`chat:<id>`) 不算名字: 后面哪个来源有真名就用它。
+      if (name && name !== 'chat:' + id && (!f.name || f.name === 'chat:' + id)) f.name = name;
       if (host && !f.host) f.host = host;
       return f;
     };
