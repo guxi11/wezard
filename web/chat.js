@@ -239,8 +239,8 @@
     return r ? roomNameOf(r, r.label) : '';
   };
   // 帖子 (topic-post) 的图标: 全站单一来源 (roomIcon / roomIconOf / 图例), 换图标只改这里。
-  var POST_ICON = '🧵';
-  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 🧵 / 只有 wizard 的 room 🧙 (与 wizard 默认头像同一个 emoji)。
+  var POST_ICON = '📄';
+  // room 图标: 多人群聊 👥 / 人与 wizard 的单聊 💬 / 频道 #️⃣ / 帖子 📄 / 只有 wizard 的 room 🧙 (与 wizard 默认头像同一个 emoji)。
   // 先分「有没有人参与」(isPeopleRoom, 与列表的「群聊 / 会话」分组、搜索的 group 同一口径: 绑定企微 / topic / 微信的 room 不管有没有人发过话都算有人);
   // 频道 (channel) 与帖子 (topic-post) 各有一个专属图标, 与群聊 / 单聊一眼分开 —— 它们是传输形态, 比成员数更能说明「这是什么 room」。
   // 其余有人的再分单聊 / 群聊: 单聊 = 恰好两位参与者、其中一位是人、且不是企微群 / topic 帖 (即绑定的 wecom-dm 那种: 一个人 + 一个 wizard) —— 这是唯一保留 💬 的特例;
