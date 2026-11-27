@@ -162,8 +162,8 @@ export interface HandoffDeps {
   uncut: (target: string, events: readonly string[]) => void;
   log: Logger;
   store?: JsonMap<Pending>;
-  /** self 等待的节拍 (测试注入用): 自然收口窗/打断后静置窗 / grace 每片等多久 / idle 判定的 ramp 与 confirm。 */
-  selfWait?: { sliceMs?: number; rampMs?: number; confirm?: number; graceMs?: number; settleMs?: number };
+  /** self 等待的节拍 (测试注入用): 自然收口窗/打断后静置窗 / grace 每片等多久 / 排队多久判 pane 卡死 / idle 判定的 ramp 与 confirm。 */
+  selfWait?: { sliceMs?: number; rampMs?: number; confirm?: number; graceMs?: number; settleMs?: number; stuckMs?: number };
   /** Esc 打断 target 在飞的那一轮 (与 stop_wizard 的那一下同源, 无 teardown)。没有它就退回
    *  旧的排队语义 (等这一轮自然收口), 不打断。 */
   interrupt?: (target: string) => Promise<{ ok: boolean; reason?: string }>;
@@ -256,11 +256,19 @@ const SELF_QUEUE_CAP_MS = 6 * 60 * 60_000;
 // 默认 graceMs=0, 调用即 Esc 打断直接交接 (要短窗自然收口的部署配 selfWait.graceMs>0,
 // sliceMs 是那窗口内的探测节拍)。欠着的每笔不因打断失效 —— 路由表记的欠账在新会话由
 // resumeOwed 逐笔续答, 切断那一轮的终句由 cut/uncut 扣着, 交接闸内的注入也都在新会话里等。
-// Esc 之后只等 pane 静置 (被切断的轮没有终句, 事件账不会落定) —— settle 只取「能证明静下来」
-// 的最小量 (探测 2.5s × 连续 2 次 ≈ 5s, 10s 含余量); 量不出来不硬切, 走下面的排队兜底。
+// Esc 之后只等 pane 静置 (被切断的轮没有终句, 事件账不会落定)。探测本身的最小量是
+// 2.5s × 连续 2 次 ≈ 5s, 但 Esc 之后 CLI 会先跑 Stop hook (LintBot / session-hooks-stop),
+// hook 跑着时底部是 spinner, paneIsBusy 判忙 —— 2026-11-27 dhtpm 实测: Esc 在 15:00:50.832,
+// hook 起跑 15:00:51.600 (窗内第 0.8s), 10s 窗耗尽时它还没收尾, 交接退回排队卡了 12 分钟。
+// 取 60s: 实测 Stop hook 的尾巴在 2–20s 量级, 60s 是它的三倍余量; 仍静不下来的交给下面
+// 有界的排队兜底, 不在这里硬切。
 export const SELF_GRACE_MS = 0;
 const SELF_GRACE_SLICE_MS = 10 * 1000;
-export const SELF_SETTLE_MS = 10 * 1000;
+export const SELF_SETTLE_MS = 60 * 1000;
+// Esc 之后已经没有在飞的一轮, 剩下的只有 hook / 收尾的尾巴; 排队兜底到这个时长还不闲,
+// 就只可能是 pane 真卡住 (弹窗挡着、探测误判、进程挂住)。2 分钟到点交失败 (含补偿与通知),
+// 不再留一条谁也不知道的死队记录。
+const SELF_PANE_STUCK_MS = 120_000;
 
 const briefPrompt = (focus?: string): string =>
   [
@@ -297,6 +305,10 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   /** 新一场的代数: 严格递增, 同毫秒的两次请求也分得开 (简报/续答的注入 id 按它区分)。 */
   const nextAt = (p?: Pending): number => Math.max(Date.now(), (p?.at ?? 0) + 1);
   const selfSliceMs = deps.selfWait?.sliceMs ?? SELF_WAIT_SLICE_MS;
+  const paneStuckMs = deps.selfWait?.stuckMs ?? SELF_PANE_STUCK_MS;
+  /** 只看 pane 本身闲没闲 (isBusy 极性)。Esc 之后必须用它: 被切断的轮没有终句, 事件账永远
+   *  pending, 拿 isBusy 等就是等死队 (见下面 waiting 分支的注释)。 */
+  const paneBusy = deps.paneIdle ? busyOf(deps.paneIdle) : deps.isBusy;
   const selfIdleOpts: IdleOpts = { rampMs: deps.selfWait?.rampMs, confirm: deps.selfWait?.confirm };
   // grace 探测不带 ramp: 检闲要快, 一个本来就闲的交接不能白等 ramp 那 20s。
   const graceIdleOpts: IdleOpts = { rampMs: 0, confirm: deps.selfWait?.confirm ?? 2 };
@@ -421,25 +433,29 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         if (deps.interrupt) {
           const esc = await deps.interrupt(p.target);
           deps.log.info({ mod: "handoff", target: p.target, ok: esc.ok, reason: esc.reason }, "handoff: Esc 打断在飞这一轮直接交接");
-          // waitForIdle 吃的是 isBusy 极性; paneIdle 是 true=闲, 得翻过来 (见 busyOf)。
-          const paneBusy = deps.paneIdle ? busyOf(deps.paneIdle) : deps.isBusy;
           const settle = await waitForIdle(p.target, paneBusy, deps.selfWait?.settleMs ?? SELF_SETTLE_MS, () => false, { rampMs: 0, confirm: 2 });
           const latest = adopt();
           if (latest) p = latest;
           if (settle.idle) return step({ ...p, stage: "restarting" });
           deps.log.warn({ mod: "handoff", target: p.target, reason: settle.reason }, "handoff: 打断后仍未静下来, 退回排队等待");
         }
-        // 没有 interrupt 能力 / Esc 没能让它静下来: 维持旧的排队语义兜底 (等这一轮自然收口,
-        // 无超时失败; SELF_QUEUE_CAP_MS 只把日志升到 warn, 不产生失败记录)。
+        // 没有 interrupt 能力 / Esc 没能让它静下来: 兜底继续**只看 pane 是否空闲**。
+        // 这里必须是 paneBusy 不能是 deps.isBusy: 被切断的那一轮永远不会有终句, 事件账永远
+        // pending, 用 isBusy 等就是等一支死队 (2026-11-27 实测这样卡了 12 分钟没人知道)。
+        // 有界: Esc 之后已没有在飞的一轮, 剩下的只有 hook / 收尾的尾巴, 超过 paneStuckMs
+        // 还不闲就只可能是 pane 真卡住 —— 交失败 (含补偿、cut/uncut 与通知它自己), 让调用方
+        // 重生或改派, 而不是无限期排队。
         for (let waited = 0; ; ) {
+          const slice = Math.min(selfSliceMs, paneStuckMs - waited);
           let w: IdleResult;
-          try { w = await idle(p, selfSliceMs, selfIdleOpts); }
+          try { w = await waitForIdle(p.target, paneBusy, slice, () => false, selfIdleOpts); }
           catch (e) { deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 排队探测失败, 继续等"); await sleep(5000); continue; }
           const fresh = adopt();
           if (fresh) { p = fresh; waited = 0; continue; }
           if (w.idle) return step({ ...p, stage: "restarting" });
-          waited += selfSliceMs;
-          deps.log[waited >= SELF_QUEUE_CAP_MS ? "warn" : "info"]({ mod: "handoff", target: p.target, waitedMs: waited }, "handoff: 仍在队列 (等当前这一轮收口; 是排队, 不是欠账)");
+          waited += slice;
+          if (waited >= paneStuckMs) return fail(p, 504, `pane 忙了 ${Math.round(waited / 1000)}s 都没闲下来 (停止探测), 交接没做成: 上下文没动, 需要重生或改派`);
+          deps.log[waited >= SELF_QUEUE_CAP_MS ? "warn" : "info"]({ mod: "handoff", target: p.target, waitedMs: waited }, "handoff: 仍在队列 (等 pane 静下来; 是排队, 不是欠账)");
         }
       }
       case "briefing": {

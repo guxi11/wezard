@@ -8,7 +8,7 @@ import { busyOf, createHandoffs, type Pending } from "../daemon/handoff.js";
 //   (2) 排队/briefing 的 idle 等待: pane 忙着反被当成已闲 → 在飞的一轮上硬 /clear → "submission unconfirmed"。
 //  现在: 两处都过 busyOf; 闲着 → 静置成立, 立刻重开; 忙着 → 老实排队, 不碰输入框。
 
-const mk = (o: { idleNow: () => boolean; settleMs: number }) => {
+const mk = (o: { idleNow: () => boolean; settleMs: number; stuckMs?: number }) => {
   const store = new Map<string, Pending>();
   const restarts: number[] = [];
   const escs: number[] = [];
@@ -25,7 +25,7 @@ const mk = (o: { idleNow: () => boolean; settleMs: number }) => {
     inject: async () => ({ ok: true }),
     owed: () => [], resume: async () => ({ ok: true }), notify: () => {}, uncut: () => {}, currentEvents: () => [], suppress: () => {},
     log: pino({ level: "silent" }),
-    selfWait: { sliceMs: 200, rampMs: 0, confirm: 1, settleMs: o.settleMs },
+    selfWait: { sliceMs: 200, rampMs: 0, confirm: 1, settleMs: o.settleMs, stuckMs: o.stuckMs },
     store: { get: (k: string) => store.get(k), set: (k: string, v: Pending) => void store.set(k, v), drop: (k: string) => void store.delete(k), all: () => Object.fromEntries(store) } as never,
   });
   return { h, store, restarts, escs };
@@ -59,5 +59,16 @@ assert.equal(await busyOf(async () => false)("w"), true);
   idle = true;
   await until(() => t.restarts.length > 0, 9_000);
   assert.equal(t.restarts.length, 1, "闲下来之后才重开");
+}
+// (3) Esc 后 pane 一直不闲: 排队有界 —— 到 stuckMs 交失败 (补偿落盘 + 通知它自己),
+//     不留一条没人知道的死队 (修之前: 无限期排队, 2026-11-27 实测卡了 12 分钟)
+{
+  // 探测节拍是固定的 2.5s (waitForIdle 先睡再判), 所以一片就要 2.5s: stuckMs 取一片。
+  const t = mk({ idleNow: () => false, settleMs: 500, stuckMs: 200 });
+  assert.equal(t.h.self("w", BRIEF).ok, true);
+  await until(() => !!t.store.get("w")?.failure, 9_000);
+  assert.equal(t.restarts.length, 0, "pane 一直忙: 一次 /clear 都不许按");
+  assert.equal(t.store.get("w")?.failure?.status, 504, "到点交失败, 不留死队");
+  assert.equal(t.store.get("w")?.failure?.compensated, true, "失败补偿已落盘");
 }
 console.log("handoff-polarity ok");

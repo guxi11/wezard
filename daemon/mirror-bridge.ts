@@ -6634,21 +6634,52 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const live = pane ? activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find(Boolean) : undefined;
     return live?.status === "idle" && hanging(target, live.sessionId, live.startedAt);
   };
+  /** 当前屏幕, 不含 scrollback (裸 -p, 纯文本): 弹窗/布局判据只认它 —— scrollback 里已答过的
+   *  confirm 永远在那儿, 拿它判 modal 会把 pane 永久判成「停在弹窗上」焊死 (同 detectModalPicker
+   *  上面 1367-1371 的警告)。 */
+  const capturePaneScreen = async (target: string): Promise<string> => {
+    const r = await runTmux(["capture-pane", "-t", target, "-p"]);
+    return r.ok ? r.stdout : "";
+  };
   const idleNow = async (target: string): Promise<boolean> => {
+    // 四个否决点各留一行 debug: 判错时只看这几条就知道卡在哪 (2026-11-27 事故: 一个 pane 被判忙
+    // 12 分钟, 四个分支一条日志都没有, 只能靠事后抓屏猜)。
     // An interrupt footer vetoes stale idle records; never strip its dim text.
-    if (await isBusy(target)) return false;
+    if (await isBusy(target)) {
+      log.debug({ target, pane: paneOf(target), why: "busy" }, "idleNow: 否 — 底部 spinner/中断提示");
+      return false;
+    }
     const registry = idleVerdict(target);
-    if (registry !== undefined) return registry;
+    if (registry !== undefined) {
+      if (!registry) log.debug({ target, pane: paneOf(target), why: "registry" }, "idleNow: 否 — 注册表说忙");
+      return registry;
+    }
     const pane = paneOf(target);
-    if (!pane || !(await tmuxPaneAlive(pane))) return false;
+    if (!pane || !(await tmuxPaneAlive(pane))) {
+      log.debug({ target, pane, why: "no-live-pane" }, "idleNow: 否 — pane 不在了");
+      return false;
+    }
     const { cap, box } = await readPaneInput(pane);
-    if (paneIsBusy(cap) || isModalPane(cap).modal) return false;
+    if (paneIsBusy(cap)) {
+      log.debug({ target, pane, why: "pane-busy" }, "idleNow: 否 — 抓屏里有 spinner/中断提示");
+      return false;
+    }
+    // modal 只认当前屏幕: readPaneInput 带 -S -24 会读进 24 行 scrollback。
+    const modal = isModalPane(await capturePaneScreen(pane));
+    if (modal.modal) {
+      log.debug({ target, pane, why: "modal", title: modal.title }, "idleNow: 否 — 屏上有弹窗");
+      return false;
+    }
     // 注册表说不出 (codebuddy 的注册表没有 status) 时, 转录里这一轮紧跟正文落了轮终记录
     // (turn-metrics) 就是确定闲了, 不必再认出输入框 —— 只读屏曾把闲了 5 分钟的 owner 一直
     // 判成不闲, 回执卡在收件箱里直到它下一轮结束。CLI 退回 shell 的 pane 照旧不算。
     const path = jsonlOf(target);
     if (path && turnClosed(path)) return !(await paneRunsShell(pane));
-    return !!cap.trim() && box.known;
+    if (!(cap.trim() && box.known)) {
+      log.debug({ target, pane, why: "no-composer", boxKnown: box.known, capLen: cap.length }, "idleNow: 否 — 认不出输入框");
+      return false;
+    }
+    return true;
   };
 
   const paneAliveFor = async (target: string): Promise<boolean> => {

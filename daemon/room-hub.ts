@@ -79,6 +79,11 @@ export const REMIND_TEXT = (ids: readonly string[]): string =>
 export const STOP_TEXT = (ids: readonly string[]): string =>
   "[wezard] 结束这一轮之前: 唤醒你的 " + ids.join(", ") + " 还没交代 —— 终句不会送到任何人那里。现在用 chat_reply({re, text, status}) 交代 (" + STATUS_GUIDE + "; 不需要答就 chat_reply({re}) 记 passed), 然后再结束。";
 
+/** 判忙多久算「不是这一轮」: 正常一轮的收口在秒级到分钟级, 5 分钟还贴不进去就只可能是
+ *  探测误判或会话本身卡住 (2026-11-27 实测: 一次 handoff 卡死连带 5 条唤醒静默 12 分钟,
+ *  全程只有一行 info)。到点往 room 写一行告警并强制 Esc 后投递, 之后再每 5 分钟试一次。 */
+const BUSY_ESCALATE_MS = 5 * 60_000;
+
 export const createRoomHub = (p: HubPorts) => {
   const now = (): number => p.now?.() ?? Date.now();
   const turns = new Map<string, TurnWake>();      // uid → 本轮
@@ -87,6 +92,8 @@ export const createRoomHub = (p: HubPorts) => {
   const reminded = new Set<string>();              // duty key: 已提醒过 (轮终贴提醒 / Stop hook 拦一次)
   const stopChecked = new Map<string, number>();   // uid → 它的 Stop hook 最近一次来问的时刻
   const busyNoted = new Set<string>(); // 已打过「目标忙」info 的 uid, 投成功或不忙时清掉
+  const busySince = new Map<string, number>(); // uid → 连续判忙的起点 (升级判据)
+  const escalated = new Set<string>();         // uid → 这一场卡忙已写过告警行 (投成功/不忙时清掉)
   const replyHintGiven = new Set<string>(); // uid → 已随投递附过「用 chat_reply 交代」半句 (本进程内不再附; 重启重给一次)
   const failedAs = new Map<string, PasteResult>(); // uid → 上次投递失败的结果 (只在状态变化时打 warn, 30s 重踢不刷屏)
   let running: Promise<void> | undefined;
@@ -314,16 +321,38 @@ export const createRoomHub = (p: HubPorts) => {
     // 只有活着的 pane 才需要等它闲 (或按 interrupt 先 Esc)。
     const live = p.live ? await p.live(w.target) : true;
     if (live && !(await p.idle(w.target))) {
-      if (!wantsInterrupt) {
+      const since = busySince.get(uid) ?? now();
+      busySince.set(uid, since);
+      const stuckMs = now() - since;
+      if (!wantsInterrupt && stuckMs < BUSY_ESCALATE_MS) {
         if (!busyNoted.has(uid)) {
           busyNoted.add(uid);
           p.log?.info({ uid, target: w.target, msgs: [...rooms.values()].flat().map((r) => r.id) }, "room: 目标忙, 等它这一轮结束");
         }
         return;
       }
+      // 判忙超过阈值: 不再无限等 (探测误判时它会静默卡到 pane 消失)。先往 room 写一行
+      // 告警 (人看得见, 不只留 info 日志), 再按 interrupt 语义强制 Esc 后投递。
+      // 之后每 BUSY_ESCALATE_MS 再试一次, 不做成每 30s 一次的 Esc 风暴。
+      const msgs = [...rooms.values()].flat().map((r) => r.id);
+      if (!escalated.has(uid)) {
+        escalated.add(uid);
+        p.log?.warn({ uid, target: w.target, stuckMs, msgs }, "room: 判忙超时, 强制投递");
+        for (const room of rooms.keys()) {
+          if (!state(room)) continue;
+          append(room, {
+            author: DAEMON, kind: "system", origin: "daemon",
+            text: "[wezard] " + p.nameOf({ kind: "wizard", id: uid }) + " 判忙已 " + Math.round(stuckMs / 60_000)
+              + " 分钟, 唤醒 (" + msgs.join(", ") + ") 一直投不进去 —— 已强制 Esc 后投递; 若它仍不动, 用 spawn_wizard 同名重生它",
+          });
+        }
+      }
+      busySince.set(uid, now());
       await p.interrupt(w.target); // 先 Esc 打断再投, 不拆 pane (§3b I-1); 被打断那一轮的 duty 不关
     }
     busyNoted.delete(uid);
+    busySince.delete(uid);
+    escalated.delete(uid);
     const { text, seen, msgs, hintGiven, shown } = render(uid, rooms);
     const res = await p.paste(w.target, text, p.tailOf?.(w.target, [...rooms.values()].flat()));
     if (res === "ok") {
