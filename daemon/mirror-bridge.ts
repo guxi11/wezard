@@ -170,7 +170,7 @@ const findJsonlBySid = (sid: string, only?: CliBackend): string | undefined => {
       if (b.name === "codex") return codexSessions(root).filter((x) => x.sessionId === sid).map((x) => x.jsonlPath);
       try { return readdirSync(root).map((d) => join(root, d, sidFile)); } catch { return []; }
     })
-    .flatMap((p) => { try { return [{ p, m: statSync(p).mtimeMs }]; } catch { return []; } })
+    .flatMap((p) => { const st = statSync(p, { throwIfNoEntry: false }); return st ? [{ p, m: st.mtimeMs }] : []; })
     .sort((a, b) => b.m - a.m)[0]?.p;
 };
 
@@ -1003,14 +1003,22 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
   // stale sibling behind under copy-then-delete semantics; the destination wins).
   const existing = (): string | undefined =>
     candidates
-      .flatMap((p) => { try { return [{ p, m: statSync(p).mtimeMs }]; } catch { return []; } })
+      .flatMap((p) => { const st = statSync(p, { throwIfNoEntry: false }); return st ? [{ p, m: st.mtimeMs }] : []; })
       .sort((a, b) => b.m - a.m)[0]?.p;
 
   // Live path: a known candidate if one exists; else the file relocated — find
   // it by sid and cache so subsequent round-trips are a pure stat pick (no rescan).
+  // Sid 重搜退避 (2026-11-27): 整体 miss 时每秒全目录重扫 (readdir + stat × 项目目录数)
+  // 曾是 daemon CPU 的大头 —— 退避到 SID_RESEARCH_BACKOFF_MS 一次。候选路径的 stat 照旧
+  // 每秒 (drain 直调 existing), 文件回原路径 1s 内即发现; 搬去别的目录本发生在文件存在
+  // 期间, 只是重定位的发现最多晚一个退避窗, 行不丢 (offset 连续)。
+  const SID_RESEARCH_BACKOFF_MS = 30_000;
+  let lastSidResearchAt = 0;
   const resolveLive = (): string | undefined => {
     const known = existing();
     if (known) return known;
+    if (Date.now() - lastSidResearchAt < SID_RESEARCH_BACKOFF_MS) return undefined;
+    lastSidResearchAt = Date.now();
     const found = findJsonlBySid(deps.sessionId, backendForPath(deps.jsonlPath));
     if (found && !candidates.includes(found)) candidates.push(found);
     return existing();
@@ -5429,8 +5437,22 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     restored = (async () => {
       const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}\t#{window_name}\t#{pane_pid}"]);
       const panes = snap.ok ? parsePaneList(snap.stdout) : undefined;
-      await mapLimit(persistedKeys, RESTORE_CONC, (principal) => restoreFromStore(principal, panes));
-      log.info({ restored: persistedKeys.length, panes: panes?.size ?? -1 }, "mirror: boot restore done");
+      // CPU (2026-11-27): 每条挂载 = 一条 1s drain 轮询; transcript 已不存在的死绑定更会
+      // 每秒各触发一次 findJsonlBySid 全目录重搜 (readdir + stat × 项目目录数)。上千条
+      // 全量 eager restore 曾把 daemon 打到 70~110% CPU。boot 只挂「近期写过 transcript
+      // 的、或 pane 还活着的 (含 transcript 未落盘的新生 spawn)」; 其余绑定留在 store,
+      // 按需 restore 照旧 (dispatch / injectText 的懒路径), hasMirrorTarget 本就把 store
+      // 绑定算作 attached —— 闲置会话在下一条入站/唤醒时才重新起 tail, 连续性不变。
+      const EAGER_MTIME_MS = 7 * 24 * 3600_000;
+      const eagerKeys = persistedKeys.filter((principal) => {
+        const rec = persisted[principal];
+        if (!rec) return false;
+        const st = statSync(expandHome(rec.jsonlPath), { throwIfNoEntry: false });
+        if (st) return Date.now() - st.mtimeMs < EAGER_MTIME_MS;
+        return !!(rec.tmuxPane && panes?.has(rec.tmuxPane));
+      });
+      await mapLimit(eagerKeys, RESTORE_CONC, (principal) => restoreFromStore(principal, panes));
+      log.info({ restored: eagerKeys.length, dormant: persistedKeys.length - eagerKeys.length, panes: panes?.size ?? -1 }, "mirror: boot restore done");
     })().catch((e: unknown) => { log.warn({ err: (e as Error).message }, "mirror: boot restore failed"); });
   } else if (cfg.wrc.mirror.sessionId.trim()) {
     // Pinned-sessionId fallback: only honor when the store is empty (otherwise
