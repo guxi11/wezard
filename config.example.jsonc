@@ -122,6 +122,11 @@
       "commandPatterns": [],     // 例: ["\\bpm2\\s+delete\\b"]
       "toolPatterns": [],        // 例: ["^mcp__prod__"]
       "pathPatterns": [],        // 例: ["/prod/"]
+      // workspace 内放行 (缺省 true): 「批量删除 find -delete / -exec rm」与「清空文件 truncate」的目标都能静态解析到
+      // 会话 cwd 之内时不弹危险卡。相对路径 / ~ / $HOME 先展开, .. 归一后再 realpath (软链出 workspace 不算);
+      // 带 $VAR / $(…) / 通配 / 子 shell / cd 之后的相对路径解不出; workspace 根本身、.git 内、workspace 外绝对路径一律不放行;
+      // find 须带筛选条件, 无筛选的 `find . -delete` 与 -L / -follow / -fprint* / 非 rm 的 -exec 照拦。false = 关掉。
+      "workspaceAllow": true,
       "allowPatterns": [],       // 例: ["\\brm\\s+-rf\\s+node_modules\\b"]  整条放行, 粗粒度 (任一命令匹配则全部危险规则一并豁免)
       // 凭据文件白名单 (缺省 []): 只豁免内置「凭据文件」这一条规则里的 拷贝 / 打码读 / 元数据,
       // 写入 / 外发 / 脚本直读永远拦, SSH·提权·强杀等其他规则不受影响; denyRules / askRules 照旧压过它。

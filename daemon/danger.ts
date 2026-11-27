@@ -11,6 +11,7 @@ import type { Config } from "../shared/config.js";
 import { COMMAND_KEYS, replBashCommands, replFallbackCommands } from "../shared/repl-script.js";
 import { posix } from "node:path";
 import { WRAPPER_NAMES, leadWords, scrubCommand, shellWords } from "./danger-scrub.js";
+import { WORKSPACE_SCOPED_RULES, destructiveWithinWorkspace } from "./danger-workspace.js";
 
 export interface DangerHit {
   /** 人类可读的规则名, 直接渲染到卡片上 — 用户要知道「哪一条」判定它危险。 */
@@ -544,8 +545,18 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown, ctx?
   const builtinPath = d.builtin ? PATH_RULES : [];
   const customPath = compile(d.pathPatterns);
 
+  // workspace 内放行 (approval.danger.workspaceAllow): 命中「批量删除 find / 清空 truncate」且这条命令里
+  // 每处该动作的目标都静态落在会话 cwd 之内 → 摘掉这两条再判其余规则 (同一条命令里别的危险动作照拦)。
+  const wsRules = d.workspaceAllow !== false ? builtinCmd.filter(([label]) => !WORKSPACE_SCOPED_RULES.has(label)) : builtinCmd;
+  const builtinHit = (c: string): DangerHit | undefined => {
+    const hit = firstHit(builtinCmd, c);
+    return hit && WORKSPACE_SCOPED_RULES.has(hit.rule) && wsRules !== builtinCmd && destructiveWithinWorkspace(c, ctx?.cwd)
+      ? firstHit(wsRules, c)
+      : hit;
+  };
+
   const cmdHit = (c: string, raw: string): DangerHit | undefined =>
-    firstHit(builtinCmd, c) ??
+    builtinHit(c) ??
     firstHit(compile(d.commandPatterns), raw) ??
     (d.builtin ? firstHit(credRules, c) : undefined) ??
     // 命令里的路径类规则只留「命令即路径」的两条 (系统目录 / 家目录根, 锚定整串开头)。

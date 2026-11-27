@@ -231,6 +231,13 @@ const Danger = z.object({
   commandPatterns: z.array(z.string()).default([]).describe("危险 Bash 命令正则 (大小写不敏感)"),
   toolPatterns: z.array(z.string()).default([]).describe("危险工具名正则"),
   pathPatterns: z.array(z.string()).default([]).describe("危险路径正则"),
+  workspaceAllow: z.boolean().default(true).describe(
+    "workspace 内放行 (默认开): 「批量删除 find -delete / -exec rm」与「清空文件 truncate」的目标都能静态解析到该会话工作目录 (cwd) 之内时不弹危险卡。"
+    + "判定口径 (任一过不了就照旧发卡): 相对路径 / ~ / $HOME 先展开, `..` 先归一再比, 再 realpath (软链指到 workspace 外不算); 带 $VAR / $(…) / 通配 / 子 shell / cd 之后的相对路径解不出, 不算; "
+    + "workspace 根本身 (truncate .)、任何 `.git` 内目标、workspace 外的绝对路径不放行; find 须带筛选条件 (-name / -path / -newer / -mtime …), 无筛选的 `find . -delete` 照拦, -L / -follow / -fprint* / 非 rm 的 -exec 照拦。"
+    + "只摘这两条规则 —— 同一条命令里的别的危险动作 (sudo / 强杀 / 凭据文件 …) 不受影响; rm / git 丢弃改动本来就不在危险名单里。false = 关掉, 回到只按命令文本判。"
+    + "仅对带会话 cwd 的 hook 调用生效 (CodeBuddy 原生框代按没有 cwd, 不适用)。热生效: 经 config_set 改立即生效。",
+  ),
   allowPatterns: z.array(z.string()).default([]).describe("豁免正则, 优先级最高 (整条调用放行, 粗粒度: 任一命令匹配则这次调用的所有危险规则一并豁免 —— 只想放行凭据文件的读 / 拷贝请用 credentialAllow)"),
   credentialAllow: z.array(z.union([
     z.string(),

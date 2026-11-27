@@ -59,14 +59,14 @@ const approve = makeApproveHandler({
   flushBeforeCard: async () => undefined,
   nativeModal: { hasPane: () => false, answer: async () => ({ ok: false }), cancel: async () => ({ ok: false }) },
 });
-// 逐个投 10 个危险工具调用 (rm 工作区路径 → danger 档 → 必发卡)
+// 逐个投 10 个危险工具调用 (find -delete 删 cwd 之外的目录 → danger 档 → 必发卡; 目标在 cwd 内的会被 workspaceAllow 放行, 不能当样例)
 const tools = ["Bash", "Bash", "Bash", "Bash", "Bash", "Bash", "Bash", "Bash", "Bash", "Bash"];
 const errors: string[] = [];
 for (let i = 0; i < tools.length; i++) {
   approve(mkReq({
     session_id: "sess-nonmember-" + i,
     tool_name: "Bash",
-    tool_input: { command: "find /Users/zyy/develop/some -name 'wip-" + i + ".log' -delete", description: "批量删除 " + i },
+    tool_input: { command: "find /Users/zyy/develop/other -name 'wip-" + i + ".log' -delete", description: "批量删除 " + i },
     cwd: "/Users/zyy/develop/some",
   }) as never, mkRes()).catch((e) => errors.push(String(e)));
 }
