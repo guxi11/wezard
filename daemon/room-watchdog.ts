@@ -33,6 +33,12 @@ import { holderOf, openDuties, type RoomState } from "../shared/room.js";
 export const parsePaneIds = (stdout: string): string[] =>
   stdout.split("\n").map((l) => l.trim()).filter(Boolean);
 
+/** 看门狗认的「该有的 pane」: 只有此刻有活 attach 的 target 才算 —— idle-reap / sleepPane 收掉 pane 后
+ *  store 里还留着旧 pane id (绑定与身份要保留), 把它当「意外消失」会每轮回头重建、刷系统提醒;
+ *  无 attach = 睡着的冷 wizard, 重生归 hub 的 paste。 */
+export const watchedPaneOf = (attached: boolean, paneId: string | undefined): string | undefined =>
+  attached && paneId ? paneId : undefined;
+
 /** 一次 list-panes 的结果: ok=false 或 panes 为空, 对看门狗都是「这一轮什么也别判」。 */
 export interface PaneScan { ok: boolean; panes?: readonly string[]; error?: string }
 

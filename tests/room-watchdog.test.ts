@@ -8,7 +8,7 @@ import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRoomStore } from "../daemon/rooms.js";
-import { createRoomWatchdog, parsePaneIds, REVIVE_MAX } from "../daemon/room-watchdog.js";
+import { createRoomWatchdog, parsePaneIds, REVIVE_MAX, watchedPaneOf } from "../daemon/room-watchdog.js";
 import { DAEMON, openDuties, type Who } from "../shared/room.js";
 import { uid } from "./room-fixture.js";
 
@@ -418,6 +418,32 @@ const mkWd = (o: {
   clock += 6 * 60_000;
   await wd.scan();            // 现在够了 → 补
   assert.equal(idle, 2, "宽限一轮后才补判闲");
+}
+
+// ── ⑪ idle-reap / sleep 之后 store 里留着旧 pane id: 无 attach 当冷 wizard, 看门狗不写 pane-revive ──
+// wizardOf 的接线与 daemon/index.ts 同形 (watchedPaneOf(hasAttach, sessionInfo.tmuxPane))。
+{
+  assert.equal(watchedPaneOf(false, "%9"), undefined, "⑪ 无 attach: 旧 pane id 不交出");
+  assert.equal(watchedPaneOf(true, "%9"), "%9", "⑪ 有 attach: 交出 pane id");
+  assert.equal(watchedPaneOf(true, ""), undefined, "⑪ 有 attach 但 pane 空 = 冷");
+
+  const run = async (attached: boolean) => {
+    const { store, room } = mk();
+    setupDuty(store, room, W);
+    const wiz: Wiz = { [W]: { target: "chat:wrG", name: "w", paneId: watchedPaneOf(attached, "%9") } }; // store 旧 id = %9, 它已不在 tmux
+    const { lines, log } = mkLog();
+    const { wd } = mkWd({ store, wiz, panes: () => ["%1"], log });
+    await wd.scan();            // 基线
+    lines.length = 0;
+    // 反复多拍 (≈ 每 65 分钟刷一条的真实症状): 无 attach 一条都不许写。
+    for (let i = 0; i < 4; i++) { clock += 6 * 60_000; await wd.scan(); clock += 60_000; await wd.scan(); }
+    return { n: revivesIn(store, room).length, cold: lines.filter((l) => l.fields.mod === "room-watchdog").some((l) => (l.fields.cold as number) > 0) };
+  };
+  const reaped = await run(false);
+  assert.equal(reaped.n, 0, "⑪ reap/sleep 后 (无 attach) 看门狗不写 pane-revive");
+  assert.ok(reaped.cold, "⑪ 无 attach 计入汇总的 cold");
+  const gone = await run(true);
+  assert.ok(gone.n >= 1, "⑪ 仍 attach 却 pane 意外消失: 两次确认后照旧重建");
 }
 
 console.log("room-watchdog: parse fixture+分隔符; 基线零动作; 两次确认后重建 pane (duty 不关, 封顶 REVIVE_MAX)/pane 回来不重建; 停摆与恢复; 一次扫描一行; 冷 wizard 与探活无定论不清账");

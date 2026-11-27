@@ -55,7 +55,7 @@ import { openShortIdLog } from "./short-id-log.js";
 import { bindCandidates, planBind, planChannelBackfill, planFork, planUnbind, pendingFirstTouches, sourceRoomOf } from "./room-bind.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { repairStewardInstances, unspawnedStewards } from "./steward-repair.js";
-import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
+import { createRoomWatchdog, parsePaneIds, watchedPaneOf } from "./room-watchdog.js";
 import { pruneLeaveOps, selectRoomPrune } from "./room-prune.js";
 import { createOverdueScan } from "./room-overdue.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
@@ -2602,7 +2602,8 @@ const main = async (): Promise<void> => {
       },
       wizardOf: (uid) => {
         const w = roomWizardOf(uid);
-        return w ? { target: w.target, name: w.name, paneId: m.sessionInfo(w.target)?.tmuxPane } : undefined;
+        // 只在有活 attach 时交出 pane id: reap / sleep 后 store 里的旧 id 不是「意外消失」, 是睡着 (冷)。
+        return w ? { target: w.target, name: w.name, paneId: watchedPaneOf(m.hasAttach(w.target), m.sessionInfo(w.target)?.tmuxPane) } : undefined;
       },
       isBusy: (target) => m.isBusy(target),
       rooms: roomStore.ids,

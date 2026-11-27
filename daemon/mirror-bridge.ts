@@ -2840,6 +2840,9 @@ export interface MirrorBridge {
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
   sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; effort: string; tmuxPane: string; contextTokens: number } | undefined;
+  /** 此刻是否有活的 attach (本进程正镜像它的 pane)。`sessionInfo().tmuxPane` 无 attach 时会回落到 store 里的旧 pane id
+   *  (idle-reap / sleep 不碰 store), 只想知道「pane 还该不该在」的调用方 (room 看门狗) 要先问这个。 */
+  hasAttach: (target: string) => boolean;
   /** Identity read from the session actually attached to the current input pane. */
   inputSessionInfo: (target: string) => { sessionId: string; jsonlPath: string } | undefined;
   /** Every target key of `target`'s chat (default + every `#tag`), live or
@@ -8254,6 +8257,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     newSession,
     cloneSession,
     sessionInfo,
+    hasAttach: (target) => byTarget.has(target),
     inputSessionInfo,
     setCharterProvider,
     armCharter,

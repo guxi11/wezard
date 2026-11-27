@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **room 看门狗不再对 idle-reap / sleep 掉的 pane 每 ~65 分钟刷一条「pane-revive」系统提醒 (admin 2026-11-27「修改，a」)** — idle-reap (`reapIdle`) / `sleepPane` 收掉 pane 但按设计保留 `store.tmuxPane` 旧 id, `sessionInfo` 在无 attach 时回落到它, 看门狗 `wizardOf` 因此把「睡着」当成「pane 意外消失」, 两次确认后写 `sys:"pane-revive"` 唤醒。现在 mirror 暴露只读 `hasAttach(target)`, 看门狗接线经纯函数 `watchedPaneOf(attached, paneId)` 只在有活 attach 时交出 pane id, 否则按冷 wizard 计入汇总 `cold` (重生归 hub 的 paste); 仍 attach 却 pane 意外消失的真失联路径不变 (两次确认 + 重建, 封顶 `REVIVE_MAX`)。测试 `tests/room-watchdog.test.ts` ⑪。
 - **机器人 WS 断线时不再静默放行 (Security; admin 2026-11-27「改」)** — 企微 WS 没连上 (或卡因断线没发出去) 时 `daemon/approval.ts` 原先直接回 `allow` (`ws_disconnected:auto_allow`), 危险名单 / `askRules` 也不例外, 与「绝不静默放行」口径冲突。现在 `botDown` 回新决定 `pass` (只发给 hook, 同 `retry`): `hooks/pre-tool-use.sh` 译成「无输出退出」, 与 hook 够不着 daemon 同口径, 交回 CLI 自己的权限流程 (允许规则命中就跑, 否则弹本地原生框); `.claude/**` 守卫在场、普通工具、危险 / `askRules` 一视同仁。Codex: `PreToolUse` 没有 ask → 普通工具 deny, `PermissionRequest` (沙箱权限) 由 `systemMessage` 回到 Codex 原生提示 (原先 deny)。没有新增开关, 也不走 `fallbackOnError` (设成 `allow` 同样换不来断线放行); 想断线期间也由 CLI 全权处理仍用 `approval.enabled:false` / `wezard use cli`。`botDown` 导出并去掉 `guardActive` / `nativePermission` 参数。测试 `tests/bot-down.test.ts` (普通工具 / askRules / danger / codex 两事件 → `pass`, 不发卡), `tests/codex-approval.test.ts` 断线断言改为原生提示; `审批配置.md` / `README.md` 对应说明改成新行为。
 
 ### Changed
